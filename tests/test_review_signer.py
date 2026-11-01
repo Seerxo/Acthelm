@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,8 +37,9 @@ VALID = {"verdict": "APPROVE", "fingerprint": packet()["fingerprint"], "findings
 class Reasoner:
     """Stands in for company-reasoner /run: records exactly what the signer asked."""
 
-    def __init__(self, verdict="APPROVE", output=None, ok=True, fail=None):
+    def __init__(self, verdict="APPROVE", output=None, ok=True, fail=None, provider="claude"):
         self.verdict, self.output, self.ok, self.fail, self.calls = verdict, output, ok, fail, []
+        self.provider = provider
 
     def __call__(self, body):
         self.calls.append(body)
@@ -47,7 +49,7 @@ class Reasoner:
         out = self.output if self.output is not None else {
             "verdict": self.verdict, "fingerprint": p["fingerprint"], "findings": []}
         # The real company-reasoner /run payload: asdict(ProviderResult) + health, with no "ok" key.
-        return {"provider": "codex", "health": "AVAILABLE" if self.ok else "QUOTA_EXHAUSTED", "output": out}
+        return {"provider": self.provider, "health": "AVAILABLE" if self.ok else "QUOTA_EXHAUSTED", "output": out}
 
 
 @pytest.fixture
@@ -76,8 +78,8 @@ def test_it_signs_only_the_reviewers_own_answer_for_this_packet(k, verdict):
     assert status == 200 and body["attestation"]["verdict"] == verdict
     call, = reasoner.calls
     assert call["prompt"].startswith(rg.RELEASE_REVIEW_PROMPT) and call["max_turns"] == 1
-    assert call["schema"] == rg.RELEASE_REVIEW_SCHEMA and call["provider"] == "codex"
-    policy = {"reviewer_keys": {"codex": k["reviewer"][1]}, "coders": ["claude"]}
+    assert call["schema"] == rg.RELEASE_REVIEW_SCHEMA and call["provider"] == "claude"
+    policy = {"reviewer_keys": {"claude-reviewer": k["reviewer"][1]}, "coders": ["claude"]}
     review = {"attestation": body["attestation"], "signature": body["signature"]}
     if verdict == "APPROVE":
         assert rg.verify_review(review, packet(), policy, NOW)
@@ -226,6 +228,8 @@ def test_the_signer_container_is_isolated():
     assert COMPOSE["networks"]["review-net"]["internal"] is True           # no route out
     assert not any("docker.sock" in v for v in s["volumes"])
     assert "/etc/review-signer:/run/review-signer:ro" in s["volumes"]      # key mounted read-only
+    assert "/var/lib/review-signer:/var/lib/review-signer" in s["volumes"]  # its own findings log, nothing else
+    assert rs.FINDINGS_LOG.startswith("/var/lib/review-signer/")             # fixed in code, on that volume
     assert set(s["environment"]).isdisjoint({"DATABASE_URL", "GH_TOKEN", "TELEGRAM_BOT_TOKEN", "POSTGRES_PASSWORD",
                                              "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_2",
                                              "COMPANY_API_TOKEN_DESK"})
@@ -259,9 +263,9 @@ def test_it_signs_the_payload_company_reasoner_really_returns(k):
     (HTTP 502 on the real host, gateway install 2026-10-22, B-11)."""
     from app import providers, reasoner as rsn
 
-    class Codex(providers.Provider):
+    class Claude(providers.Provider):
         def __init__(self):
-            super().__init__(name="codex", binary="codex", environ={})
+            super().__init__(name="claude", binary="claude", environ={})
 
         def health_check(self):
             return providers.Health.AVAILABLE, None
@@ -269,24 +273,161 @@ def test_it_signs_the_payload_company_reasoner_really_returns(k):
         def _run(self, prompt, schema, *, cwd, timeout_s, max_turns):
             p = json.loads(prompt[len(rg.RELEASE_REVIEW_PROMPT):])
             verdict = {"verdict": "APPROVE", "fingerprint": p["fingerprint"], "findings": []}
-            return providers.ProviderResult("codex", providers.Health.AVAILABLE, output=verdict)
+            return providers.ProviderResult("claude", providers.Health.AVAILABLE, output=verdict)
 
     def via_reasoner(body):
-        status, payload = rsn.run({"codex": Codex()}, body)
+        status, payload = rsn.run({"claude": Claude()}, body)
         assert status == 200 and "ok" not in payload
         return json.loads(json.dumps(payload))          # exactly what crosses the wire
 
     status, answer = signer(k, via_reasoner).handle(request(k))
     assert status == 200
-    policy = {"reviewer_keys": {"codex": k["reviewer"][1]}, "coders": ["claude"]}
-    assert rg.verify_review(answer, packet(), policy, NOW)["reviewer"] == "codex"
+    policy = {"reviewer_keys": {"claude-reviewer": k["reviewer"][1]}, "coders": ["claude"]}
+    assert rg.verify_review(answer, packet(), policy, NOW)["reviewer"] == "claude-reviewer"
 
 
 
-def test_the_release_reviewer_is_codex_and_nothing_on_the_host_can_switch_it():
-    """2026-10-23: a root-chosen reviewer (#423) let Claude review Claude-written code; Claude and Codex both
-    rejected release 2 for it, and it was withdrawn. The reviewer the signer asks is fixed in code."""
+def test_the_release_reviewer_is_fixed_in_code_and_nothing_on_the_host_can_switch_it():
+    """2026-10-23: a root-chosen reviewer (#423) was withdrawn. 2026-11-01 (founder): the reviewer becomes Claude,
+    still fixed in this reviewed code: provider and signed identity are constants; no environment or host file picks
+    them, and the identity is not the coder's (verify_review refuses a reviewer named like a coder)."""
     import inspect
+    assert (rs.REVIEW_PROVIDER, rs.REVIEWER_ID) == ("claude", "claude-reviewer")
     assert not hasattr(rs, "configured_provider") and not hasattr(rs, "PROVIDERS")
-    assert "provider" not in inspect.getsource(rs.main)
-    assert rs.Signer("k", "g", Reasoner()).provider == "codex"
+    src = inspect.getsource(rs.main)
+    assert "PROVIDER" not in src and "REVIEWER" not in src.replace("REVIEW_SIGNER", "").replace("REVIEW_FINDINGS", "")
+    s = rs.Signer("k", "g", Reasoner())
+    assert (s.provider, s.reviewer_id) == ("claude", "claude-reviewer")
+
+
+def test_an_answer_from_another_provider_is_never_signed(k):
+    status, answer = signer(k, Reasoner(provider="codex")).handle(request(k))
+    assert status == 502 and "attestation" not in answer
+
+
+def test_the_attestation_is_refused_unless_the_policy_enrolls_the_claude_reviewer(k):
+    status, answer = signer(k, Reasoner()).handle(request(k))
+    assert status == 200
+    with pytest.raises(rg.Refused, match="enrolled"):
+        rg.verify_review(answer, packet(), {"reviewer_keys": {"codex": k["reviewer"][1]}, "coders": ["claude"]}, NOW)
+    with pytest.raises(rg.Refused, match="coder"):
+        rg.verify_review(answer, packet(), {"reviewer_keys": {"claude-reviewer": k["reviewer"][1]},
+                                            "coders": ["claude-reviewer"]}, NOW)
+
+
+def test_each_verdict_is_recorded_without_the_diff_and_signing_stops_if_it_cannot_be(k, tmp_path):
+    log = tmp_path / "findings.jsonl"
+    reasoner = Reasoner(output={"verdict": "REJECT", "fingerprint": packet()["fingerprint"], "findings": ["why: x"]})
+    status, answer = signer(k, reasoner, findings_log=str(log)).handle(request(k))
+    assert status == 200 and answer["attestation"]["verdict"] == "REJECT"
+    entry = json.loads(log.read_text().splitlines()[-1])
+    assert entry["findings"] == ["why: x"] and entry["verdict"] == "REJECT" and entry["reviewer"] == "claude-reviewer"
+    assert entry["fingerprint"] == packet()["fingerprint"] and "diff" not in entry and "prompt" not in entry
+    assert DIFF not in log.read_text() and oct(log.stat().st_mode & 0o777) == "0o600"
+    log.chmod(0o644)                                           # a log others can read is never used
+    status, answer = signer(k, Reasoner(), findings_log=str(log)).handle(request(k, packet(nonce="cd" * 16)))
+    assert status == 502 and "attestation" not in answer
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(tmp_path / "elsewhere.jsonl")              # nor a link to another file
+    status, answer = signer(k, Reasoner(), findings_log=str(link)).handle(request(k, packet(nonce="ef" * 16)))
+    assert status == 502 and "attestation" not in answer
+
+
+def test_the_production_signer_refuses_to_sign_without_a_findings_log(k):
+    """main() requires the log: a verdict is never signed unrecorded. Findings may quote the diff, so the log is
+    0600 on the signer's own volume (checked above)."""
+    import inspect
+    assert "require_findings_log=True" in inspect.getsource(rs.main) and "findings_log=FINDINGS_LOG" in inspect.getsource(rs.main)
+    s = rs.Signer(str(k["reviewer"][0]), k["gateway"][1], Reasoner(), clock=lambda: NOW, require_findings_log=True)
+    status, answer = s.handle(request(k))
+    assert status == 503 and "findings log" in answer["error"]
+
+
+def test_an_unwritable_log_is_found_before_the_model_is_asked(k, tmp_path):
+    """A missing or wrongly owned log directory answers 503 (retried, never final) without spending a review."""
+    reasoner = Reasoner()
+    s = rs.Signer(str(k["reviewer"][0]), k["gateway"][1], reasoner, clock=lambda: NOW,
+                  findings_log=str(tmp_path / "missing" / "findings.jsonl"), require_findings_log=True)
+    status, answer = s.handle(request(k))
+    assert status == 503 and "cannot be written" in answer["error"] and reasoner.calls == []
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo", "hardlink"])
+def test_a_log_that_is_not_a_private_single_file_is_never_used(k, tmp_path, kind):
+    log = tmp_path / "findings.jsonl"
+    if kind == "directory":
+        log.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(log, 0o600)
+    else:
+        log.write_text(""); log.chmod(0o600); os.link(log, tmp_path / "other.jsonl")
+    status, answer = signer(k, Reasoner(), findings_log=str(log)).handle(request(k))
+    assert status == 502 and "attestation" not in answer
+
+
+def test_the_record_names_the_model_that_answered(k, tmp_path):
+    class WithModel(Reasoner):
+        def __call__(self, body):
+            return super().__call__(body) | {"model": "sonnet"}
+    log = tmp_path / "findings.jsonl"
+    status, _ = signer(k, WithModel(), findings_log=str(log)).handle(request(k))
+    assert status == 200 and json.loads(log.read_text())["model"] == "sonnet"
+
+
+def test_a_failed_write_leaves_no_partial_line_and_signs_nothing(k, tmp_path, monkeypatch):
+    log = tmp_path / "findings.jsonl"
+    assert signer(k, Reasoner(), findings_log=str(log)).handle(request(k))[0] == 200
+    before = log.read_bytes()
+    real_write, calls, inode = os.write, [], log.stat().st_ino
+    def short_then_enospc(fd, data):                     # only the log: half the record lands, then the disk is full
+        try:
+            is_log = os.fstat(fd).st_ino == inode
+        except OSError:
+            is_log = False
+        if not is_log:
+            return real_write(fd, data)
+        calls.append(len(data))
+        if len(calls) == 1:
+            return real_write(fd, data[: len(data) // 2])
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(rs.os, "write", short_then_enospc)
+    status, answer = signer(k, Reasoner(), findings_log=str(log)).handle(request(k, packet(nonce="cd" * 16)))
+    monkeypatch.setattr(rs.os, "write", real_write)
+    assert status == 502 and "attestation" not in answer and log.read_bytes() == before
+    assert signer(k, Reasoner(), findings_log=str(log)).handle(request(k, packet(nonce="ef" * 16)))[0] == 200
+    assert all(json.loads(line) for line in log.read_text().splitlines())   # every line is a whole record
+
+
+def test_concurrent_records_never_cut_each_other(k, tmp_path, monkeypatch):
+    """Two verdicts recorded at once: one write fails half-way and truncates back; the other, written meanwhile,
+    must survive whole (the log is serialised; model calls stay parallel)."""
+    log = tmp_path / "findings.jsonl"
+    log.write_text(""); log.chmod(0o600)
+    inode, real_write = log.stat().st_ino, os.write
+    first_half_written, failer = threading.Event(), {}
+    def faulty(fd, data):
+        try:
+            is_log = os.fstat(fd).st_ino == inode
+        except OSError:
+            is_log = False
+        if is_log and failer.get("thread") == threading.get_ident():
+            real_write(fd, data[: len(data) // 2])
+            first_half_written.set()
+            time.sleep(0.3)                                  # the other record gets every chance to interleave
+            raise OSError(28, "No space left on device")
+        return real_write(fd, data)
+    monkeypatch.setattr(rs.os, "write", faulty)
+    s = signer(k, Reasoner(), findings_log=str(log))
+    reqs = [request(k, packet(nonce=n * 16)) for n in ("ab", "cd")]
+    results = {}
+    def failing():
+        failer["thread"] = threading.get_ident()
+        results["a"] = s.handle(reqs[0])[0]
+    def succeeding():
+        first_half_written.wait(2)
+        results["b"] = s.handle(reqs[1])[0]
+    threads = [threading.Thread(target=failing), threading.Thread(target=succeeding)]
+    [t.start() for t in threads]; [t.join(10) for t in threads]
+    assert results == {"a": 502, "b": 200}
+    lines = log.read_text().splitlines()
+    assert len(lines) == 1 and json.loads(lines[0])["nonce"] == "cd" * 16   # whole, and not cut by the failure
