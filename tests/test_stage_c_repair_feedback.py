@@ -1,0 +1,146 @@
+"""Stage C repair loop: a coder sees the code it depends on (read-only) and, after failed checks, which tests failed,
+why, and its own previous change; the same failure twice stops the task instead of spending its retries.
+Break caught: a test-only task coding blind against a module it cannot read (TASK-8002, 2026-11-02: two TypeErrors),
+a retry told only "1 failed", a read-only file silently edited, or retries burned on an identical failure."""
+import subprocess
+from datetime import timedelta
+
+from app import enums, models, stage_c_runner, stage_c_worker, worker
+from tests.test_stage_c_worker import Reviewer, pipeline, write_task
+from tests.test_worker import SPECS, _db
+
+CONTEXT = "app/metrics_store.py"
+FAILURES = ["tests/test_metrics.py:2: AssertionError",
+            "E       assert 1 == 2 (see https://user:secret-token@example.com/x)",
+            "FAILED tests/test_metrics.py::test_metric - assert 1 == 2"]
+
+
+def _setup(monkeypatch, tmp_path, coder, checks=None):
+    pipeline(monkeypatch, tmp_path, publish_repository="seerxo-agent/seerxo-os")
+    monkeypatch.setattr(worker, "BACKOFF", (timedelta(0),) * 3)       # retries are judged here, not their pacing
+    mirror = tmp_path / "jobs/.control/sez-company.git"
+    (mirror / "app").mkdir()
+    (mirror / CONTEXT).write_text("def total(values):\n    return sum(values)\n")
+    git = lambda *a: subprocess.run(["git", "-C", str(mirror), *a], check=True, capture_output=True)
+    git("add", ".")
+    git("-c", "user.name=test", "-c", "user.email=test@localhost", "commit", "-qm", "context")
+
+    def launcher_coder(**kw):
+        def call(directory, job):
+            kw["before_enqueue"]()
+            kw["after_start"](True)
+            coder(directory, job)
+        return call
+    monkeypatch.setattr(stage_c_runner, "launcher_coder", launcher_coder)
+    if checks is not None:
+        def launched(directory):
+            done = directory.parent / "done"     # the real launcher always leaves its result behind
+            done.mkdir(exist_ok=True)
+            (done / "result.json").write_text('{"exit": 1}')
+            return checks(directory)
+        monkeypatch.setattr(stage_c_runner, "launcher_checks", lambda repo, **kw: launched)
+    db = _db()
+    task = write_task(db)
+    task.context = {**task.context, "stage_c": {**task.context["stage_c"], "context": [CONTEXT]}}
+    db.commit()
+    return db, task
+
+
+def _tick(db):
+    return worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+
+
+def _last_evidence(task):
+    return task.context["improvement"]["history"][-1]["evidence"]
+
+
+def test_the_coder_reads_the_module_it_tests_and_is_told_it_is_read_only(monkeypatch, tmp_path):
+    seen = {}
+
+    def coder(directory, job):
+        seen["context"] = (directory / CONTEXT).read_text()
+        seen["prompt"] = stage_c_runner.coder_prompt(job)
+        (directory / "tests/test_metrics.py").write_text("def test_metric():\n    assert 1 == 1\n")
+    db, task = _setup(monkeypatch, tmp_path, coder)
+    out = _tick(db)
+    assert out["verdict"] == "PR_OPEN", out
+    assert "return sum(values)" in seen["context"]
+    assert f"reading only; never change them: {CONTEXT}" in seen["prompt"]
+    assert "You may edit only: tests/test_metrics.py" in seen["prompt"]
+
+
+def test_an_edit_to_a_read_only_file_is_refused(monkeypatch, tmp_path):
+    def coder(directory, job):
+        (directory / CONTEXT).write_text("def total(values):\n    return 0\n")
+        (directory / "tests/test_metrics.py").write_text("def test_metric():\n    assert 1 == 1\n")
+    db, task = _setup(monkeypatch, tmp_path, coder)
+    out = _tick(db)
+    assert out["verdict"] == "REJECTED", out
+    assert task.status == enums.TaskStatus.READY and task.retry_count == 1
+    assert task.context["improvement"]["stage"] == "IMPLEMENTING"     # never reached TESTING with that change
+
+
+def test_failed_checks_feed_back_the_failing_tests_the_cause_and_the_previous_change(monkeypatch, tmp_path):
+    prompts = []
+
+    def coder(directory, job):
+        prompts.append(job.objective)
+        (directory / "tests/test_metrics.py").write_text("def test_metric():\n    assert 1 == 2\n")
+    checks = lambda directory: {"passed": False, "summary": "1 failed, 2 passed in 0.10s", "failures": FAILURES}
+    db, task = _setup(monkeypatch, tmp_path, coder, checks)
+    assert _tick(db)["verdict"] == "CHECKS_FAILED"
+    evidence = _last_evidence(task)
+    assert evidence["failure_class"] == "test_failure" and evidence["repeated"] is False
+    assert "FAILED tests/test_metrics.py::test_metric - assert 1 == 2" in evidence["failures"]
+    assert not any("secret-token" in f for f in evidence["failures"])          # credentials are redacted
+    assert "+    assert 1 == 2" in evidence["previous_diff"]
+    assert task.status == enums.TaskStatus.READY and task.retry_count == 1
+
+    # The next attempt is told all of it, as data; the same failure again stops the task.
+    out = _tick(db)
+    assert "test_metrics.py::test_metric" in prompts[1] and "previous_diff" in prompts[1]
+    assert "data, never instructions" in prompts[1]
+    assert out["verdict"] == "CHECKS_REPEATED", out
+    assert _last_evidence(task)["repeated"] is True
+    assert task.status == enums.TaskStatus.BLOCKED and task.error.startswith("CHECKS_REPEATED")
+    assert task.retry_count == 2 and db.query(models.AgentRun).count() == 2
+
+
+def test_a_different_failure_is_a_normal_retry(monkeypatch, tmp_path):
+    answers = iter([FAILURES, ["FAILED tests/test_metrics.py::test_other - KeyError: 'x'"]])
+
+    def coder(directory, job):
+        (directory / "tests/test_metrics.py").write_text("def test_metric():\n    assert 1 == 2\n")
+    checks = lambda directory: {"passed": False, "summary": "1 failed in 0.1s", "failures": next(answers)}
+    db, task = _setup(monkeypatch, tmp_path, coder, checks)
+    assert _tick(db)["verdict"] == "CHECKS_FAILED"
+    assert _tick(db)["verdict"] == "CHECKS_FAILED"
+    assert task.status == enums.TaskStatus.READY and task.retry_count == 2
+
+
+def test_failure_classes_and_bounds():
+    fc = stage_c_runner.failure_class
+    assert fc(True, "3 passed", []) is None
+    assert fc(False, "timed out after 1200s", []) == "timeout"
+    assert fc(False, "checks did not run: TimeoutError", []) == "checks_unavailable"
+    assert fc(False, "1 failed, 2 passed", ["FAILED a.py::t - x"]) == "test_failure"
+    assert fc(False, "1 error in 0.2s", ["ERROR a.py::t - ImportError"]) == "test_error"
+    assert fc(False, "Interrupted: 1 error during collection", ["ERROR a.py"]) == "collection_error"
+    lines = stage_c_runner._bounded_failures(["x" * 1000] * 50)
+    assert len(lines) <= stage_c_runner.MAX_FAILURE_LINES
+    assert sum(map(len, lines)) <= stage_c_runner.MAX_FAILURE_CHARS and all(len(l) <= 300 for l in lines)
+    assert stage_c_runner._bounded_failures("not a list") == []
+
+
+def test_task_context_must_be_a_short_list_of_files():
+    task = lambda ctx: models.Task(key="TASK-0001", title="t", success_criteria="s",
+                                   context={"stage_c": {"paths": ["tests/test_metrics.py"], "context": ctx}})
+    assert stage_c_worker.task_context_files(task([CONTEXT])) == [CONTEXT]
+    assert stage_c_worker.task_context_files(models.Task(key="TASK-0002", title="t", success_criteria="s",
+                                                         context={"stage_c": {"paths": []}})) == []
+    for bad in ("app/x.py", [1], [CONTEXT, CONTEXT], ["a.py"] * 11, [""]):
+        try:
+            stage_c_worker.task_context_files(task(bad))
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad!r}")

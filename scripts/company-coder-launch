@@ -354,8 +354,25 @@ def run_container(argv: list[str], prompt: bytes, timeout_s: int, name: str,
             raise error
         stdout, _stderr = streams["output"]
     # Model or test output is untrusted and may be large: only the last line, bounded.
-    tail = stdout.decode(errors="replace").strip().splitlines()[-1:] or [""]
-    return {"exit": proc.returncode, "timed_out": False, "summary": tail[0][:300]}
+    text = stdout.decode(errors="replace")
+    tail = text.strip().splitlines()[-1:] or [""]
+    return {"exit": proc.returncode, "timed_out": False, "summary": tail[0][:300], "failures": failure_lines(text)}
+
+
+FAILURE_LINE = re.compile(r"(?:FAILED|ERROR) \S|E {2,}\S|[\w./-]+\.py:\d+: \w")
+MAX_FAILURE_LINES, MAX_FAILURE_CHARS = 30, 300
+
+
+def failure_lines(text: str) -> list[str]:
+    """pytest's own failure lines (FAILED/ERROR node ids, `E` assertion lines, file:line), bounded, so a repair
+    attempt learns which test failed and why. handle() returns them for checks only, never model output."""
+    out = []
+    for line in text.splitlines():
+        if FAILURE_LINE.match(line):
+            out.append(line.rstrip()[:MAX_FAILURE_CHARS])
+            if len(out) >= MAX_FAILURE_LINES:
+                break
+    return out
 
 
 def launch_lock(job: Path, timeout_s: int = 10) -> int:
@@ -447,6 +464,8 @@ def handle(key: str, cfg: dict, runner=run_container) -> dict:
                     started()  # deterministic test runners represent a process that has started
                     result = runner(argv, prompt, req["timeout_s"], name)
             result["kind"] = req["kind"]
+            if req["kind"] != "checks":
+                result.pop("failures", None)   # a code job's stdout is model output
         except (Refused, ValueError, OSError, KeyError, subprocess.SubprocessError) as e:
             result = {"exit": None, "timed_out": False, "refused": f"{type(e).__name__}: {e}"[:300]}
         release_launch_lock()
