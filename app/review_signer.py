@@ -77,7 +77,9 @@ class Signer:
         """The log opened for appending, or None. Never follows a link; only a regular file with one name, owned by
         this uid and private to it, is used. A newly created file's directory entry is made durable."""
         try:
-            fd = os.open(self.findings_log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            # O_NONBLOCK: a FIFO planted at the path fails at once (ENXIO) instead of blocking the signer forever.
+            fd = os.open(self.findings_log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600)
         except OSError:
             return None
         info = os.fstat(fd)
