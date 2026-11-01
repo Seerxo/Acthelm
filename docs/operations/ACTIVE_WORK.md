@@ -1,14 +1,11 @@
 # Active work checkpoint
 
-- **Verified at (UTC):** 2026-11-01 19:25
-- **Repository / base main SHA:** `Seerxo/seerxo-os` / `6a038822dacbcff2b39e252014dbe78614ccfc53` (rebased to resolve the permanent-facts conflict after PR #44)
-- **Active task:** Introduce the founder-approved Acthelm product name and compatible `scripts/acthelm` CLI entry point on branch `chore/acthelm-brand`.
-- **Implementation:** README/tagline, contributor entry points, API title, Desk and PWA text updated; committed frontend assets rebuilt. `scripts/acthelm` shares the existing `companyctl` implementation.
-- **Local checks after rebase:** 156 Python tests passed, 2 expected failures; 153 frontend tests passed. Frontend build matches committed assets. Lint (warnings, no errors), docs and branch-name checks passed. Before rebase, 366 additional release-boundary tests passed; those are baseline evidence, not a claim about this head.
-- **Review / CI:** Independent Standards and Spec reviews found no remaining must-fix issues. Refresh hosted checks on the exact PR head before merge; local checks and model reviews are not merge authorization or hosted CI evidence.
-- **Repository rename:** PENDING. `Seerxo/acthelm` is the approved target; the current signed release identity and authorization comparisons still use `seerxo/seerxo-os`. Follow [DEC-009](DECISIONS.md#dec-009--acthelm-product-name) before changing the GitHub name.
-- **Production:** NOT CHANGED by this task. No live host evidence was inspected; the new branding and CLI are not claimed deployed.
-- **Founder-only actions:** Required merge authorization and any signed identity migration or production release. Domain purchase and DNS changes are outside this task.
-- **Exact next action:** Review the Acthelm branding PR on `chore/acthelm-brand`, require exact-head CI, and authorize its merge. Coordinate repository identity migration separately.
+- **Verified at (UTC):** 2026-11-02
+- **Repository / base main SHA:** `Seerxo/Acthelm` (renamed from `Seerxo/seerxo-os` on 2026-11-01, same repository) / `199644a82d0f2300bd47596a97a8ac4fd070de3d` (#47)
+- **Active task:** repository identity: code identities name `seerxo/acthelm` (Stage C, merge gate, credential boundary, control, main guard, CI usage, `scripts/merge-pr` by repository id). The publish fork stays `seerxo-agent/seerxo-os`.
+- **Production (2026-11-02):** runs `c4be8a5` under policy v4, whose signed identity is still `seerxo/seerxo-os` (release-host and gateway configs, ledger rebase of 2026-10-31). The identity migration (policy v5 naming `seerxo/acthelm`, host configs, ledger rebase) is PENDING and founder-signed; a merged code change does not perform it.
+- **Before deploying the identity change:** the production `company-os` Project row must name `seerxo/acthelm` (preflight `db_project_repository` fails closed otherwise); Stage C grants naming `seerxo/seerxo-os` are refused and must be re-issued; no task may be in PR_OPEN with a `seerxo/seerxo-os` PR URL (it would no longer be polled or merged).
+- **Founder-only actions:** merge authorization, policy v5 signature, ledger rebase, prepare, production release.
+- **Exact next action:** exact-head CI and founder merge decision for the identity PR; then rebuild the Stage C pilot from the merged main.
 
 This checkpoint is mutable current state. Refresh GitHub before use. A merged PR, successful CI, or public source SHA does not prove production deployment.

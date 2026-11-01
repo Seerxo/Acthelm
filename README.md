@@ -12,8 +12,8 @@ facts instead of memory.
 
 Status: **V1, in active development.** See [Project maturity](#project-maturity-and-known-limitations).
 
-Acthelm was previously named Seerxo OS. The repository remains `Seerxo/seerxo-os` while
-its signed release identity is migrated separately; see the [naming decision](docs/operations/DECISIONS.md#dec-009--acthelm-product-name).
+Acthelm was previously named Seerxo OS. The repository is `Seerxo/Acthelm` (renamed from
+`Seerxo/seerxo-os` on 2026-11-01); its signed production release identity is migrated separately; see the [naming decision](docs/operations/DECISIONS.md#dec-009--acthelm-product-name).
 
 ---
 

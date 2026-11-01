@@ -72,7 +72,23 @@ gh pr checks "$pr" --watch --interval 15 >/dev/null 2>&1 || true
 
 repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 repo=$(printf '%s' "$repo" | tr '[:upper:]' '[:lower:]')
-if [ "$repo" = "seerxo/seerxo-os" ]; then
+# The company repository is recognised by its GitHub id, never by name alone: a rename changes the name GitHub
+# reports, and a name match without the id is another repository. Either mismatch refuses instead of skipping
+# the Stage C gates below.
+COMPANY_REPO_ID=R_kgDOVXWcxg
+repo_id=$(gh repo view --json id -q .id) || { echo "merge-pr: repository id unavailable; refusing merge" >&2; exit 1; }
+company=""
+if [ "$repo_id" = "$COMPANY_REPO_ID" ]; then
+  [ "$repo" = "seerxo/acthelm" ] || {
+    echo "merge-pr: the company repository is now named $repo; update its identity before merging" >&2; exit 1; }
+  company=1
+else
+  case "$repo" in
+    seerxo/acthelm|seerxo/seerxo-os|seerxo/os)
+      echo "merge-pr: $repo is not the company repository (GitHub id differs); refusing merge" >&2; exit 1 ;;
+  esac
+fi
+if [ -n "$company" ]; then
   # Read the CI policy from the trusted PR base, never from the candidate branch being merged.
   base=$(gh pr view "$pr" --json baseRefName -q .baseRefName)
   policy_b64=$(gh api "repos/$repo/contents/agents/repository_guardian.yaml?ref=$base" --jq .content) || {
@@ -231,7 +247,7 @@ fi
 # Other repositories and ordinary branches keep the existing founder-invoked CI gate.
 stage_c_task=""
 branch=$(gh pr view "$pr" --json headRefName -q .headRefName)
-if [ "$repo" = "seerxo/seerxo-os" ]; then
+if [ -n "$company" ]; then
   identity=$(ssh "${COMPANY_SERVER:-company-os-host}" sudo companyctl stage-c identify-pr "$pr") || {
     echo "merge-pr: control-plane PR classification unavailable; refusing merge" >&2; exit 1; }
   stage_c_task=$(printf '%s' "$identity" | python3 -c '

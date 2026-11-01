@@ -1591,6 +1591,14 @@ def test_the_fetch_remote_must_be_the_configured_repository_on_github():
         assert not host.remote_is(url, "seerxo/seerxo-os"), url
 
 
+def test_the_remote_check_also_holds_for_the_renamed_repository():
+    """The live chain still names seerxo/seerxo-os (above); after its signed migration it names seerxo/acthelm."""
+    assert host.remote_is("https://github.com/Seerxo/Acthelm.git", "seerxo/acthelm")
+    for url in ("https://github.com/Seerxo/seerxo-os.git", "https://github.com/seerxo-agent/seerxo-os.git",
+                "https://github.com/Seerxo/Acthelm.git.evil"):
+        assert not host.remote_is(url, "seerxo/acthelm"), url
+
+
 def test_a_config_that_fetches_another_repository_is_refused(hw, monkeypatch):
     monkeypatch.setattr(host, "PIN_REMOTE", True)
     raw = {k: str(v) if isinstance(v, Path) else v for k, v in vars(hw.hcfg).items()} | {

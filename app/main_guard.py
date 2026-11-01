@@ -1,4 +1,4 @@
-"""B5 interim detective control: every commit on Seerxo/seerxo-os `main` must be a pull request merged by the founder.
+"""B5 interim detective control: every commit on Seerxo/Acthelm `main` must be a pull request merged by the founder.
 
 It DETECTS, it does not prevent: GitHub Free offers no branch protection for a private repository, so a Write token
 can still push or merge. Production is protected by the release gateway, never by this alarm. A GitHub login is not
@@ -16,7 +16,7 @@ import sys
 from app import enums, models
 from app.notify import fingerprint, notifier
 
-REPOSITORY = "Seerxo/seerxo-os"
+REPOSITORY = "Seerxo/Acthelm"
 BRANCH = "main"
 FOUNDERS = frozenset({"semihbugrasezer"})
 CHECKPOINT = "main-guard"
@@ -74,12 +74,12 @@ def run(db, fetch) -> dict:
     try:
         head, problems = check(fetch, last)
     except Exception as error:            # any failure is reported, never a silent pass
-        _record(db, "MAIN_GUARD_DEGRADED", enums.Severity.MEDIUM, "main guard could not check Seerxo/seerxo-os main",
+        _record(db, "MAIN_GUARD_DEGRADED", enums.Severity.MEDIUM, "main guard could not check Seerxo/Acthelm main",
                 f"{type(error).__name__}: {error}")
         return {"status": "DEGRADED", "error": type(error).__name__}
     if problems:
         _record(db, "MAIN_UNEXPECTED_CHANGE", enums.Severity.HIGH,
-                f"Seerxo/seerxo-os main changed outside a founder-merged PR ({len(problems)})", "; ".join(problems))
+                f"Seerxo/Acthelm main changed outside a founder-merged PR ({len(problems)})", "; ".join(problems))
     if row is None:
         db.add(models.ControlState(key=CHECKPOINT, value={"head": head}, updated_by="main-guard"))
     else:
@@ -106,7 +106,7 @@ def main() -> int:
     token = os.environ.get("GH_TOKEN", "")
     with SessionLocal() as db:
         if not token:
-            _record(db, "MAIN_GUARD_DEGRADED", enums.Severity.MEDIUM, "main guard could not check Seerxo/seerxo-os main",
+            _record(db, "MAIN_GUARD_DEGRADED", enums.Severity.MEDIUM, "main guard could not check Seerxo/Acthelm main",
                     "GH_TOKEN is not set in company-worker")
             print("main-guard: DEGRADED (no GH_TOKEN)")
             return 2
