@@ -40,3 +40,11 @@ production claims here.
   or address; the founder's SSH configuration must map the alias. Network controls that protect the host's
   co-hosted services are host-installed and founder-maintained, not shipped from this repository; see
   [`scripts/HOST_CONTROLS.md`](../scripts/HOST_CONTROLS.md).
+
+## FACT-05 · Product name
+
+- **Fact:** The product is **Acthelm**, with the tagline **Agents work. You steer.**
+  The founder approved the name, target repository `Seerxo/acthelm`, and CLI name
+  `acthelm` on 2026-11-01.
+- **Consequence for agents:** use Acthelm in product-facing text. Repository identity
+  migration is a separate operation; see [DEC-009](operations/DECISIONS.md#dec-009--acthelm-product-name).

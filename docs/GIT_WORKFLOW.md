@@ -1,4 +1,4 @@
-# GIT WORKFLOW — Seerxo OS
+# GIT WORKFLOW — Acthelm
 
 This is the canonical Git and pull request policy for routine development in the public
 [`Seerxo/seerxo-os`](https://github.com/Seerxo/seerxo-os) repository. The private

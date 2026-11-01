@@ -39,7 +39,7 @@ _FOUNDER_ONLY_TASK_STATES = (
 )
 
 app = FastAPI(
-    title="Company OS",
+    title="Acthelm",
     description="Internal company state, tasks, events, incidents and approvals.",
     version="0.1.0",
 )
@@ -1019,7 +1019,7 @@ def run_outer_loop(db: Session = Depends(get_db)) -> dict:
         "work": work,
         "skipped": skipped,
         "execution": "attended-herdr",
-        "note": "Run next_command on the laptop; Company OS does not store model credentials.",
+        "note": "Run next_command on the laptop; Acthelm does not store model credentials.",
     }
 
 

@@ -32,6 +32,6 @@ export function IncidentsPage() {
       </article>))}</div>
       : d.worker?.status === "NO_DATA" || !d.worker
         ? <EmptyState icon={<ShieldCheck />} title="No incidents recorded, not verified">The watchdog has not reported, so an empty list is not proof that production is healthy.</EmptyState>
-        : <EmptyState icon={<ShieldCheck />} title="No active incidents">Production problems recorded by the Company OS appear here.</EmptyState>}
+        : <EmptyState icon={<ShieldCheck />} title="No active incidents">Production problems recorded by Acthelm appear here.</EmptyState>}
   </>
 }

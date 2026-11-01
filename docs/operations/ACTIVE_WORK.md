@@ -1,13 +1,14 @@
 # Active work checkpoint
 
-- **Verified at (UTC):** 2026-10-30 12:56
-- **Repository / exact source SHA:** `Seerxo/seerxo-os` / `c9a476fc142845ece45993edb31183eb9f67b896` (`main` at verification)
-- **Documentation PR:** [#30](https://github.com/Seerxo/seerxo-os/pull/30); refresh its exact head on GitHub before relying on checks.
-- **Release phase:** Public development path is active. Private-to-public production cutover is `UNKNOWN`; no current signed host evidence was inspected.
-- **Completed:** Public PR #29 merged. The focused documentation PR is open.
-- **Active task:** Consolidate canonical agent memory and resolve stale repository workflow guidance.
-- **Blockers:** Exact-head CI for the latest documentation commit and independent review are not yet verified; see PR #30 for live checks. Production cutover remains `UNKNOWN` without signed host evidence.
-- **Founder-only actions:** Review and merge PR #30; approve any production cutover, signing, or deployment action.
-- **Exact next action:** Refresh exact-head checks and obtain independent review on PR #30; address findings before founder review/merge. Do not update the branch unless required by repository rules.
+- **Verified at (UTC):** 2026-11-01 19:25
+- **Repository / base main SHA:** `Seerxo/seerxo-os` / `6a038822dacbcff2b39e252014dbe78614ccfc53` (rebased to resolve the permanent-facts conflict after PR #44)
+- **Active task:** Introduce the founder-approved Acthelm product name and compatible `scripts/acthelm` CLI entry point on branch `chore/acthelm-brand`.
+- **Implementation:** README/tagline, contributor entry points, API title, Desk and PWA text updated; committed frontend assets rebuilt. `scripts/acthelm` shares the existing `companyctl` implementation.
+- **Local checks after rebase:** 156 Python tests passed, 2 expected failures; 153 frontend tests passed. Frontend build matches committed assets. Lint (warnings, no errors), docs and branch-name checks passed. Before rebase, 366 additional release-boundary tests passed; those are baseline evidence, not a claim about this head.
+- **Review / CI:** Independent Standards and Spec reviews found no remaining must-fix issues. Refresh hosted checks on the exact PR head before merge; local checks and model reviews are not merge authorization or hosted CI evidence.
+- **Repository rename:** PENDING. `Seerxo/acthelm` is the approved target; the current signed release identity and authorization comparisons still use `seerxo/seerxo-os`. Follow [DEC-009](DECISIONS.md#dec-009--acthelm-product-name) before changing the GitHub name.
+- **Production:** NOT CHANGED by this task. No live host evidence was inspected; the new branding and CLI are not claimed deployed.
+- **Founder-only actions:** Required merge authorization and any signed identity migration or production release. Domain purchase and DNS changes are outside this task.
+- **Exact next action:** Review the Acthelm branding PR on `chore/acthelm-brand`, require exact-head CI, and authorize its merge. Coordinate repository identity migration separately.
 
-This checkpoint is mutable current state. Refresh GitHub before use. A merged PR, successful CI, or public source SHA does not prove production deployment. Replace this checkpoint when the active task changes; keep completed evidence in its existing history record.
+This checkpoint is mutable current state. Refresh GitHub before use. A merged PR, successful CI, or public source SHA does not prove production deployment.
