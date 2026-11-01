@@ -106,7 +106,7 @@ function Costs() {
           { head: "Class", className: "text-sm", cell: i => humanize(i.class) },
           { head: "Note", className: "text-sm whitespace-normal text-muted-foreground", cell: i => i.note ?? i.purpose ?? "—" },
         ]} />
-      <p className="text-xs text-muted-foreground">Amounts are not recorded in Company OS, so no profit figure is shown. Classes come from agents/cost_policy.yaml.</p>
+      <p className="text-xs text-muted-foreground">Amounts are not recorded in Acthelm, so no profit figure is shown. Classes come from agents/cost_policy.yaml.</p>
     </div>
   )
 }

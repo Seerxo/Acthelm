@@ -4,11 +4,13 @@ import re
 import subprocess
 from pathlib import Path
 
+import pytest
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "companyctl"
+SCRIPTS = Path(__file__).parents[1] / "scripts"
 
 
-def test_snapshot_marks_its_freshness_deadline_and_runtime_provenance(tmp_path):
+@pytest.mark.parametrize("command", ["companyctl", "acthelm"])
+def test_snapshot_marks_its_freshness_deadline_and_runtime_provenance(tmp_path, command):
     fake = tmp_path / "docker"
     fake.write_text(r'''#!/usr/bin/env bash
 set -eu
@@ -23,7 +25,7 @@ esac
 ''')
     fake.chmod(0o755)
     env = os.environ | {"PATH": f"{tmp_path}:{os.environ['PATH']}", "REPO_DOCS": str(tmp_path / "docs")}
-    result = subprocess.run(["bash", str(SCRIPT), "snapshot"], env=env, text=True, capture_output=True)
+    result = subprocess.run([str(SCRIPTS / command), "snapshot"], env=env, text=True, capture_output=True)
     assert result.returncode == 0, result.stderr
 
     snapshot = (tmp_path / "docs" / "CURRENT_STATE.md").read_text()

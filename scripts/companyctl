@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# companyctl — founder and operator entry point (§133-§137).
+# acthelm — founder and operator entry point; companyctl remains compatible (§133-§137).
 #
 # The API is internal only (§109), so every call is routed through the container rather
 # than over a published port. Run this on <production-host>, or remotely:
@@ -36,7 +36,7 @@ require_up() {
 
 usage() {
   cat <<'USAGE'
-companyctl <command>
+acthelm <command>
 
   status              company state snapshot (JSON)
   boot                same as status; the call an agent makes first

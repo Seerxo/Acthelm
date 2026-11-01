@@ -1,6 +1,6 @@
 # Threat model
 
-Seerxo OS runs AI agents that read untrusted text, write code and prepare releases. This document
+Acthelm runs AI agents that read untrusted text, write code and prepare releases. This document
 lists the trust boundaries, the threats at each one, the control that addresses it, and whether that
 control is **tested** in this repository or is an **assumption** about the deployment.
 

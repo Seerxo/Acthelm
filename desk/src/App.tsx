@@ -70,7 +70,7 @@ function useCounts() {
 function Mark({ className }: { className?: string }) {
   return (
     <span aria-hidden className={cn("relative grid size-7 shrink-0 place-items-center rounded-[8px] bg-foreground text-[12px] font-bold tracking-tight text-background", className)}>
-      S<span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-brand ring-2 ring-sidebar" />
+      A<span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-brand ring-2 ring-sidebar" />
     </span>
   )
 }
@@ -87,8 +87,8 @@ function AppSidebar({ onCreate }: { onCreate: () => void }) {
         <div className="flex items-center gap-2.5 px-1.5">
           <Mark />
           <div className="min-w-0 leading-tight">
-            <div className="truncate text-[13px] font-semibold tracking-tight">Seerxo</div>
-            <div className="truncate text-[11px] text-muted-foreground">Company OS</div>
+            <div className="truncate text-[13px] font-semibold tracking-tight">Acthelm</div>
+            <div className="truncate text-[11px] text-muted-foreground">Founder Desk</div>
           </div>
         </div>
         {data && (

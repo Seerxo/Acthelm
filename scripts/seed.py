@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed a fresh Seerxo OS database with a small, fictional example company.
+"""Seed a fresh Acthelm database with a small, fictional example company.
 
 It lets a new installation show something in the Founder Desk and gives the agents a goal-bearing
 project to reason about. Everything here is a placeholder: edit it, or replace it with your own
@@ -62,7 +62,7 @@ def run(argv: list[str]) -> int:
             objective="A stable, measurable service.",
             current_phase="example")
         insert(db, models.Project, "company-os",
-            name="Company OS", status=enums.ProjectStatus.ACTIVE, priority=enums.Priority.P1,
+            name="Acthelm", status=enums.ProjectStatus.ACTIVE, priority=enums.Priority.P1,
             repository="example-org/company-os",
             objective="Company state survives an LLM or session restart.",
             current_phase="example")
@@ -75,7 +75,7 @@ def run(argv: list[str]) -> int:
 
         svc("demo-api", name="Demo API", purpose="Example HTTP service", business_unit_id=saas.id,
             health_url="https://api.example.invalid/health")
-        svc("company-api", name="Company OS API", purpose="Company state, tasks, events")
+        svc("company-api", name="Acthelm API", purpose="Company state, tasks, events")
 
         db.commit()
         print("seeded the example organisation")

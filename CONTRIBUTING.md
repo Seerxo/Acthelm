@@ -1,4 +1,4 @@
-# Contributing to Seerxo OS
+# Contributing to Acthelm
 
 Thank you for your interest. This document explains how to propose a change.
 

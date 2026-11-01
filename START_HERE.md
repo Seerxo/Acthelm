@@ -1,6 +1,6 @@
 # Start here
 
-Seerxo OS is an agent-driven operating system for coordinating business operations and software delivery. This page is the shared session entry point for Claude Code, Codex, and other contributors.
+Acthelm is an agent-driven operating system for coordinating business operations and software delivery. This page is the shared session entry point for Claude Code, Codex, and other contributors.
 
 ## Session startup
 
