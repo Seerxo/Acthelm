@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Acthelm",
-  "short_name": "Acthelm",
-  "description": "Agents work. You steer.",
+  "name": "SEZ Company",
+  "short_name": "SEZ",
+  "description": "Founder Desk for SEZ Company",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

@@ -143,7 +143,7 @@ function InstallApp() {
     if (serviceWorker) void serviceWorker.then(() => setReady(true)).catch(() => setError("Service worker registration failed. Reload while online, then try again."))
   }, [])
   return <Section title="Install on your phone">
-    {standalone ? <p className="text-sm">Acthelm is running as an installed app.</p>
+    {standalone ? <p className="text-sm">SEZ Company is running as an installed app.</p>
       : !serviceWorker ? <p className="text-sm text-muted-foreground">Installation is unavailable here. Open this site over HTTPS in a browser that supports service workers.</p>
         : <div className="grid gap-2 text-sm">
             <p>{ios ? "In Safari, tap Share, then Add to Home Screen, then Add." : "Open your browser menu and choose Install app or Add to Home Screen."}</p>
