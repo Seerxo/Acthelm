@@ -8,8 +8,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 NEEDS_GIT_REPOSITORY = {"test_deploy_authorization.py", "test_release_acceptance.py",
                         "test_release_archive_permissions.py", "test_release_host_hardening.py",
-                        # .github and the git history are not in an exported tree; CI runs both.
-                        "test_ci_snapshot.py", "test_bound_pins_match_tree.py"}
+                        # needs `git archive HEAD`, which an exported tree cannot do; CI runs it.
+                        "test_bound_pins_match_tree.py"}
 
 
 def _uses_shared_postgres(module, _seen={}):
