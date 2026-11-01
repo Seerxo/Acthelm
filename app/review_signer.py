@@ -43,8 +43,10 @@ REQUEST_FIELDS = {"packet", "issued_at", "request_signature"}
 
 
 class Signer:
-    def __init__(self, key_path: str, requester_key: str | None, ask, clock=None, findings_log: str | None = None):
+    def __init__(self, key_path: str, requester_key: str | None, ask, clock=None, findings_log: str | None = None,
+                 require_findings_log: bool = False):
         self.key_path, self.requester_key, self.ask = Path(key_path), requester_key, ask
+        self.require_findings_log = require_findings_log
         self.provider, self.reviewer_id = REVIEW_PROVIDER, REVIEWER_ID
         self.findings_log = Path(findings_log) if findings_log else None
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -61,6 +63,8 @@ class Signer:
             return "review signing key must be a regular file owned by the signer with mode 0600 or 0400"
         if not self.requester_key:
             return "gateway requester key is not installed"
+        if self.require_findings_log and self.findings_log is None:
+            return "the review findings log is not configured: verdicts would go unrecorded"
         return None
 
     def handle(self, body) -> tuple[int, dict]:
@@ -117,8 +121,10 @@ class Signer:
                 info = os.fstat(fd)
                 if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
                     return False
-                os.write(fd, (json.dumps(entry, sort_keys=True) + "\n").encode())
-                os.fsync(fd)
+                data = (json.dumps(entry, sort_keys=True) + "\n").encode()
+                while data:                                   # a short write is retried until all of it is written
+                    data = data[os.write(fd, data):]
+                os.fsync(fd)                                  # on disk before anything is signed
             finally:
                 os.close(fd)
         except OSError:
@@ -183,7 +189,7 @@ def main() -> int:
     key, requester = os.environ.get("REVIEW_SIGNING_KEY", ""), os.environ.get("REVIEW_REQUESTER_KEY", "")
     requester_key = Path(requester).read_text().strip() if requester and Path(requester).is_file() else None
     signer = Signer(key, requester_key, reasoner_ask(os.environ["REASONER_URL"]),
-                    findings_log=os.environ.get("REVIEW_FINDINGS_LOG") or None)
+                    findings_log=os.environ.get("REVIEW_FINDINGS_LOG") or None, require_findings_log=True)
     if signer.key_ready():
         print(f"review-signer: {signer.key_ready()}; requests will be refused", file=sys.stderr)
     serve(os.environ["REVIEW_SIGNER_SOCKET"], signer).serve_forever()

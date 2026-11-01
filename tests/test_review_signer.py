@@ -330,3 +330,13 @@ def test_each_verdict_is_recorded_without_the_diff_and_signing_stops_if_it_canno
     link.symlink_to(tmp_path / "elsewhere.jsonl")              # nor a link to another file
     status, answer = signer(k, Reasoner(), findings_log=str(link)).handle(request(k, packet(nonce="ef" * 16)))
     assert status == 502 and "attestation" not in answer
+
+
+def test_the_production_signer_refuses_to_sign_without_a_findings_log(k):
+    """main() requires the log: a verdict is never signed unrecorded. Findings may quote the diff, so the log is
+    0600 on the signer's own volume (checked above)."""
+    import inspect
+    assert "require_findings_log=True" in inspect.getsource(rs.main)
+    s = rs.Signer(str(k["reviewer"][0]), k["gateway"][1], Reasoner(), clock=lambda: NOW, require_findings_log=True)
+    status, answer = s.handle(request(k))
+    assert status == 503 and "findings log" in answer["error"]
