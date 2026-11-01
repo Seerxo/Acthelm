@@ -341,4 +341,4 @@ networks:
   review-net:
     name: company-review-net
     internal: true
-x-bound-images: {inputs_sha256: '33698cff24ba60eae51b96c17d55d38fee9da7ab1df58711c3d98a08d3810b30', api: 'sha256:8fd28d29bb1ef9311178b5392872e8caaf789d08ebf8af0c4f6adc94ec037bde', worker: 'sha256:99d651d7b3b64dee11b38e900d3b7d5039a14b3bf1678ee20935b9fa6da23301', reasoner: 'sha256:e9a03a54fe4b774865e5c0ceab7be502ddfbf98acadbb3aac3d77da7f36be6c5', egress: 'sha256:77682076107db462cf543c3f3d698a56d63839f23ce1ae642a50b8a45caf7356'}
+x-bound-images: {inputs_sha256: 'aa64764a8d3b3113911bb227a60b8e236e05e12c0eafb0117c8fb542f9d0fe85', api: 'sha256:a41247c6ff5c5b82bd87876a597247ca63f60422f37bb44c5f70482d3ad5988e', worker: 'sha256:16cf98c152ce74a2037783e7bfa84411c873fcdb472dc151135c945b4e0e7a07', reasoner: 'sha256:e9a03a54fe4b774865e5c0ceab7be502ddfbf98acadbb3aac3d77da7f36be6c5', egress: 'sha256:77682076107db462cf543c3f3d698a56d63839f23ce1ae642a50b8a45caf7356'}
