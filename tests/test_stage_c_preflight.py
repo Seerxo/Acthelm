@@ -609,6 +609,7 @@ def test_host_facts_report_whether_the_coder_network_is_really_internal(tmp_path
 @pytest.mark.parametrize("repository,status,unit_id,expected", [
     ("seerxo/acthelm", pf.enums.ProjectStatus.ACTIVE, None, "PASS"),
     ("seerxo/os", pf.enums.ProjectStatus.ACTIVE, None, "FAIL"),
+    ("seerxo/seerxo-os", pf.enums.ProjectStatus.ACTIVE, None, "FAIL"),         # the name before the rename
     ("seerxo/acthelm", pf.enums.ProjectStatus.PAUSED, None, "FAIL"),
     ("seerxo/acthelm", pf.enums.ProjectStatus.ACTIVE, 101, "FAIL"),
 ])

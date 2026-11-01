@@ -6,6 +6,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -36,14 +37,29 @@ def test_the_policies_track_acthelm_and_keep_the_fork():
 
 def test_no_deployed_file_still_authorizes_the_old_upstream_name():
     paths = [p for d in ("app", "agents", "scripts") for p in (ROOT / d).rglob("*") if p.is_file()]
-    hits = [str(p.relative_to(ROOT)) for p in paths + [ROOT / "docker-compose.yml"]
-            if re.search(r"(?<![-\w])[Ss]eerxo/seerxo-os", p.read_text(errors="ignore"))]
+    # The one allowed mention: merge-pr's list of names it refuses.
+    refusal = "    seerxo/acthelm|seerxo/seerxo-os|seerxo/os)"
+    hits = [f"{p.relative_to(ROOT)}:{line}" for p in paths + [ROOT / "docker-compose.yml"]
+            for line in p.read_text(errors="ignore").splitlines()
+            if re.search(r"(?<![-\w])seerxo/seerxo-os", line, re.I) and line != refusal]
     assert hits == []
 
 
-def test_merge_pr_gates_the_canonical_name_gh_reports():
+def test_merge_pr_recognises_the_company_repository_by_id_and_name():
     script = (ROOT / "scripts/merge-pr").read_text()
-    assert script.count(f'if [ "$repo" = "{UPSTREAM}" ]; then') == 2
+    assert "COMPANY_REPO_ID=R_kgDOVXWcxg" in script and f'[ "$repo" = "{UPSTREAM}" ]' in script
+    assert script.count('if [ -n "$company" ]; then') == 2       # both Stage C gates hang on the id check
+
+
+def _published(url):
+    return SimpleNamespace(context={"improvement": {"stage": "PR_OPEN", "history": [
+        {"stage": "PR_OPEN", "evidence": {"commit": "a" * 40, "pr": url}}]}})
+
+
+def test_only_a_pr_on_the_acthelm_upstream_is_polled_or_merged():
+    assert stage_c_worker.published_pr_number(_published("https://github.com/seerxo/acthelm/pull/81")) == 81
+    for url in ("https://github.com/seerxo/seerxo-os/pull/81", "https://github.com/seerxo-agent/seerxo-os/pull/81"):
+        assert stage_c_worker.published_pr_number(_published(url)) is None, url
 
 
 def test_a_role_answer_for_the_old_name_fails_and_the_canonical_casing_passes():

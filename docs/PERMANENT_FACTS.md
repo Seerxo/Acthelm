@@ -9,14 +9,14 @@ production claims here.
 
 ## FACT-01 · Repository responsibilities
 
-- **Fact:** `Seerxo/Acthelm` (renamed from `Seerxo/seerxo-os` on 2026-11-01; same repository, id 1433771206)
-  is the only active repository for development and CI; code identities name `seerxo/acthelm`. Stage C publishes
-  from the fork `seerxo-agent/seerxo-os`, which keeps its name. `Seerxo/os` is archived and read-only; it has no
-  release, migration or CI role.
-- **Production identity (until migrated):** the signed release chain still names `seerxo/seerxo-os` (policy v4,
-  release-host and gateway configs, ledger rebase of 2026-10-31) and fetches through GitHub's rename redirect, so
-  no new repository named `seerxo-os` may be created in the organisation. It moves to `seerxo/acthelm` only by a
-  founder-signed policy and a founder-signed ledger rebase; a code change never moves it.
+- **Fact:** `Seerxo/Acthelm` is the only active repository for development and CI (renamed from
+  `Seerxo/seerxo-os`; same repository). Code identities name `seerxo/acthelm`. Stage C publishes from the fork
+  `seerxo-agent/seerxo-os`, which is a separate repository and keeps its name. `Seerxo/os` is archived and
+  read-only; it has no release, migration or CI role.
+- **Production identity:** the signed production release identity is moved to `seerxo/acthelm` only by a
+  founder-signed policy and a founder-signed ledger rebase; a code change never moves it. Until that migration is
+  complete the signed chain names the previous name, and no new repository with that name may be created in the
+  organisation. Current production state is recorded in [`operations/ACTIVE_WORK.md`](operations/ACTIVE_WORK.md).
 - **Consequence for agents:** do not move routine engineering back to the previous private
   self-hosted CI path. Source migration does not establish production migration. See
   [DEC-001](operations/DECISIONS.md#dec-001-public-repository-is-the-development-path).

@@ -57,7 +57,13 @@ elif args[:2] == ["pr", "merge"]:
         print("! Pull request seerxo/acthelm#7 was already merged", file=sys.stderr)
     sys.exit(int(os.environ.get("FAKE_MERGE_RC", "0")))
 elif args[:2] == ["repo", "view"]:
-    print(os.environ["FAKE_OWNER_REPO"])
+    if args[args.index("--json") + 1] == "id":
+        if os.environ.get("FAKE_GH_FAIL_REPO_ID"):
+            sys.exit(1)
+        company = os.environ["FAKE_OWNER_REPO"].lower() == "seerxo/acthelm"
+        print(os.environ.get("FAKE_REPO_ID", "R_kgDOVXWcxg" if company else "R_other"))
+    else:
+        print(os.environ["FAKE_OWNER_REPO"])
 elif args[0] == "api" and "-X" in args:
     if os.environ.get("FAKE_DELETE_FAIL"):
         sys.exit(1)
@@ -343,6 +349,26 @@ def test_company_merge_strict_path_applies_to_github_casing(env):
                     "FAKE_STATUSES": json.dumps(statuses), "MERGE_PR_DELETE_BRANCH": "0"})
     assert res.returncode != 0
     assert "missing required status" in res.stderr
+    assert not merged(env)
+
+
+@pytest.mark.parametrize("owner_repo, repo_id, message", [
+    ("Seerxo/Renamed", "R_kgDOVXWcxg", "is now named seerxo/renamed"),        # the company repository, renamed again
+    ("Seerxo/seerxo-os", "R_squatter", "not the company repository"),        # a new repository under the old name
+    ("seerxo/os", "R_archived", "not the company repository"),
+    ("Seerxo/Acthelm", "R_other", "not the company repository"),             # the name without the id
+])
+def test_company_merge_refuses_an_old_unknown_or_mismatched_identity(env, owner_repo, repo_id, message):
+    """The Stage C gates are never skipped because the name GitHub reports changed: every mismatch refuses."""
+    res = run(env, {"FAKE_OWNER_REPO": owner_repo, "FAKE_REPO_ID": repo_id, "MERGE_PR_DELETE_BRANCH": "0"})
+    assert res.returncode != 0
+    assert message in res.stderr
+    assert not merged(env)
+
+
+def test_company_merge_refuses_when_the_repository_id_is_unreadable(env):
+    res = run(env, {"FAKE_OWNER_REPO": COMPANY_REPO, "FAKE_GH_FAIL_REPO_ID": "1", "MERGE_PR_DELETE_BRANCH": "0"})
+    assert res.returncode != 0 and "repository id unavailable" in res.stderr
     assert not merged(env)
 
 

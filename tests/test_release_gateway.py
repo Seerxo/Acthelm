@@ -1190,7 +1190,7 @@ def test_an_applied_release_records_its_bound_images_for_later_rollbacks(keys, t
 
 # --------------------------------------------------------------------------- founder rebase onto a new repository
 
-NEW_REPO, BASE = "seerxo/acthelm", "4" * 40
+NEW_REPO, BASE = "seerxo/seerxo-os", "4" * 40
 
 
 def rebase_policy(keys, version=2, repository=NEW_REPO):
