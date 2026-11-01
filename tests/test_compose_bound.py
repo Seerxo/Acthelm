@@ -335,3 +335,14 @@ def test_up_never_runs_when_the_effective_config_would_drop_the_fence(maintenanc
     result = command(env, "up", "-d", "--no-deps", "--no-build", "company-api")
     assert result.returncode != 0 and "without its pause fence" in result.stderr
     assert all("up" not in json.loads(line) for line in (root / "calls").read_text().splitlines())
+
+
+def test_a_live_pause_fence_never_lets_dependencies_recreate_the_api(maintenance):
+    """`up <service>` without --no-deps also converges its dependencies; for a service that depends on company-api
+    (the tunnel, the Stage C egress) that would recreate the API from the base file without its fence overlay."""
+    root, env = maintenance
+    (root / "api-fence").write_text("true")
+    result = command(env, "up", "-d", "company-worker")
+    assert result.returncode == 0, result.stderr
+    ups = [c for c in (json.loads(line) for line in (root / "calls").read_text().splitlines()) if "up" in c]
+    assert len(ups) == 1 and "--no-deps" in ups[0] and ups[0][-1] == "company-worker"

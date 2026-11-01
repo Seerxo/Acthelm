@@ -158,6 +158,11 @@ try:
         api_up = fence and args[0] == "up" and "company-api" in targets
         if fence and args[0] == "up" and not targets:
             raise ValueError("the pause fence is live: name the services to recreate so company-api is handled apart")
+        if fence and args[0] == "up" and "--no-deps" not in options:
+            # Without --no-deps, `up <service>` also converges its dependencies (company-api for the tunnel and the
+            # Stage C egress) from the base file, which would recreate the API without its fence overlay.
+            options.append("--no-deps")
+            args = ["up", *options, *targets]
         if pilot:
             compose += ["-f", str(override)]
         config = json.loads(subprocess.check_output([*compose, "config", "--format", "json"], env=env))
