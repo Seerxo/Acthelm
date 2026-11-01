@@ -11,7 +11,13 @@ the unauthenticated /run; a read-only sandbox still reads files, so the key coul
   packet), ask company-reasoner, validate the structured answer strictly, and sign the attestation.
 
 Nothing a caller sends can become the verdict: the request has no verdict field, and the reasoner's answer is
-accepted only if it matches the schema and copies this packet's fingerprint. Standard library only.
+accepted only if it comes from the reviewer provider, matches the schema and copies this packet's fingerprint.
+
+The reviewer is fixed in this reviewed code, never chosen on the host (a root-chosen reviewer was withdrawn on
+2026-10-23): the provider asked is REVIEW_PROVIDER and the identity signed is REVIEWER_ID, which must be enrolled in
+the founder-signed policy and differ from every coder identity (release_gateway.verify_review). Each verdict's
+findings are appended to REVIEW_FINDINGS_LOG (0600, the signer's own volume), never the prompt, diff or any key;
+if that record cannot be written, nothing is signed. Standard library only.
 
 Usage (container): python -m app.review_signer
 """
@@ -30,12 +36,17 @@ from app import release_gateway as rg
 
 MAX_BODY = 4_000_000
 REVIEW_TIMEOUT_S = 900
+REVIEW_PROVIDER = "claude"            # the model CLI company-reasoner runs for the review
+REVIEWER_ID = "claude-reviewer"       # the identity signed into the attestation; never a coder identity
+MAX_FINDINGS, MAX_FINDING_CHARS = 50, 4000
 REQUEST_FIELDS = {"packet", "issued_at", "request_signature"}
 
 
 class Signer:
-    def __init__(self, key_path: str, requester_key: str | None, ask, provider: str = "codex", clock=None):
-        self.key_path, self.requester_key, self.ask, self.provider = Path(key_path), requester_key, ask, provider
+    def __init__(self, key_path: str, requester_key: str | None, ask, clock=None, findings_log: str | None = None):
+        self.key_path, self.requester_key, self.ask = Path(key_path), requester_key, ask
+        self.provider, self.reviewer_id = REVIEW_PROVIDER, REVIEWER_ID
+        self.findings_log = Path(findings_log) if findings_log else None
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.nonces: dict[str, float] = {}
         self.lock = threading.Lock()
@@ -81,12 +92,38 @@ class Signer:
             return 502, {"error": f"reviewer unreachable: {type(error).__name__}"}
         # company-reasoner /run returns asdict(ProviderResult) + health, which has no "ok" key (ok is a property);
         # derive it exactly as ProviderResult.ok does (app/providers.py, keep in step): AVAILABLE and output present.
-        ok = isinstance(result, dict) and result.get("health") == "AVAILABLE" and result.get("output") is not None
+        ok = (isinstance(result, dict) and result.get("health") == "AVAILABLE" and result.get("output") is not None
+              and result.get("provider") == self.provider)        # the answer comes from the reviewer's own CLI
         output = result.get("output") if ok else None
         if not rg.valid_review_output(output, packet):
             return 502, {"error": "reviewer gave no valid verdict for this packet; nothing signed"}
-        att = rg.attestation(self.provider, packet, output, self.clock().isoformat())
+        att = rg.attestation(self.reviewer_id, packet, output, self.clock().isoformat())
+        if not self.record(packet, att, output):
+            return 502, {"error": "the review record could not be written; nothing signed"}
         return 200, {"attestation": att, "signature": rg.sign(rg.canonical(att), self.key_path, rg.NS_REVIEW)}
+
+    def record(self, packet: dict, att: dict, output: dict) -> bool:
+        """Append why the reviewer decided (verdict and findings, size-capped) to the signer's own 0600 log. The
+        packet's diff, the prompt and keys are never written. No log configured (tests, legacy) records nothing."""
+        if self.findings_log is None:
+            return True
+        findings = [str(f)[:MAX_FINDING_CHARS] for f in (output.get("findings") or [])[:MAX_FINDINGS]]
+        entry = {"at": att["issued_at"], "reviewer": att["reviewer"], "verdict": att["verdict"],
+                 "base": packet["base"], "sha": packet["sha"], "nonce": packet["nonce"],
+                 "fingerprint": packet["fingerprint"], "packet_sha256": att["packet_sha256"], "findings": findings}
+        try:
+            fd = os.open(self.findings_log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                    return False
+                os.write(fd, (json.dumps(entry, sort_keys=True) + "\n").encode())
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError:
+            return False
+        return True
 
 
 def reasoner_ask(url: str):
@@ -145,7 +182,8 @@ def serve(socket_path: str, signer: Signer) -> UnixHTTPServer:
 def main() -> int:
     key, requester = os.environ.get("REVIEW_SIGNING_KEY", ""), os.environ.get("REVIEW_REQUESTER_KEY", "")
     requester_key = Path(requester).read_text().strip() if requester and Path(requester).is_file() else None
-    signer = Signer(key, requester_key, reasoner_ask(os.environ["REASONER_URL"]))
+    signer = Signer(key, requester_key, reasoner_ask(os.environ["REASONER_URL"]),
+                    findings_log=os.environ.get("REVIEW_FINDINGS_LOG") or None)
     if signer.key_ready():
         print(f"review-signer: {signer.key_ready()}; requests will be refused", file=sys.stderr)
     serve(os.environ["REVIEW_SIGNER_SOCKET"], signer).serve_forever()

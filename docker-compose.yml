@@ -225,10 +225,13 @@ services:
       REVIEW_SIGNING_KEY: /run/review-signer/key
       REVIEW_REQUESTER_KEY: /run/review-signer/gateway.pub
       REVIEW_SIGNER_SOCKET: /run/review-signer-socket/signer.sock
+      # Why each verdict was given (findings, never the diff or a key): root-created, owned by 10002, mode 0700.
+      REVIEW_FINDINGS_LOG: /var/lib/review-signer/findings.jsonl
       TZ: UTC
     volumes:
       - /etc/review-signer:/run/review-signer:ro
       - /run/review-signer-socket:/run/review-signer-socket
+      - /var/lib/review-signer:/var/lib/review-signer
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -338,4 +341,3 @@ networks:
   review-net:
     name: company-review-net
     internal: true
-x-bound-images: {inputs_sha256: '1fe4aa6f30ed010e3d7da7a30e8b0255426e9ceea7c6441eb9c6309f40812ca8', api: 'sha256:03397fbcbbc008b7efd708c0941325f3377a85c950813c4ffe278bb9fc85be2d', worker: 'sha256:04fbee1cf6d2cb7844d7d4418eac05cfc67e7c91a0f4cd2bb92d393dbfb53de6', reasoner: 'sha256:e9a03a54fe4b774865e5c0ceab7be502ddfbf98acadbb3aac3d77da7f36be6c5', egress: 'sha256:77682076107db462cf543c3f3d698a56d63839f23ce1ae642a50b8a45caf7356'}
