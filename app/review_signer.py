@@ -152,11 +152,19 @@ class Signer:
         if fd is None:
             return False
         try:
+            start = os.fstat(fd).st_size
             try:
                 data = (json.dumps(entry, sort_keys=True) + "\n").encode()
                 while data:                                   # a short write is retried until all of it is written
                     data = data[os.write(fd, data):]
                 os.fsync(fd)                                  # on disk before anything is signed
+            except OSError:
+                try:                                          # never leave a partial line for the next record
+                    os.ftruncate(fd, start)
+                    os.fsync(fd)
+                except OSError:
+                    pass
+                raise
             finally:
                 os.close(fd)
         except OSError:

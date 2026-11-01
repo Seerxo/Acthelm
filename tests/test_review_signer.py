@@ -371,3 +371,27 @@ def test_the_record_names_the_model_that_answered(k, tmp_path):
     log = tmp_path / "findings.jsonl"
     status, _ = signer(k, WithModel(), findings_log=str(log)).handle(request(k))
     assert status == 200 and json.loads(log.read_text())["model"] == "sonnet"
+
+
+def test_a_failed_write_leaves_no_partial_line_and_signs_nothing(k, tmp_path, monkeypatch):
+    log = tmp_path / "findings.jsonl"
+    assert signer(k, Reasoner(), findings_log=str(log)).handle(request(k))[0] == 200
+    before = log.read_bytes()
+    real_write, calls, inode = os.write, [], log.stat().st_ino
+    def short_then_enospc(fd, data):                     # only the log: half the record lands, then the disk is full
+        try:
+            is_log = os.fstat(fd).st_ino == inode
+        except OSError:
+            is_log = False
+        if not is_log:
+            return real_write(fd, data)
+        calls.append(len(data))
+        if len(calls) == 1:
+            return real_write(fd, data[: len(data) // 2])
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(rs.os, "write", short_then_enospc)
+    status, answer = signer(k, Reasoner(), findings_log=str(log)).handle(request(k, packet(nonce="cd" * 16)))
+    monkeypatch.setattr(rs.os, "write", real_write)
+    assert status == 502 and "attestation" not in answer and log.read_bytes() == before
+    assert signer(k, Reasoner(), findings_log=str(log)).handle(request(k, packet(nonce="ef" * 16)))[0] == 200
+    assert all(json.loads(line) for line in log.read_text().splitlines())   # every line is a whole record
