@@ -16,7 +16,7 @@ accepted only if it comes from the reviewer provider, matches the schema and cop
 The reviewer is fixed in this reviewed code, never chosen on the host (a root-chosen reviewer was withdrawn on
 2026-10-23): the provider asked is REVIEW_PROVIDER and the identity signed is REVIEWER_ID, which must be enrolled in
 the founder-signed policy and differ from every coder identity (release_gateway.verify_review). Each verdict's
-findings are appended to REVIEW_FINDINGS_LOG (0600, the signer's own volume), never the prompt, diff or any key;
+findings are appended to FINDINGS_LOG (0600, the signer's own volume), never the prompt, diff or any key;
 if that record cannot be written, nothing is signed. Standard library only.
 
 Usage (container): python -m app.review_signer
@@ -39,6 +39,7 @@ REVIEW_TIMEOUT_S = 900
 REVIEW_PROVIDER = "claude"            # the model CLI company-reasoner runs for the review
 REVIEWER_ID = "claude-reviewer"       # the identity signed into the attestation; never a coder identity
 MAX_FINDINGS, MAX_FINDING_CHARS = 50, 4000
+FINDINGS_LOG = "/var/lib/review-signer/findings.jsonl"   # the signer's own volume (compose); fixed like the reviewer
 REQUEST_FIELDS = {"packet", "issued_at", "request_signature"}
 
 
@@ -63,9 +64,37 @@ class Signer:
             return "review signing key must be a regular file owned by the signer with mode 0600 or 0400"
         if not self.requester_key:
             return "gateway requester key is not installed"
-        if self.require_findings_log and self.findings_log is None:
-            return "the review findings log is not configured: verdicts would go unrecorded"
+        if self.require_findings_log:
+            if self.findings_log is None:
+                return "the review findings log is not configured: verdicts would go unrecorded"
+            fd = self._open_log()                    # before the model is asked: a 503 is retried, never final
+            if fd is None:
+                return "the review findings log cannot be written safely (missing directory, owner, mode or link)"
+            os.close(fd)
         return None
+
+    def _open_log(self) -> int | None:
+        """The log opened for appending, or None. Never follows a link; only a regular file with one name, owned by
+        this uid and private to it, is used. A newly created file's directory entry is made durable."""
+        try:
+            fd = os.open(self.findings_log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        except OSError:
+            return None
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid()
+                or info.st_mode & 0o077):
+            os.close(fd)
+            return None
+        if info.st_size == 0:
+            try:
+                dfd = os.open(self.findings_log.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
+            except OSError:
+                pass
+        return fd
 
     def handle(self, body) -> tuple[int, dict]:
         problem = self.key_ready()
@@ -102,25 +131,26 @@ class Signer:
         if not rg.valid_review_output(output, packet):
             return 502, {"error": "reviewer gave no valid verdict for this packet; nothing signed"}
         att = rg.attestation(self.reviewer_id, packet, output, self.clock().isoformat())
-        if not self.record(packet, att, output):
+        if not self.record(packet, att, output, result.get("model")):
             return 502, {"error": "the review record could not be written; nothing signed"}
         return 200, {"attestation": att, "signature": rg.sign(rg.canonical(att), self.key_path, rg.NS_REVIEW)}
 
-    def record(self, packet: dict, att: dict, output: dict) -> bool:
-        """Append why the reviewer decided (verdict and findings, size-capped) to the signer's own 0600 log. The
-        packet's diff, the prompt and keys are never written. No log configured (tests, legacy) records nothing."""
+    def record(self, packet: dict, att: dict, output: dict, model=None) -> bool:
+        """Append why the reviewer decided (verdict, findings size-capped, the model that answered) to the signer's
+        own 0600 log, before any signature: it lists verdicts given, not only attestations signed. The diff, the
+        prompt and keys are never written. No log configured (tests) records nothing."""
         if self.findings_log is None:
             return True
         findings = [str(f)[:MAX_FINDING_CHARS] for f in (output.get("findings") or [])[:MAX_FINDINGS]]
         entry = {"at": att["issued_at"], "reviewer": att["reviewer"], "verdict": att["verdict"],
                  "base": packet["base"], "sha": packet["sha"], "nonce": packet["nonce"],
-                 "fingerprint": packet["fingerprint"], "packet_sha256": att["packet_sha256"], "findings": findings}
+                 "fingerprint": packet["fingerprint"], "packet_sha256": att["packet_sha256"], "findings": findings,
+                 "model": model if isinstance(model, str) else None}
+        fd = self._open_log()
+        if fd is None:
+            return False
         try:
-            fd = os.open(self.findings_log, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
             try:
-                info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-                    return False
                 data = (json.dumps(entry, sort_keys=True) + "\n").encode()
                 while data:                                   # a short write is retried until all of it is written
                     data = data[os.write(fd, data):]
@@ -189,7 +219,7 @@ def main() -> int:
     key, requester = os.environ.get("REVIEW_SIGNING_KEY", ""), os.environ.get("REVIEW_REQUESTER_KEY", "")
     requester_key = Path(requester).read_text().strip() if requester and Path(requester).is_file() else None
     signer = Signer(key, requester_key, reasoner_ask(os.environ["REASONER_URL"]),
-                    findings_log=os.environ.get("REVIEW_FINDINGS_LOG") or None, require_findings_log=True)
+                    findings_log=FINDINGS_LOG, require_findings_log=True)
     if signer.key_ready():
         print(f"review-signer: {signer.key_ready()}; requests will be refused", file=sys.stderr)
     serve(os.environ["REVIEW_SIGNER_SOCKET"], signer).serve_forever()

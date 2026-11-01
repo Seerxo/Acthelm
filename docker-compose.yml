@@ -225,12 +225,12 @@ services:
       REVIEW_SIGNING_KEY: /run/review-signer/key
       REVIEW_REQUESTER_KEY: /run/review-signer/gateway.pub
       REVIEW_SIGNER_SOCKET: /run/review-signer-socket/signer.sock
-      # Why each verdict was given (findings, never the diff or a key): root-created, owned by 10002, mode 0700.
-      REVIEW_FINDINGS_LOG: /var/lib/review-signer/findings.jsonl
       TZ: UTC
     volumes:
       - /etc/review-signer:/run/review-signer:ro
       - /run/review-signer-socket:/run/review-signer-socket
+      # app/review_signer.FINDINGS_LOG (why each verdict was given; never the diff or a key). Root creates it owned by
+      # 10002, mode 0700; without it the signer answers 503 and signs nothing.
       - /var/lib/review-signer:/var/lib/review-signer
     read_only: true
     tmpfs:

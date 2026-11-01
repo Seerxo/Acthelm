@@ -228,7 +228,7 @@ def test_the_signer_container_is_isolated():
     assert not any("docker.sock" in v for v in s["volumes"])
     assert "/etc/review-signer:/run/review-signer:ro" in s["volumes"]      # key mounted read-only
     assert "/var/lib/review-signer:/var/lib/review-signer" in s["volumes"]  # its own findings log, nothing else
-    assert s["environment"]["REVIEW_FINDINGS_LOG"] == "/var/lib/review-signer/findings.jsonl"
+    assert rs.FINDINGS_LOG.startswith("/var/lib/review-signer/")             # fixed in code, on that volume
     assert set(s["environment"]).isdisjoint({"DATABASE_URL", "GH_TOKEN", "TELEGRAM_BOT_TOKEN", "POSTGRES_PASSWORD",
                                              "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_2",
                                              "COMPANY_API_TOKEN_DESK"})
@@ -336,7 +336,38 @@ def test_the_production_signer_refuses_to_sign_without_a_findings_log(k):
     """main() requires the log: a verdict is never signed unrecorded. Findings may quote the diff, so the log is
     0600 on the signer's own volume (checked above)."""
     import inspect
-    assert "require_findings_log=True" in inspect.getsource(rs.main)
+    assert "require_findings_log=True" in inspect.getsource(rs.main) and "findings_log=FINDINGS_LOG" in inspect.getsource(rs.main)
     s = rs.Signer(str(k["reviewer"][0]), k["gateway"][1], Reasoner(), clock=lambda: NOW, require_findings_log=True)
     status, answer = s.handle(request(k))
     assert status == 503 and "findings log" in answer["error"]
+
+
+def test_an_unwritable_log_is_found_before_the_model_is_asked(k, tmp_path):
+    """A missing or wrongly owned log directory answers 503 (retried, never final) without spending a review."""
+    reasoner = Reasoner()
+    s = rs.Signer(str(k["reviewer"][0]), k["gateway"][1], reasoner, clock=lambda: NOW,
+                  findings_log=str(tmp_path / "missing" / "findings.jsonl"), require_findings_log=True)
+    status, answer = s.handle(request(k))
+    assert status == 503 and "cannot be written" in answer["error"] and reasoner.calls == []
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo", "hardlink"])
+def test_a_log_that_is_not_a_private_single_file_is_never_used(k, tmp_path, kind):
+    log = tmp_path / "findings.jsonl"
+    if kind == "directory":
+        log.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(log, 0o600)
+    else:
+        log.write_text(""); log.chmod(0o600); os.link(log, tmp_path / "other.jsonl")
+    status, answer = signer(k, Reasoner(), findings_log=str(log)).handle(request(k))
+    assert status == 502 and "attestation" not in answer
+
+
+def test_the_record_names_the_model_that_answered(k, tmp_path):
+    class WithModel(Reasoner):
+        def __call__(self, body):
+            return super().__call__(body) | {"model": "sonnet"}
+    log = tmp_path / "findings.jsonl"
+    status, _ = signer(k, WithModel(), findings_log=str(log)).handle(request(k))
+    assert status == 200 and json.loads(log.read_text())["model"] == "sonnet"
