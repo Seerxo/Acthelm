@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -395,3 +396,38 @@ def test_a_failed_write_leaves_no_partial_line_and_signs_nothing(k, tmp_path, mo
     assert status == 502 and "attestation" not in answer and log.read_bytes() == before
     assert signer(k, Reasoner(), findings_log=str(log)).handle(request(k, packet(nonce="ef" * 16)))[0] == 200
     assert all(json.loads(line) for line in log.read_text().splitlines())   # every line is a whole record
+
+
+def test_concurrent_records_never_cut_each_other(k, tmp_path, monkeypatch):
+    """Two verdicts recorded at once: one write fails half-way and truncates back; the other, written meanwhile,
+    must survive whole (the log is serialised; model calls stay parallel)."""
+    log = tmp_path / "findings.jsonl"
+    log.write_text(""); log.chmod(0o600)
+    inode, real_write = log.stat().st_ino, os.write
+    first_half_written, failer = threading.Event(), {}
+    def faulty(fd, data):
+        try:
+            is_log = os.fstat(fd).st_ino == inode
+        except OSError:
+            is_log = False
+        if is_log and failer.get("thread") == threading.get_ident():
+            real_write(fd, data[: len(data) // 2])
+            first_half_written.set()
+            time.sleep(0.3)                                  # the other record gets every chance to interleave
+            raise OSError(28, "No space left on device")
+        return real_write(fd, data)
+    monkeypatch.setattr(rs.os, "write", faulty)
+    s = signer(k, Reasoner(), findings_log=str(log))
+    reqs = [request(k, packet(nonce=n * 16)) for n in ("ab", "cd")]
+    results = {}
+    def failing():
+        failer["thread"] = threading.get_ident()
+        results["a"] = s.handle(reqs[0])[0]
+    def succeeding():
+        first_half_written.wait(2)
+        results["b"] = s.handle(reqs[1])[0]
+    threads = [threading.Thread(target=failing), threading.Thread(target=succeeding)]
+    [t.start() for t in threads]; [t.join(10) for t in threads]
+    assert results == {"a": 502, "b": 200}
+    lines = log.read_text().splitlines()
+    assert len(lines) == 1 and json.loads(lines[0])["nonce"] == "cd" * 16   # whole, and not cut by the failure

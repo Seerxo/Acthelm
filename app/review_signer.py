@@ -21,6 +21,7 @@ if that record cannot be written, nothing is signed. Standard library only.
 
 Usage (container): python -m app.review_signer
 """
+import fcntl
 import json
 import os
 import socketserver
@@ -53,6 +54,7 @@ class Signer:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.nonces: dict[str, float] = {}
         self.lock = threading.Lock()
+        self.log_lock = threading.Lock()   # one record at a time: a failed write's truncate must not cut another
 
     def key_ready(self) -> str | None:
         """Why the key must not be used, or None. Only a private regular file owned by this uid counts."""
@@ -148,10 +150,15 @@ class Signer:
                  "base": packet["base"], "sha": packet["sha"], "nonce": packet["nonce"],
                  "fingerprint": packet["fingerprint"], "packet_sha256": att["packet_sha256"], "findings": findings,
                  "model": model if isinstance(model, str) else None}
+        with self.log_lock:
+            return self._append(entry)
+
+    def _append(self, entry: dict) -> bool:
         fd = self._open_log()
         if fd is None:
             return False
         try:
+            fcntl.flock(fd, fcntl.LOCK_EX)                    # and across processes sharing the file
             start = os.fstat(fd).st_size
             try:
                 data = (json.dumps(entry, sort_keys=True) + "\n").encode()
