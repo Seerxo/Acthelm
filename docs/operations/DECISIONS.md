@@ -112,3 +112,26 @@ record supersession only after founder confirmation. Mutable execution state bel
 - **Evidence:** Founder-confirmed operating decision; checkpoint procedure in
   [START_HERE.md](../../START_HERE.md).
 - **Status:** ACTIVE
+
+## DEC-009 · Acthelm product name
+
+- **Date:** 2026-11-01
+- **Decision maker:** Founder
+- **Scope:** Product branding, operator CLI and repository naming
+- **Decision:** Name the product **Acthelm**, use **Agents work. You steer.** as its
+  tagline, and provide `acthelm` as the operator CLI. The target repository name is
+  `Seerxo/acthelm`.
+- **Rollout:** Ship the visible name and a compatible CLI entry point first. The current
+  repository remains `Seerxo/seerxo-os`: its name is also an authorization and signed
+  release identity. GitHub redirects do not preserve comparisons against canonical API
+  repository names. Before renaming, coordinate the release policy and ledger identity,
+  worker authorization and durable repository subjects, credential boundary, Stage C
+  profiles and publish-fork mapping, CI monitor, main guard and merge gate. Update their
+  callers and fixtures, obtain independent review and exact-head CI, then execute the
+  founder-approved identity cutover and verify the runtime. The existing installed CLI,
+  host paths, environment variables and audit actors retain their compatibility names.
+- **Rationale:** Establish the product name while preserving the release trust boundary
+  and existing operator workflows.
+- **Evidence:** Founder approved the name, repository target, CLI and tagline in the
+  naming conversation on 2026-11-01.
+- **Status:** ACTIVE; repository identity migration PENDING

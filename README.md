@@ -1,6 +1,8 @@
-# Seerxo OS
+# Acthelm
 
-**An agent-driven operating system for a small company.** Seerxo OS keeps the company's operational
+**Agents work. You steer.**
+
+An agent-driven operating system for a small company. Acthelm keeps the company's operational
 state in PostgreSQL, decides deterministically when there is work to do, hands that work to AI agents
 inside strict boundaries, and records what happened so the next session, human or model, starts from
 facts instead of memory.
@@ -9,6 +11,9 @@ facts instead of memory.
 > workers. PostgreSQL holds operational state, Git holds policy, and a conversation is temporary.
 
 Status: **V1, in active development.** See [Project maturity](#project-maturity-and-known-limitations).
+
+Acthelm was previously named Seerxo OS. The repository remains `Seerxo/seerxo-os` while
+its signed release identity is migrated separately; see the [naming decision](docs/operations/DECISIONS.md#dec-009--acthelm-product-name).
 
 ---
 
@@ -65,7 +70,7 @@ flowchart LR
         W[Watchdog]
         F[Founder Desk]
     end
-    subgraph Core["Company OS API (FastAPI)"]
+    subgraph Core["Acthelm API (FastAPI)"]
         DB[(PostgreSQL<br/>operational state)]
         R[Business reconciler<br/>goal evaluation]
         T[Task materializer]
@@ -180,6 +185,13 @@ The worker, the coder and the release components need provider logins, container
 host setup that this quickstart does not create. Read [docs/CODER_RUNTIME.md](docs/CODER_RUNTIME.md)
 before enabling them.
 
+### Operator CLI
+
+On a configured host, run `./scripts/acthelm --help` or `./scripts/acthelm brief` from the
+release checkout. `acthelm` uses the existing operator CLI; `companyctl` remains compatible.
+The `acthelm` entry point becomes available with this source release. Existing host commands,
+service names, environment variables and signed release identities keep their current names.
+
 ## Configuration
 
 All configuration comes from environment variables; `app/config.py` reads them and never from a file
@@ -272,7 +284,7 @@ desk/         Founder Desk frontend (React, TypeScript, Vite)
 migrations/   Alembic migrations
 agents/       Agent registry, cost policy, release policy, repository guardian policy
 skills/       Reusable agent procedures
-scripts/      Operator CLI (companyctl), backup and restore, deploy and release tooling
+scripts/      Operator CLI (acthelm; companyctl compatible), backup and restore, deploy and release tooling
 tests/        pytest suite
 evals/        Golden evaluations for agent behaviour
 ops/          Compose overlays

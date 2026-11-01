@@ -116,7 +116,7 @@ export function DeskProvider({ children }: { children: ReactNode }) {
     setSent([])
     prev.current = null
     setChanges({})
-    document.title = "Founder Desk"
+    document.title = "Acthelm · Founder Desk"
   }, [])
   // Live data goes on any lost-session signal; the unsent instruction only on a real sign-out (lib/draft.ts), so a
   // network error, a 403 or going offline never erases the founder's text.
@@ -153,7 +153,7 @@ export function DeskProvider({ children }: { children: ReactNode }) {
       setError(null)
       hadData.current = true
       const n = Array.isArray(state.needs_you) ? state.needs_you.length : 0
-      document.title = n ? `(${n}) Founder Desk` : "Founder Desk"
+      document.title = n ? `(${n}) Acthelm · Founder Desk` : "Acthelm · Founder Desk"
     } catch (e) {
       if (id !== requestId.current) return
       const message = (e as Error).message
