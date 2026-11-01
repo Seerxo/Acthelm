@@ -1,1 +1,3 @@
-companyctl
+#!/usr/bin/env bash
+# acthelm: the new name for companyctl; a regular file, since a symlink in the release payload is always HIGH risk.
+exec "$(dirname "$0")/companyctl" "$@"
