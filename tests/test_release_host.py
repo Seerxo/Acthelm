@@ -1417,7 +1417,7 @@ def _rebase_setup(hw, tmp_path, *, fetch_old=True):
     running = _running_release(hw)
     work, origin, base = _public_copy(hw, tmp_path, running)
     hw.prepare(base, repo=work)                     # root built the public base's images before the cutover
-    policy = json.loads(hw.cfg.policy.read_bytes()) | {"version": 2, "repository": "seerxo/seerxo-os"}
+    policy = json.loads(hw.cfg.policy.read_bytes()) | {"version": 2, "repository": "seerxo/acthelm"}
     praw = rg.canonical(policy)
     (tmp_path / "policy-v2.json").write_bytes(praw)
     (tmp_path / "policy-v2.sig").write_text(rg.sign(praw, hw.keys["founder"][0], rg.NS_POLICY))
@@ -1427,11 +1427,11 @@ def _rebase_setup(hw, tmp_path, *, fetch_old=True):
             sh(tmp_path, "git", "-C", str(tmp_path / clone), "fetch", "-q", str(hw.hcfg.clone),
                f"+refs/remotes/origin/main:refs/old/main")
     new = host.Config({**{k: str(v) if isinstance(v, Path) else v for k, v in vars(hw.hcfg).items()},
-                       "inboxes": [str(p) for p in hw.hcfg.inboxes], "repository": "seerxo/seerxo-os",
+                       "inboxes": [str(p) for p in hw.hcfg.inboxes], "repository": "seerxo/acthelm",
                        "clone": str(tmp_path / "host-clone-new"), "fetch_url": str(origin),
                        "policy": str(tmp_path / "policy-v2.json"), "policy_sig": str(tmp_path / "policy-v2.sig")})
     ledger = json.loads(hw.hcfg.ledger.read_text())
-    st = {"kind": "rebase", "host_id": HOST, "repository": "seerxo/seerxo-os", "branch": "main",
+    st = {"kind": "rebase", "host_id": HOST, "repository": "seerxo/acthelm", "branch": "main",
           "nonce": "ee" * 16, "old_repository": "seerxo/os", "old_last_sha": running,
           "old_last_sequence": ledger["last_sequence"],
           "old_payload_digest": rg.payload_digest(rg.payload_listing(hw.hcfg.clone, running)),
@@ -1444,7 +1444,7 @@ def _rebase_setup(hw, tmp_path, *, fetch_old=True):
     (tmp_path / "rebase.sig").write_text(rg.sign(raw, hw.keys["founder"][0], rg.NS_REBASE))
     gateway = svc.Config({**{k: str(v) if isinstance(v, Path) else v for k, v in vars(hw.cfg).items()
                              if k not in ("checks_command",)}, "checks_command": ["true"],
-                          "repository": "seerxo/seerxo-os", "clone": str(tmp_path / "gateway-clone-new"),
+                          "repository": "seerxo/acthelm", "clone": str(tmp_path / "gateway-clone-new"),
                           "fetch_url": str(origin), "policy": str(tmp_path / "policy-v2.json"),
                           "policy_sig": str(tmp_path / "policy-v2.sig")})
     return work, running, base, new, gateway, HOST
@@ -1474,7 +1474,7 @@ def test_the_host_rebases_onto_a_different_history_and_the_founder_releases_the_
     tick = hw.tick()
     assert tick["outcome"] == "FOUNDER_REQUIRED" and tick["detail"] == "the first release after a rebase", tick
     draft = _draft(hw)
-    assert draft["parent_sha"] == base and draft["repository"] == "seerxo/seerxo-os"
+    assert draft["parent_sha"] == base and draft["repository"] == "seerxo/acthelm"
     # Reviewed and listed: everything that changes in PRODUCTION, from what runs, payload only. The shipped file the
     # public copy changed is there although base..sha does not touch it; documents (never shipped) are not.
     assert draft["changed_paths"] == ["docs/PERMANENT_FACTS.md", "skills/x/SKILL.md"]
@@ -1535,7 +1535,7 @@ def test_after_a_release_from_the_new_repository_the_founder_can_rebase_back(hw,
                         "policy_sig": str(tmp_path / "policy-v3.sig")})
     ledger = json.loads(new.ledger.read_text())
     st = {"kind": "rebase", "host_id": host_id, "repository": "seerxo/os", "branch": "main", "nonce": "ab" * 16,
-          "old_repository": "seerxo/seerxo-os", "old_last_sha": sha, "old_last_sequence": ledger["last_sequence"],
+          "old_repository": "seerxo/acthelm", "old_last_sha": sha, "old_last_sequence": ledger["last_sequence"],
           "old_payload_digest": rg.payload_digest(rg.payload_listing(new.clone, sha)),
           "history_sha256": hashlib.sha256(rg.history_path(new.ledger).read_bytes()).hexdigest(),
           "base_sha": running, "policy_sha256": hashlib.sha256(praw).hexdigest(), "images": ledger["images"],
@@ -1585,20 +1585,20 @@ def test_the_host_refuses_a_rebase_when_the_old_clone_drifted_from_the_recorded_
 
 def test_the_fetch_remote_must_be_the_configured_repository_on_github():
     assert host.remote_is("git@github.com:Seerxo/os.git", "seerxo/os")                 # the live host config
-    assert host.remote_is("https://github.com/Seerxo/seerxo-os.git", "seerxo/seerxo-os")
-    for url in ("https://github.com/seerxo-agent/seerxo-os.git", "https://github.com/Seerxo/seerxo-os.git.evil",
-                "https://evil.example/Seerxo/seerxo-os.git", "/srv/fork.git"):
-        assert not host.remote_is(url, "seerxo/seerxo-os"), url
+    assert host.remote_is("https://github.com/Seerxo/Acthelm.git", "seerxo/acthelm")
+    for url in ("https://github.com/seerxo-agent/seerxo-os.git", "https://github.com/Seerxo/Acthelm.git.evil",
+                "https://evil.example/Seerxo/Acthelm.git", "/srv/fork.git"):
+        assert not host.remote_is(url, "seerxo/acthelm"), url
 
 
 def test_a_config_that_fetches_another_repository_is_refused(hw, monkeypatch):
     monkeypatch.setattr(host, "PIN_REMOTE", True)
     raw = {k: str(v) if isinstance(v, Path) else v for k, v in vars(hw.hcfg).items()} | {
-        "inboxes": [str(p) for p in hw.hcfg.inboxes], "repository": "seerxo/seerxo-os",
+        "inboxes": [str(p) for p in hw.hcfg.inboxes], "repository": "seerxo/acthelm",
         "fetch_url": "https://github.com/seerxo-agent/seerxo-os.git"}
-    with pytest.raises(rg.Refused, match="GitHub remote of seerxo/seerxo-os"):
+    with pytest.raises(rg.Refused, match="GitHub remote of seerxo/acthelm"):
         host.Config(raw)
-    assert host.Config(raw | {"fetch_url": "https://github.com/Seerxo/seerxo-os.git"}).repository == "seerxo/seerxo-os"
+    assert host.Config(raw | {"fetch_url": "https://github.com/Seerxo/Acthelm.git"}).repository == "seerxo/acthelm"
 
 
 @pytest.mark.parametrize("change", [
