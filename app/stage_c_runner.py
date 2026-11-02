@@ -559,12 +559,15 @@ def gh_pr_opener(repository: str, base_branch: str, head_repository: str | None 
 
     def call(branch: str, title: str, body: str, commit: str) -> str:
         _validate_pr_identity(branch, commit)
+        # A separate PR-only token (Pull requests: write on the upstream, never Contents) opens the PR when the push
+        # token is scoped to the fork alone. It is used for this one call; pushes and lookups keep GH_TOKEN.
+        env = {**os.environ, "GH_TOKEN": os.environ["GH_PR_TOKEN"]} if os.environ.get("GH_PR_TOKEN") else None
         try:
             out = subprocess.run(["gh", "pr", "create", "--repo", repository, "--base", base_branch,
                                   "--head", branch if head_repository == repository
                                   else f"{head_repository.split('/')[0]}:{branch}",
                                   "--title", title, "--body", body],
-                                 capture_output=True, text=True, timeout=60, check=True)
+                                 capture_output=True, text=True, timeout=60, check=True, env=env)
             lines = out.stdout.strip().splitlines()
             url = lines[-1].lower() if lines else ""
             if re.fullmatch(re.escape(prefix) + r"[1-9][0-9]*", url):
