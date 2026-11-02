@@ -38,9 +38,12 @@ def test_acceptance_is_for_one_sha_and_tampering_breaks_it():
     accept_host(db, S)
     assert not control.acceptance_valid(db, "b" * 40)
     row = db.get(models.ControlState, control.ACCEPTANCE)
-    row.value = {**row.value, "checks": {**row.value["checks"], "github_blocked": True}, "source_sha": "b" * 40}
+    row.value = {**row.value, "source_sha": "b" * 40}
     db.commit()
     assert not control.acceptance_valid(db, "b" * 40)       # no endpoint audit for these values
+    row.value = {**row.value, "source_sha": S, "checks": {**row.value["checks"], "github_blocked": False}}
+    db.commit()
+    assert not control.acceptance_valid(db, S)
 
 
 @pytest.mark.parametrize("label", ["no candidate", "other sha", "a failed check", "stale", "not a founder"])
@@ -86,6 +89,18 @@ def test_the_founder_accepts_the_candidate_for_the_deployed_sha(env):   # noqa: 
     assert r.status_code == 201 and r.json()["source_sha"] == SHA and r.json()["issued_by"] == FID
     with Session(engine) as s:
         assert control.acceptance_valid(s, SHA)
+
+
+def test_the_route_refuses_when_api_and_worker_disagree_and_ignores_a_body(env, monkeypatch):   # noqa: F811
+    engine, _ = env
+    with Session(engine) as s:
+        control.record_acceptance_candidate(s, SHA, ALL)
+    from app import main
+    monkeypatch.setattr(main.worker, "worker_state", lambda db: {"runtime": {"git_sha": "e" * 40}})
+    assert _founder().post("/stage-c/acceptance", headers=ASSERT).status_code == 409
+    monkeypatch.setattr(main.worker, "worker_state", lambda db: {"runtime": {"git_sha": SHA}})
+    r = _founder().post("/stage-c/acceptance", json={"source_sha": "e" * 40, "checks": {}}, headers=ASSERT)
+    assert r.status_code == 201 and r.json()["source_sha"] == SHA
 
 
 def test_the_route_is_enforce_always_and_founder_scoped():

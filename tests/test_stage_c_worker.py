@@ -886,6 +886,7 @@ def test_acceptance_requires_founder_all_checks_and_this_deployed_source(monkeyp
     row.updated_by = "founder"; db.commit()                  # the legacy plain name is not a verified identity
     assert stage_c_worker.ready(db) == "stage_c_host_not_accepted"
     row.updated_by = ACCEPTING_FOUNDER; db.commit()
+    assert stage_c_worker.ready(db) is None                  # restored: the audited founder acceptance holds again
     monkeypatch.setenv("COMPANY_OS_GIT_SHA", "b" * 40)
     assert stage_c_worker.ready(db) == "stage_c_host_not_accepted"
 
