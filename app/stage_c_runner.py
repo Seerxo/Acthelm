@@ -469,16 +469,23 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
                 try:
                     url = find_pr(branch, head)
                 except Exception:
-                    # The reviewed commit is pushed but no PR was ever opened (pilot 2026-11-02: the push token could
-                    # not create upstream PRs). Open it once, only if GitHub has no PR at all, open or closed, for this
-                    # head: a closed PR is a founder decision and is never reopened; GitHub refuses a second open PR.
-                    if pr_absent is None or pr_absent(branch) is not True:
-                        raise
-                    if before_publish is not None:
-                        before_publish()           # the token roles are re-read right before writing to GitHub
-                    url = open_pr(branch, pr_title, pr_body, head)
+                    url = None
+                # The reviewed commit is pushed but no PR was ever opened (pilot 2026-11-02: the push token could not
+                # create upstream PRs). Open it once, only if GitHub has no PR at all, open or closed, for this head:
+                # a closed PR is a founder decision and is never reopened; GitHub refuses a second open PR. Known
+                # limit: a closed PR whose fork was deleted and recreated has head.repo = null and is not matched.
+                missing = url is None and pr_absent is not None and pr_absent(branch) is True
             except Exception:
                 return _stop(db, "PR_FAILED", "existing publication could not be verified", branch=branch, commit=head)
+            if url is None and not missing:
+                return _stop(db, "PR_FAILED", "existing publication could not be verified", branch=branch, commit=head)
+            if url is None:
+                if before_publish is not None:
+                    before_publish()   # outside any catch: a token-role or ownership refusal keeps its own outcome
+                try:
+                    url = open_pr(branch, pr_title, pr_body, head)
+                except Exception:
+                    return _stop(db, "PR_FAILED", "missing PR could not be opened", branch=branch, commit=head)
             stage_c.advance(db, task, "PR_OPEN", HOLDER, {"branch": branch, "commit": head,
                               "fingerprint": approved, "pr": url, "recovered": True})
             return _stop(db, "PR_OPEN", url, branch=branch, commit=head, pr=url)

@@ -132,3 +132,14 @@ def test_gh_pr_absent_fails_closed(monkeypatch):
     monkeypatch.setattr(stage_c_runner.repo_guardian_github, "api",
                         lambda *a: (_ for _ in ()).throw(RuntimeError("down")))
     assert check("task/TASK-0001") is False
+
+
+def test_a_role_refusal_during_recovery_keeps_its_security_block(monkeypatch, tmp_path):
+    """The re-read before opening the missing PR finds the token can write upstream: the dedicated block, not PR_FAILED."""
+    db, task = _first_publish_fails_after_the_push(monkeypatch, tmp_path)
+    monkeypatch.setattr(stage_c_runner, "gh_pr_absent", lambda *a, **k: (lambda branch: True))
+    answers = iter([("PASS", "read-only"), ("FAIL", "can push")])        # publish start, then right before the create
+    monkeypatch.setattr(stage_c_worker, "publication_role", lambda: next(answers))
+    out = worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+    assert out["verdict"] == "PUBLISHED_PR_REFUSED", out
+    assert task.status == enums.TaskStatus.BLOCKED and task.error.startswith("upstream_role_not_read_only")
