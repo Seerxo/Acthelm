@@ -144,3 +144,60 @@ def test_task_context_must_be_a_short_list_of_files():
         except ValueError:
             continue
         raise AssertionError(f"accepted {bad!r}")
+
+
+def test_admission_refuses_context_that_overlaps_writes_or_is_unsafe():
+    db = _db()
+    task = write_task(db)
+    for bad in (["tests/test_metrics.py"], ["../etc/passwd"], "app/x.py", [CONTEXT, CONTEXT]):
+        task.context = {**task.context, "stage_c": {"paths": ["tests/test_metrics.py"], "context": bad}}
+        assert stage_c_worker.admission(db, task) == "stage_c_scope_refused", bad
+    task.context = {**task.context, "stage_c": {"paths": ["tests/test_metrics.py"], "context": [CONTEXT]}}
+    assert stage_c_worker.admission(db, task) is None
+
+
+def test_a_launcher_refusal_is_infrastructure_not_a_spent_retry(monkeypatch, tmp_path):
+    """Pilot 2026-11-02: the pause-authority handshake timed out on a loaded host and both tasks lost an attempt."""
+    def coder(directory, job):
+        raise stage_c_runner.LauncherRefused("launcher Refused: founder pause authority is unavailable")
+    db, task = _setup(monkeypatch, tmp_path, coder)
+    out = _tick(db)
+    assert out["verdict"] == "LAUNCHER_REFUSED", out
+    assert task.status == enums.TaskStatus.READY and task.retry_count == 0
+    assert worker._cooldowns(db)["claude"]["health"] == "LAUNCHER_UNAVAILABLE"
+    assert worker._capacity_only(db.get(models.AgentRun, out["run_id"]))      # not counted against daily budgets
+
+
+def test_refused_checks_never_judge_the_change(monkeypatch, tmp_path):
+    def coder(directory, job):
+        (directory / "tests/test_metrics.py").write_text("def test_metric():\n    assert 1 == 1\n")
+    checks = lambda directory: {"passed": False, "refused": True, "failures": [],
+                                "summary": "Refused: founder pause authority is unavailable"}
+    db, task = _setup(monkeypatch, tmp_path, coder, checks)
+    assert _tick(db)["verdict"] == "LAUNCHER_REFUSED"
+    assert task.retry_count == 0 and _last_evidence(task)["failure_class"] == "checks_unavailable"
+
+
+def test_model_output_that_says_refused_is_still_a_coder_failure(monkeypatch, tmp_path):
+    def coder(directory, job):
+        raise RuntimeError("coder Refused: I decided not to")       # free text, not the launcher's field
+    db, task = _setup(monkeypatch, tmp_path, coder)
+    assert _tick(db)["verdict"] == "CODER_FAILED"
+    assert task.retry_count == 1
+
+
+def test_the_launcher_refused_field_becomes_launcher_refused(tmp_path):
+    job_dir = tmp_path / "TASK-0101"
+    (job_dir / "workspace").mkdir(parents=True)
+
+    def host(_):
+        (job_dir / "done").mkdir(exist_ok=True)
+        (job_dir / "done" / "result.json").write_text('{"exit": null, "refused": "Refused: fence busy"}')
+    coder = stage_c_runner.launcher_coder(timeout_s=5, poll_s=0, sleep=host)
+    job = stage_c_runner.Job("TASK-0101", "r", tmp_path, "0" * 40, ["a.py"], "o", "c", "claude")
+    try:
+        coder(job_dir / "workspace", job)
+    except stage_c_runner.LauncherRefused as e:
+        assert "fence busy" in str(e)
+    else:
+        raise AssertionError("a launcher refusal must raise LauncherRefused")

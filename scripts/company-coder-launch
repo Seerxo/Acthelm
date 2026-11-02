@@ -45,6 +45,7 @@ IMAGE = re.compile(r"sha256:[a-f0-9]{64}")
 LIMITS = {"code": 1200, "checks": 1200}          # wall clock ceilings, seconds (checks: full suite measured 493 s at --cpus=1)
 START_TIMEOUT = 30
 PAUSE_FENCE = Path("/etc/company-coder/pause.lock")
+PAUSE_AUTHORITY_TIMEOUT = 30   # seconds for company-api to answer READY/ALLOW
 _FENCE_UID = 0
 SOURCE = {"code": "workspace", "checks": "checks"}
 PROVIDERS = ("claude",)
@@ -128,7 +129,8 @@ def pause_authority(device: int, inode: int):
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
         def receive(expected):
-            deadline, data = time.monotonic() + 10, b""
+            # A loaded host answers in 7-15 s (measured on the pilot VM, 2026-11-02); waiting is safe, a refusal costs a run.
+            deadline, data = time.monotonic() + PAUSE_AUTHORITY_TIMEOUT, b""
             while len(data) < len(expected):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not select.select([proc.stdout], [], [], remaining)[0]:

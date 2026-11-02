@@ -142,3 +142,20 @@ def test_no_command_enables_writes_or_deploys_anything(host):
     with Session(host.engine) as db:
         assert db.get(models.ControlState, "agents_paused") is None
         assert db.query(models.AgentRun).count() == 0
+
+
+def test_stop_pauses_agents_and_withdraws_both_authorizations_in_one_command(host):
+    with Session(host.engine) as db:
+        control.authorize_pilot(db, "TASK-0045", SHA, founder=FOUNDER)
+        control.issue_standing(db, ["tests/test_metrics.py"], SHA, founder=FOUNDER, days=1, max_per_day=1)
+    res = host("stop")
+    assert res.returncode == 0, res.stderr
+    assert json.loads(res.stdout) == {"paused": True, "pilot_revoked": True, "standing_revoked": True}
+    with Session(host.engine) as db:
+        assert control.agents_paused(db)
+        assert db.get(models.ControlState, control.STANDING_AUTHORIZATION) is None
+        assert db.get(models.ControlState, "stage-c-pilot-authorization") is None
+        actors = {a.actor for a in db.query(models.AuditLog).filter(models.AuditLog.action.in_(
+            ["agents.pause", "stage-c.standing.revoke"]))}
+    assert actors == {"operator:host-root"}
+    assert host("stop").returncode == 0            # idempotent: nothing left to withdraw is not an error

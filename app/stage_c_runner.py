@@ -106,6 +106,11 @@ class CoderStartStateUnknown(Exception):
     """The coder started, but persisting its start acknowledgement failed."""
 
 
+class LauncherRefused(Exception):
+    """The root launcher refused the request (pause authority, fence, config): infrastructure, never the task's fault.
+    Recognized from the launcher's own `refused` field, never from model output."""
+
+
 def _stop(db: Session, outcome: str, detail: str, **extra) -> dict:
     db.commit()
     return {"outcome": outcome, "detail": detail[:300], **extra}
@@ -143,6 +148,8 @@ def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, 
             return _stop(db, "OWNER_CHANGED", str(e)[:300])
         except CoderStartStateUnknown:
             return _stop(db, "LEASE_LOST", "could not persist coder start state")
+        except LauncherRefused as e:
+            return _stop(db, "LAUNCHER_REFUSED", str(e)[:300])
         except Exception as e:  # the coder is untrusted; its failure is an outcome, not a crash
             return _stop(db, "CODER_FAILED", f"{type(e).__name__}: {e}")
         if before_write:
@@ -170,6 +177,7 @@ def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, 
             result = {"passed": False, "summary": f"checks crashed: {type(e).__name__}: {e}"}
         passed = isinstance(result, dict) and result.get("passed") is True
         summary = str(result.get("summary", "") if isinstance(result, dict) else result)[:300]
+        refused = isinstance(result, dict) and result.get("refused") is True
         failures = [] if passed else _bounded_failures(result.get("failures") if isinstance(result, dict) else None)
         # A holder whose lease expired during the run must not advance work another task now owns.
         if before_write:
@@ -177,6 +185,11 @@ def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, 
         if not stage_c.holds(db, job.repository, token):
             return _stop(db, "LEASE_LOST", "lease expired or was taken during the run")
         evidence = {"fingerprint": fingerprint, "checks_passed": passed, "checks": summary}
+        if not passed and refused:
+            # The launcher never ran the checks: back to IMPLEMENTING without judging the change.
+            stage_c.advance(db, task, "IMPLEMENTING", HOLDER,
+                            evidence | {"failure_class": "checks_unavailable", "failures": []})
+            return _stop(db, "LAUNCHER_REFUSED", summary, fingerprint=fingerprint)
         if not passed:
             history = ((task.context or {}).get("improvement") or {}).get("history", [])
             earlier = next((h.get("evidence", {}) for h in reversed(history[:-1])
@@ -686,7 +699,9 @@ def launcher_coder(timeout_s: int = 1200, poll_s: float = 5.0, sleep=time.sleep,
         (job_dir / "prompt.txt").write_text(coder_prompt(job))
         result = _launch(job_dir, {"kind": "code", "provider": job.provider, "timeout_s": timeout_s},
                          timeout_s + 120, poll_s, sleep, before_enqueue, after_start)
-        if result.get("refused") or result.get("timed_out") or result.get("exit") != 0:
+        if result.get("refused"):
+            raise LauncherRefused(f"launcher {result['refused']}"[:300])
+        if result.get("timed_out") or result.get("exit") != 0:
             # run() turns this into CODER_FAILED; detail is bounded, never raw model output.
             raise RuntimeError(f"coder {result.get('refused') or result.get('summary') or 'failed'}"[:300])
         edited = job_dir / "done" / "workspace"
@@ -707,5 +722,5 @@ def launcher_checks(repo: str, timeout_s: int = 1200, poll_s: float = 5.0, sleep
             return {"passed": False, "summary": f"checks did not run: {type(e).__name__}"}
         passed = result.get("exit") == 0 and not result.get("timed_out") and not result.get("refused")
         return {"passed": passed, "summary": str(result.get("refused") or result.get("summary") or "")[:300],
-                "failures": _bounded_failures(result.get("failures"))}
+                "refused": bool(result.get("refused")), "failures": _bounded_failures(result.get("failures"))}
     return call

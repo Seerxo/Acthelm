@@ -108,6 +108,7 @@ def admission(db, task):
     # Read-only context: any safe repository file the coder may read; never write scope (run() refuses edits).
     context = scope.get("context", [])
     if (not isinstance(context, list) or len(context) > stage_c_runner.MAX_CONTEXT_FILES
+            or len(paths) + len(context) > 20     # coder_source exports at most 20 files in all
             or not all(isinstance(p, str) and coder_source._safe_path(p) and p not in paths for p in context)
             or len(set(context)) != len(context)):
         return "stage_c_scope_refused"
@@ -417,6 +418,12 @@ def execute(db, task, spec, usable):
         attempts = [{"provider": name, "health": capacity.value}]
         run.tool_calls = {**run.tool_calls, "attempts": attempts, "capacity_failure": True}
         worker._cool(db, attempts)  # commits (heartbeat): before the ownership check, never between it and the writes
+    if outcome == "LAUNCHER_REFUSED":
+        # Cool the coder down (commits via the heartbeat) before the ownership check, like a capacity failure.
+        cool = worker._cooldowns(db)
+        cool[run.provider] = {"until": (worker._now() + worker.PROVIDER_COOLDOWN).isoformat(),
+                              "health": "LAUNCHER_UNAVAILABLE"}
+        worker._heartbeat(db, cooldown=cool)
     # From here to the final commit nothing commits: the check and every write share the task row lock.
     owns_attempt = owns()
     if capacity_failure:
@@ -424,6 +431,15 @@ def execute(db, task, spec, usable):
         if owns_attempt:
             task.status = enums.TaskStatus.READY
         run.status = enums.AgentRunStatus.FAILED
+    elif outcome == "LAUNCHER_REFUSED":
+        # The host launcher refused (pause authority, fence, config): infrastructure. No retry or standing run is
+        # spent, and the coder cools down so a persistent refusal is not retried every tick.
+        control.refund_standing_run(db, task, run.id)
+        if owns_attempt:
+            task.status = enums.TaskStatus.READY
+        run.status, run.error = enums.AgentRunStatus.FAILED, outcome
+        run.tool_calls = {**run.tool_calls, "attempts": [{"provider": run.provider, "health": "DISABLED"}],
+                          "capacity_failure": True}
     elif outcome == "PR_OPEN":
         if owns_attempt:
             task.status = enums.TaskStatus.REVIEW
