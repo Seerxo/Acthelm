@@ -902,3 +902,75 @@ def test_b5_newer_green_run_on_another_branch_does_not_replace_the_tasks_failure
                               status_contexts=(), run=run)
     assert out["checks"] == [{"name": "test", "status": "completed", "conclusion": "failure"}]
     assert out["ci_completed_at"] is None
+
+
+# --------------------------------------------------------------------------- READY_TO_MERGE is re-judged every poll
+
+def _ready():
+    db, t = _task()
+    assert _ingest(db, t, facts(OK))["outcome"] == "READY_TO_MERGE"
+    return db, t
+
+
+def test_ready_with_a_moved_head_is_blocked_not_left_ready():
+    """Break caught: READY_TO_MERGE returned WAITING before the head check, so a push after the review stayed READY."""
+    db, t = _ready()
+    out = _ingest(db, t, facts(OK, head=OTHER))
+    assert out["outcome"] == "HEAD_MOVED" and t.status == enums.TaskStatus.BLOCKED and "head moved" in t.error
+    assert not stage_c_ci._eligibility(db, t, t.context, facts(OK, head=OTHER), REPOSITORY, "main", REQUIRED).eligible
+
+
+def test_ready_with_a_failed_rerun_goes_back_to_repair_and_counts_it():
+    db, t = _ready()
+    out = _ingest(db, t, facts(BAD))
+    assert out["outcome"] == "REPAIR" and stage(t) == "IMPLEMENTING"
+    assert stage_c_ci.repairs_used(t) == 1   # a flaky READY -> red loop spends the repair budget
+
+
+def test_ready_still_green_on_the_same_head_waits_unchanged():
+    db, t = _ready()
+    history = len(t.context["improvement"]["history"])
+    assert _ingest(db, t, facts(OK)) == {"outcome": "WAITING", "reason": "ready; the founder merges"}
+    assert _ingest(db, t, facts(PENDING, complete=False))["outcome"] == "WAITING"   # a re-run in progress
+    assert stage(t) == "READY_TO_MERGE" and len(t.context["improvement"]["history"]) == history
+    assert t.status != enums.TaskStatus.BLOCKED
+
+
+def test_ready_whose_approval_no_longer_binds_the_head_is_blocked():
+    db, t = _ready()
+    event = db.get(models.AuditLog, t.context["improvement"]["approval"]["audit_id"])
+    event.after = {**event.after, "fingerprint": "0" * 64}
+    out = _ingest(db, t, facts(OK))
+    assert out["outcome"] == "BLOCKED" and t.status == enums.TaskStatus.BLOCKED
+    assert any("audit record" in reason for reason in out["reasons"])
+
+
+def test_ready_whose_approval_no_longer_binds_is_blocked_even_while_ci_reruns():
+    """Break caught: the approval was re-checked only on a fully green poll, so a pending re-run kept it READY."""
+    db, t = _ready()
+    t.context["improvement"]["approval"] = {**t.context["improvement"]["approval"], "fingerprint": "0" * 64}
+    out = _ingest(db, t, facts(PENDING, complete=False))
+    assert out["outcome"] == "BLOCKED" and t.status == enums.TaskStatus.BLOCKED
+    assert any("audit record" in reason for reason in out["reasons"])
+
+
+@pytest.mark.parametrize("changed", ["tested_fingerprint", "published_fingerprint", "review_at", "branch", "coder"])
+def test_ready_rechecks_full_review_binding_while_ci_reruns(changed):
+    db, task = _ready()
+    imp = deepcopy(task.context["improvement"])
+    review = next(h for h in reversed(imp["history"]) if h["stage"] == "INDEPENDENT_REVIEW")
+    published = next(h for h in reversed(imp["history"]) if h["stage"] == "PR_OPEN")
+    if changed == "tested_fingerprint":
+        review["evidence"]["fingerprint"] = "0" * 64
+    elif changed == "published_fingerprint":
+        published["evidence"]["fingerprint"] = "0" * 64
+    elif changed == "review_at":
+        review["at"] = "old-review"
+    elif changed == "branch":
+        published["evidence"]["branch"] = "task/TASK-9999"
+    else:
+        next(h for h in reversed(imp["history"]) if h["stage"] == "TESTING")["evidence"]["coder"] = "codex"
+    task.context = {**task.context, "improvement": imp}
+    out = _ingest(db, task, facts(PENDING, complete=False))
+    assert out["outcome"] == "BLOCKED" and task.status == enums.TaskStatus.BLOCKED
+    assert out["reasons"]

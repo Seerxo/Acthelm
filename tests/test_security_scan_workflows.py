@@ -1,5 +1,5 @@
-"""Advisory security scanners: pinned, read-only, secret-free, on the dedicated CI runner.
-Event filters and existing required gates remain unchanged."""
+"""Security scanners: pinned, read-only, secret-free, on GitHub-hosted runners. All are advisory except
+secret-scan, which is a required gate and therefore must run on every PR and every push to main."""
 import re
 import json
 import os
@@ -22,11 +22,11 @@ def load(name):
 
 
 @pytest.mark.parametrize("name", SCANNERS)
-def test_scanner_is_pinned_read_only_secret_free_and_advisory(name):
+def test_scanner_is_pinned_read_only_secret_free_and_only_secret_scan_is_required(name):
     text, workflow, _ = load(name)
     assert workflow["permissions"] == {"contents": "read"}
     assert "secrets." not in text and "sez-deploy" not in text
-    assert f".github/workflows/{name}" not in POLICY["workflows"]
+    assert (f".github/workflows/{name}" in POLICY["workflows"]) is (name == "secret-scan.yml")
     for job in workflow["jobs"].values():
         assert job["runs-on"] == "ubuntu-24.04"
         for step in job["steps"]:
@@ -46,6 +46,14 @@ def test_scanners_run_only_when_their_inputs_change_or_on_a_schedule():
     assert on["pull_request"]["paths"] == [".github/workflows/**", ".github/actions/**"]
     _, _, on = load("prowler.yml")
     assert set(on) == {"schedule", "workflow_dispatch"}
+
+
+def test_required_secret_scan_runs_on_every_pr_and_push_to_main():
+    """A required workflow that a filter skips never reports, and the gate then refuses that change forever."""
+    _, workflow, on = load("secret-scan.yml")
+    assert on == {"pull_request": {"branches": ["main"]}, "push": {"branches": ["main"]}}
+    assert "if" not in workflow["jobs"]["trufflehog"]
+    assert not any("if" in step for step in workflow["jobs"]["trufflehog"]["steps"])
 
 
 def test_workflow_lint_pins_both_tools_and_never_uploads_sarif():

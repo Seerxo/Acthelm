@@ -20,9 +20,11 @@ execution plane gets a directory and nothing else:
 Everything the coder leaves behind is untrusted data: coder_diff decides what crosses back.
 Checks pass only on an explicit `{"passed": True}`; anything else is a failure, never success.
 """
+import base64
 import json
 import hashlib
 import fcntl
+import functools
 import os
 import re
 import shutil
@@ -37,7 +39,8 @@ from urllib.parse import quote
 
 from sqlalchemy.orm import Session
 
-from app import audit, coder_diff, coder_source, models, providers, repo_guardian, repo_guardian_github, stage_c
+from app import (audit, coder_diff, coder_source, merge_authorization, models, providers, repo_guardian,
+                 repo_guardian_github, stage_c)
 
 HOLDER = "stage-c-runner"
 LAUNCH_LOCK_TIMEOUT = 45
@@ -77,6 +80,11 @@ def failure_class(passed: bool, summary: str, failures: list[str]) -> str | None
     return "test_failure"
 
 
+def _is_test_file(path: str) -> bool:
+    name = path.rsplit("/", 1)[-1]
+    return name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
+
+
 def _failed_tests(failures: list) -> list[str]:
     return sorted({f.split(" ", 2)[1] for f in (failures if isinstance(failures, list) else [])
                    if isinstance(f, str) and f.startswith(("FAILED ", "ERROR ")) and len(f.split(" ")) > 1})
@@ -113,7 +121,7 @@ class LauncherRefused(Exception):
 
 def _stop(db: Session, outcome: str, detail: str, **extra) -> dict:
     db.commit()
-    return {"outcome": outcome, "detail": detail[:300], **extra}
+    return {"outcome": outcome, "detail": _redact(detail), **extra}
 
 
 def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, workdir: Path,
@@ -176,8 +184,16 @@ def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, 
         except Exception as e:
             result = {"passed": False, "summary": f"checks crashed: {type(e).__name__}: {e}"}
         passed = isinstance(result, dict) and result.get("passed") is True
-        summary = str(result.get("summary", "") if isinstance(result, dict) else result)[:300]
+        # Test output is untrusted: redacted before it reaches the history, the reviewer packet or a repair prompt.
+        summary = _redact(str(result.get("summary", "") if isinstance(result, dict) else result))
         refused = isinstance(result, dict) and result.get("refused") is True
+        # Per-test evidence: every test file the change touches must have reported a PASSED test, so a changed test
+        # that was skipped, deselected or never collected cannot ride on the rest of the suite. Fails closed.
+        executed = result.get("passed_files") if isinstance(result, dict) else None
+        executed = set(executed) if isinstance(executed, list) and all(isinstance(f, str) for f in executed) else set()
+        if passed and (unrun := [p for p in change["modified"] + change["added"]
+                                 if _is_test_file(p) and p not in executed]):
+            passed, summary = False, _redact(f"changed test files reported no passed test: {', '.join(unrun)}")
         failures = [] if passed else _bounded_failures(result.get("failures") if isinstance(result, dict) else None)
         # A holder whose lease expired during the run must not advance work another task now owns.
         if before_write:
@@ -330,7 +346,8 @@ def review(db: Session, task: models.Task, diff: bytes, reviewer: Reviewer,
         return {"outcome": "REVIEW_FAILED", "detail": "reviewer gave no valid verdict on this fingerprint"}
     if before_write:
         before_write()
-    findings = [str(f)[:300] for f in (verdict.get("findings") or [])][:20]
+    # Model output persisted to the history and fed back to the next coder: masked like every other output.
+    findings = [_redact(str(f)) for f in (verdict.get("findings") or [])][:20]
     if verdict["verdict"] == "REJECT":
         stage_c.advance(db, task, "IMPLEMENTING", reviewer_provider,
                         {"review": "REJECTED", "fingerprint": fingerprint, "findings": findings})
@@ -381,19 +398,127 @@ def _git(repo: Path, *args: str, stdin: bytes | None = None, index: str | None =
     return out.strip() if strip else out
 
 
+# Credential shapes: specific enough to refuse a publication on. JWTs are recognised by decoding (_jwts), not by shape.
+_CREDENTIAL_SHAPES = (r"(?<!\w)(?:sk-ant-[\w-]{8,}|github_pat_\w{8,}|gh[pousr]_\w{16,}|sk-[\w-]{16,}|xox[abprs]-[\w-]{8,}"
+                      r"|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)")
+_CREDENTIAL = re.compile(_CREDENTIAL_SHAPES)
+# A dotted base64url run, matched only at its start and possessively: linear time on any input (an unanchored
+# backtracking pattern rescanned every suffix of a long run, quadratic in its length). `=` admits padded segments.
+_DOTTED = re.compile(r"(?<![A-Za-z0-9_.-])[A-Za-z0-9_-]++=*+(?:\.(?:[A-Za-z0-9_-]++=*+)?+){2,}")
+_MAX_JWT_HEADER = 2048   # a JOSE header is a few hundred bytes; longer segments are never decoded
+# Joining for split-credential detection: line breaks (with their indentation and continuation backslashes) and
+# string-literal boundaries (`"a" "b"`, `'a' + 'b'`) vanish, so a token wrapped over lines or written as adjacent
+# literals reads whole again. Spaces inside a line stay, so words do not glue onto a token and hide it.
+_LINE_JOIN = re.compile(r"(?<![ \t])[ \t]*+\\?[ \t]*+(?:\r\n?|\n)[ \t]*+")
+_LITERAL_JOIN = re.compile(r"[\"'][ \t]*+(?:\+[ \t]*+)?[rubfRUBF]{0,2}[\"']")
+_COMMENTS = re.compile(r"#[^\r\n]*")
+
+
+@functools.lru_cache(maxsize=1024)
+def _json_object_segment(segment: str) -> bool:
+    # JSON permits leading whitespace, so its base64 header need not start with `e`.
+    if len(segment) < 3 or len(segment) > _MAX_JWT_HEADER:
+        return False
+    segment = segment.rstrip("=")
+    try:
+        return isinstance(json.loads(base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))), dict)
+    except (ValueError, UnicodeDecodeError):
+        return False
+
+
+def _jwts(text: str) -> list[tuple[int, int]]:
+    """Non-overlapping spans of JWT-shaped tokens: a header that base64url-decodes to a JSON object (any formatting,
+    padded or not), a non-empty payload (not parsed: odd claims are still masked) and a signature segment (empty for
+    alg=none). Every part of a dotted run is tried as a header, so a prefix (`x.eyJ...`) cannot hide one."""
+    spans = []
+    for run in _DOTTED.finditer(text):
+        parts, position, i = run.group(0).split("."), run.start(), 0
+        starts = [position]
+        for part in parts[:-1]:
+            starts.append(starts[-1] + len(part) + 1)
+        while i < len(parts) - 2:
+            if parts[i + 1] and _json_object_segment(parts[i]):
+                spans.append((starts[i], starts[i + 2] + len(parts[i + 2])))
+                i += 3
+            else:
+                i += 1
+    return spans
+
+
+def _mask_jwts(text: str) -> str:
+    out, last = [], 0
+    for start, end in _jwts(text):
+        out += [text[last:start], "***"]
+        last = end
+    return "".join(out) + text[last:]
+
+
+def _joined_forms(text: str) -> set[str]:
+    # Keep both forms: a comment can separate literals or contain the credential itself.
+    return {_LITERAL_JOIN.sub("", _LINE_JOIN.sub("", t)) for t in (text, _COMMENTS.sub("", text))}
+
+
+def _has_credential(text: str) -> bool:
+    """A credential shape or a JWT, including split literals, comments and wrapped lines."""
+    return any(_CREDENTIAL.search(t) or _jwts(t) for t in {text, *_joined_forms(text)})
+
+
+# Masking also takes key=value heuristics; they over-match ordinary code (`token = acquire(...)`), so they mask only.
+# `['"]?` after the key covers JSON ("refresh_token": "...") as well as `token=...`.
 _SECRETS = re.compile(
-    r"(?i)(?:sk-ant-[\w-]{8,}|github_pat_\w{8,}|gh[pousr]_\w{16,}|sk-[\w-]{16,}|xox[abprs]-[\w-]{8,}|AKIA[0-9A-Z]{16}"
-    r"|(?:bearer|token|authorization)\s*[:=]?\s*[\w.~+/=-]{12,}"
-    r"|(?:api[_-]?key|secret|password|passwd|token)\s*[:=]\s*['\"]?[^\s'\"]{6,})")
+    r"(?i)(?:" + _CREDENTIAL_SHAPES +
+    r"|(?:bearer|token|authorization)\s*+(?:[:=]\s*+)?[\w.~+/=-]{12,}"
+    r"|(?:api[_-]?key|secret|password|passwd|token)['\"]?\s*+[:=]\s*+['\"]?[^\s'\"]{6,})")
 
 
 def _redact_secrets(text: str) -> str:
     """URL userinfo and well-known credential shapes, masked. Output that reaches task history or a prompt passes here."""
-    return _SECRETS.sub("***", re.sub(r"://[^@/\s]+@", "://***@", text))
+    # Check joined fragments before masking can erase their header and leave claims/signatures behind.
+    if any(joined != text and (_CREDENTIAL.search(joined) or _jwts(joined)) for joined in _joined_forms(text)):
+        return "[withheld: credential-shaped content]"
+    masked = _SECRETS.sub("***", re.sub(r"://[^@/\s]+@", "://***@", _mask_jwts(text)))
+    return masked
 
 
 def _redact(text: str) -> str:
     return _redact_secrets(text)[:300]
+
+
+def _public_text(key: str, approval: dict) -> tuple[str, str, str]:
+    """PR title, PR body and commit message: the only task text that reaches GitHub, for publish and its recovery.
+    Built from validated identifiers and fixed sentences; the task title, objective, success criteria, findings and
+    any model output stay private (the repository is public)."""
+    fingerprint, reviewer = approval.get("fingerprint"), approval.get("reviewer")
+    if not isinstance(key, str) or not stage_c.TASK_KEY.fullmatch(key):
+        raise ValueError("task key is not publishable")
+    if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise ValueError("approved fingerprint is not publishable")
+    if not isinstance(reviewer, str) or reviewer not in merge_authorization.KNOWN_PROVIDERS:
+        raise ValueError("reviewer is not a known provider")
+    title = f"{key}: Stage C change"
+    body = (f"Fingerprint `{fingerprint}`, reviewed by {reviewer}.\n\nOpened by the Company OS "
+            "control plane. The founder merges; nothing here auto-merges or deploys.")
+    return title, body, f"{title}\n\nFingerprint: {fingerprint}"
+
+
+def _outgoing_credentials(diff: bytes) -> list[str]:
+    """Files whose added lines carry a credential shape. Added lines cover new files whole (import_changes renders
+    them as all-`+`); binary, symlink, mode-only and deleted changes never get this far (coder_diff._tree/_text)."""
+    leaked, path, added = [], None, {}
+    # Git's line delimiter is LF only: splitlines() would also split on CR, VT and Unicode separators and strip the
+    # `+` from a credential hidden after one inside an added line.
+    for line in diff.decode("utf-8", errors="replace").split("\n"):
+        # File headers come from `diff --git`, which content lines cannot forge; every `+` line is scanned,
+        # `+++` headers included, since an added "++ ..." line looks like one.
+        if line.startswith("diff --git "):
+            path = line.rsplit(" ", 1)[-1].removeprefix("b/")
+        elif line.startswith("+"):
+            added.setdefault(path, []).append(line[1:])
+    # Per file, each added line and all added lines joined: a token split over adjacent literals is caught too.
+    for path, lines in added.items():
+        if any(_CREDENTIAL.search(line) or _jwts(line) for line in lines) or _has_credential("\n".join(lines)):
+            leaked.append(path)
+    return leaked
 
 
 def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Path, remote: str,
@@ -433,10 +558,13 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
             return {"outcome": "NOT_APPROVED", "detail": "no independent approval of exactly this diff"}
         imp = dict(task.context["improvement"])
         approved = imp["approval"]["fingerprint"]
-        pr_title = f"{task.key}: {task.title}"
-        pr_body = (f"Fingerprint `{approved}`, reviewed by {imp['approval']['reviewer']}.\n\n"
-                   f"Success criteria: {task.success_criteria}\n\nOpened by the Company OS "
-                   "control plane. The founder merges; nothing here auto-merges or deploys.")
+        try:
+            pr_title, pr_body, commit_message = _public_text(task.key, imp["approval"])
+        except ValueError as e:
+            return _stop(db, "DRIFT", str(e))
+        if leaked := _outgoing_credentials(diff):
+            # The approved bytes are never edited: a credential-shaped added line stops publication for the founder.
+            return _stop(db, "DRIFT", f"approved diff adds a credential-shaped line in {', '.join(leaked)}; not published")
         try:
             on_branch = _git(worktree, "symbolic-ref", "--short", "HEAD")
             head = _git(worktree, "rev-parse", "HEAD")
@@ -489,9 +617,7 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
             stage_c.advance(db, task, "PR_OPEN", HOLDER, {"branch": branch, "commit": head,
                               "fingerprint": approved, "pr": url, "recovered": True})
             return _stop(db, "PR_OPEN", url, branch=branch, commit=head, pr=url)
-        _git(worktree, "commit", "-q", "--no-verify", "-m",
-             f"{task.key}: {task.title}\n\nFingerprint: {approved}\n"
-             f"Coded-by: {imp['approval']['coder']}\nReviewed-by: {imp['approval']['reviewer']}")
+        _git(worktree, "commit", "-q", "--no-verify", "-m", commit_message)
         commit = _git(worktree, "rev-parse", "HEAD")
         # A repair replaces only what this task last published, under the same PR.
         previous = _last(imp["history"], "PR_OPEN").get("evidence", {})
@@ -773,6 +899,18 @@ def launcher_coder(timeout_s: int = 1200, poll_s: float = 5.0, sleep=time.sleep,
     return call
 
 
+MAX_PASSED_FILES = 2000
+_PYTEST_PASSED = re.compile(r"\b[1-9]\d* passed\b")
+_PYTEST_FAILED = re.compile(r"\b\d+ (?:failed|errors?)\b")
+
+
+def _pytest_passed(summary: str) -> bool:
+    """pytest's final line (`12 passed in 3.1s`, `=== 12 passed, 1 skipped in 3.1s ===`) with at least one pass and no
+    failure or error. This raises the bar, nothing more: a test can still print a fake line. The independent review,
+    exact-head CI and the founder's merge stay the gate."""
+    return bool(_PYTEST_PASSED.search(summary)) and not _PYTEST_FAILED.search(summary)
+
+
 def launcher_checks(repo: str, timeout_s: int = 1200, poll_s: float = 5.0, sleep=time.sleep) -> Checks:
     def call(directory: Path) -> dict:
         try:
@@ -780,7 +918,13 @@ def launcher_checks(repo: str, timeout_s: int = 1200, poll_s: float = 5.0, sleep
                              timeout_s + 120, poll_s, sleep)
         except (TimeoutError, OSError, ValueError) as e:
             return {"passed": False, "summary": f"checks did not run: {type(e).__name__}"}
+        summary = str(result.get("refused") or result.get("summary") or "")[:300]
         passed = result.get("exit") == 0 and not result.get("timed_out") and not result.get("refused")
-        return {"passed": passed, "summary": str(result.get("refused") or result.get("summary") or "")[:300],
-                "refused": bool(result.get("refused")), "failures": _bounded_failures(result.get("failures"))}
+        if passed and not _pytest_passed(summary):
+            # Exit 0 alone is not a result: an import-time os._exit(0) ends the run before any test.
+            passed, summary = False, "checks did not report a pytest result"
+        files = result.get("passed_files") if isinstance(result.get("passed_files"), list) else []
+        return {"passed": passed, "summary": summary, "refused": bool(result.get("refused")),
+                "failures": _bounded_failures(result.get("failures")),
+                "passed_files": [f for f in files if isinstance(f, str)][:MAX_PASSED_FILES]}
     return call

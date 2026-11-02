@@ -509,7 +509,7 @@ m = importlib.util.module_from_spec(s); l.exec_module(m)
 cfg = {"coder_image": "sha256:" + "0"*64, "checks_images": {"sez-company": "sha256:" + "1"*64},
        "checks_commands": {"sez-company": ["python", "-m", "pytest", "-q"]}, "network": "n", "proxy": "http://p:8888"}
 allowed = ("HOME=", "HTTPS_PROXY=", "HTTP_PROXY=", "NO_PROXY=", "no_proxy=", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=",
-           "PYTHONDONTWRITEBYTECODE=", "TMPDIR=")
+           "PYTHONDONTWRITEBYTECODE=", "TMPDIR=", "PYTEST_ADDOPTS=")
 bad = []
 from pathlib import Path
 for req in ({"kind": "code", "provider": "claude", "timeout_s": 1},

@@ -267,8 +267,10 @@ def docker_argv(req: dict, cfg: dict, mount: Path, name: str) -> list[str]:
         # pytest's temp dir. The checks copy is discarded, never imported back.
         # Start acknowledgement: the same ack mount and sh wrapper the coder uses. Only the touch is added;
         # the checks command itself is unchanged and still the last arguments.
+        # PYTEST_ADDOPTS=-rfEp adds pytest's short summary (PASSED/FAILED/ERROR node ids, no captured output) without
+        # changing the pinned checks command: the runner requires a PASSED test from every test file the change touches.
         return [*argv, "--network=none", "--env=HOME=/tmp", "--env=TMPDIR=/workspace",
-                "--env=PYTHONDONTWRITEBYTECODE=1", "--mount",
+                "--env=PYTHONDONTWRITEBYTECODE=1", "--env=PYTEST_ADDOPTS=-rfEp", "--mount",
                 f"type=bind,source={mount.parent / 'ack'},target=/run/company-coder",
                 cfg["checks_images"][req["repo"]], "sh", "-c", START_WRAPPER,
                 "company-coder", *cfg["checks_commands"][req["repo"]]]
@@ -294,6 +296,45 @@ def stage(job: Path, staged: Path, source: str) -> None:
         raise Refused(f"{source} must be a real directory")
 
 
+MAX_STDOUT, MAX_STDERR = 1024 * 1024, 64 * 1024   # bytes kept while draining: the stdout tail, the stderr head
+
+
+def bounded_communicate(proc: subprocess.Popen, prompt: bytes, timeout_s: float) -> tuple[bytes, bytes]:
+    """Popen.communicate in bounded memory: a test printing forever cannot exhaust the host as root. stdout keeps
+    its last MAX_STDOUT bytes (the pytest summary is at the end), stderr its first MAX_STDERR; both drain in chunks
+    to EOF. Raises TimeoutExpired like communicate; the caller kills, and EOF then ends the drains."""
+    out, err = bytearray(), bytearray()
+
+    def drain(stream, buf: bytearray, cap: int, tail: bool) -> None:
+        with stream:
+            for chunk in iter(lambda: stream.read1(65536), b""):
+                if tail:
+                    buf += chunk
+                    del buf[:-cap]
+                elif len(buf) < cap:
+                    buf += chunk[:cap - len(buf)]
+
+    def feed() -> None:
+        try:
+            with proc.stdin:
+                proc.stdin.write(prompt)
+        except (BrokenPipeError, OSError):
+            pass   # the container exited or closed stdin; its result says why
+
+    threads = [threading.Thread(target=feed, daemon=True),
+               threading.Thread(target=drain, args=(proc.stdout, out, MAX_STDOUT, True), daemon=True),
+               threading.Thread(target=drain, args=(proc.stderr, err, MAX_STDERR, False), daemon=True)]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + timeout_s
+    for thread in threads:
+        thread.join(max(0, deadline - time.monotonic()))
+        if thread.is_alive():
+            raise subprocess.TimeoutExpired(proc.args, timeout_s)
+    proc.wait(max(0, deadline - time.monotonic()))
+    return bytes(out), bytes(err)
+
+
 def run_container(argv: list[str], prompt: bytes, timeout_s: int, name: str,
                   on_started=None, started_file: Path | None = None) -> dict:
     proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -301,15 +342,15 @@ def run_container(argv: list[str], prompt: bytes, timeout_s: int, name: str,
         try:
             if on_started:
                 on_started()
-            stdout, _stderr = proc.communicate(prompt, timeout=timeout_s)
+            stdout, _stderr = bounded_communicate(proc, prompt, timeout_s)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.communicate()
+            proc.wait()
             subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
             return {"exit": None, "timed_out": True, "summary": f"timed out after {timeout_s}s"}
         except Exception:
             proc.kill()
-            proc.communicate()
+            proc.wait()
             subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
             raise
     else:
@@ -317,7 +358,7 @@ def run_container(argv: list[str], prompt: bytes, timeout_s: int, name: str,
 
         def communicate():
             try:
-                streams["output"] = proc.communicate(prompt, timeout=timeout_s)
+                streams["output"] = bounded_communicate(proc, prompt, timeout_s)
             except BaseException as error:
                 errors["error"] = error
 
@@ -350,15 +391,34 @@ def run_container(argv: list[str], prompt: bytes, timeout_s: int, name: str,
             error = errors["error"]
             if isinstance(error, subprocess.TimeoutExpired):
                 proc.kill()
-                proc.communicate()
+                proc.wait()
                 subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
                 return {"exit": None, "timed_out": True, "summary": f"timed out after {timeout_s}s"}
             raise error
         stdout, _stderr = streams["output"]
     # Model or test output is untrusted and may be large: only the last line, bounded.
     text = stdout.decode(errors="replace")
+    if len(stdout) >= MAX_STDOUT:
+        text = text.partition("\n")[2]   # the retained tail starts mid-line
     tail = text.strip().splitlines()[-1:] or [""]
-    return {"exit": proc.returncode, "timed_out": False, "summary": tail[0][:300], "failures": failure_lines(text)}
+    return {"exit": proc.returncode, "timed_out": False, "summary": tail[0][:300], "failures": failure_lines(text),
+            "passed_files": passed_files(text)}
+
+
+PASSED_LINE = re.compile(r"PASSED ([\w./-]+\.py)::")
+MAX_PASSED_FILES = 2000
+
+
+def passed_files(text: str) -> list[str]:
+    """Test files with at least one PASSED line in pytest's short summary (-rp), bounded. Evidence that a changed
+    test ran, not proof: output a test prints can imitate it, like the summary line."""
+    files = {}
+    for line in text.splitlines():
+        if m := PASSED_LINE.match(line):
+            files[m.group(1)] = None
+            if len(files) >= MAX_PASSED_FILES:
+                break
+    return list(files)
 
 
 FAILURE_LINE = re.compile(r"(?:FAILED|ERROR) \S|E {2,}\S|[\w./-]+\.py:\d+: \w")
@@ -468,6 +528,7 @@ def handle(key: str, cfg: dict, runner=run_container) -> dict:
             result["kind"] = req["kind"]
             if req["kind"] != "checks":
                 result.pop("failures", None)   # a code job's stdout is model output
+                result.pop("passed_files", None)
         except (Refused, ValueError, OSError, KeyError, subprocess.SubprocessError) as e:
             result = {"exit": None, "timed_out": False, "refused": f"{type(e).__name__}: {e}"[:300]}
         release_launch_lock()

@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 import json
+import re
 import subprocess
 import sys
 
@@ -260,9 +261,10 @@ def pipeline(monkeypatch, tmp_path, hooks=None, *, mock_authorization=True, publ
         done = directory.parent / "done"
         done.mkdir(exist_ok=True)
         (done / "result.json").write_text('{"exit": 0}')
-        result = subprocess.run([sys.executable, "-m", "pytest", "-q"],
-                                cwd=directory, capture_output=True)
-        return {"passed": result.returncode == 0, "summary": "local fixture checks"}
+        # Like the launcher: -rp lists PASSED node ids, the per-test evidence the runner requires.
+        result = subprocess.run([sys.executable, "-m", "pytest", "-q", "-rfEp"], cwd=directory, capture_output=True)
+        return {"passed": result.returncode == 0, "summary": "local fixture checks",
+                "passed_files": re.findall(r"^PASSED ([\w./-]+\.py)::", result.stdout.decode(), re.M)}
     monkeypatch.setattr(stage_c_runner, "launcher_checks", lambda repo, **kw: checks)
     original_publish = stage_c_runner.publish
     def publish(db, task, job, diff, worktree, destination, open_pr, *args, **kwargs):
@@ -270,6 +272,7 @@ def pipeline(monkeypatch, tmp_path, hooks=None, *, mock_authorization=True, publ
         if hooks.get("before_publish"):
             hooks["before_publish"](db, task)
         def fake_open_pr(*a, **k):
+            hooks.get("opened", []).append(a)   # (branch, title, body, commit) as gh_pr_opener receives them
             if hooks.get("during_open_pr"):
                 hooks["during_open_pr"](db, task)
             return "https://github.com/seerxo/acthelm/pull/999"

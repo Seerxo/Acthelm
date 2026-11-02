@@ -11,6 +11,7 @@ SIGKILLs this process at that point, with no cleanup. CALLS_LOG records every co
 """
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -122,8 +123,10 @@ def install_fixture(p: _Patch) -> None:
         done = directory.parent / "done"
         done.mkdir(exist_ok=True)
         (done / "result.json").write_text('{"exit": 0}')
-        result = subprocess.run([sys.executable, "-m", "pytest", "-q"], cwd=directory, capture_output=True)
-        return {"passed": result.returncode == 0, "summary": "local fixture checks"}
+        # Like the launcher: -rp lists PASSED node ids, the per-test evidence the runner requires.
+        result = subprocess.run([sys.executable, "-m", "pytest", "-q", "-rfEp"], cwd=directory, capture_output=True)
+        return {"passed": result.returncode == 0, "summary": "local fixture checks",
+                "passed_files": re.findall(r"^PASSED ([\w./-]+\.py)::", result.stdout.decode(), re.M)}
     p.setattr(stage_c_runner, "launcher_checks", lambda repo, **kw: checks)
 
     if os.environ.get("CI_FAILED") == "1":

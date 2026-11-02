@@ -52,8 +52,9 @@ def all_green():
 ONE = WORKFLOWS[:1]   # run-filter semantics are tested on one workflow; all_green() covers the full set
 
 
-def test_policy_requires_the_frontend_and_python_workflows_and_no_statuses():
-    assert WORKFLOWS == (".github/workflows/frontend.yml", ".github/workflows/python-tests.yml")
+def test_policy_requires_the_frontend_python_and_secret_scan_workflows_and_no_statuses():
+    assert WORKFLOWS == (".github/workflows/frontend.yml", ".github/workflows/python-tests.yml",
+                         ".github/workflows/secret-scan.yml")
     assert POLICY["required_statuses"] == []
 
 
