@@ -373,10 +373,16 @@ def ingest(db: Session, task: models.Task, facts: dict, max_repairs: int = MAX_R
                    {**base, "head": facts.get("head_sha")})
         return {"outcome": "HEAD_MOVED", "expected": commit, "head": facts.get("head_sha")}
     # Checked before any pending/re-run return: a broken approval binding never waits as READY.
-    if stage == "READY_TO_MERGE" and not _approval_recorded(db, task, task.context or {}):
-        why = "review approval does not match its task audit record"
-        _block(db, task, "Merge eligibility refused: " + why, {**base, "merge_eligibility": "refused", "reasons": [why]})
-        return {"outcome": "BLOCKED", "reasons": [why]}
+    if stage == "READY_TO_MERGE":
+        reasons = merge_authorization.binding_reasons(
+            context=task.context or {}, repository=repository or "", task_key=task.key,
+            target_branch=tracked_branch or "", facts=facts, head_repository=head_repository)
+        if not _approval_recorded(db, task, task.context or {}):
+            reasons.append("review approval does not match its task audit record")
+        if reasons:
+            _block(db, task, "Merge eligibility refused: " + "; ".join(reasons),
+                   {**base, "merge_eligibility": "refused", "reasons": reasons})
+            return {"outcome": "BLOCKED", "reasons": reasons}
 
     checks = facts.get("checks") or []
     if stage == "PR_OPEN":

@@ -36,13 +36,9 @@ def _last(history: list, stage: str) -> dict:
     return next((h for h in reversed(history) if h.get("stage") == stage), {})
 
 
-def evaluate(*, context: dict, repository: str, task_key: str, target_branch: str,
-             facts: dict, blocked: bool = False, required_statuses: tuple[str, ...],
-             head_repository: str | None = None) -> Decision:
-    """`context` is the task's JSON context; `facts` are the GitHub facts read for its PR.
-    `head_repository` is the one repository the PR head may come from (default: `repository`).
-    `required_statuses` is the explicit set of commit-status contexts (from the trusted publisher)
-    that must each be `success` on the head. It has no default: the caller must name it."""
+def binding_reasons(*, context: dict, repository: str, task_key: str, target_branch: str,
+                    facts: dict, blocked: bool = False, head_repository: str | None = None) -> list[str]:
+    """Review/publication identity checks, including while a CI re-run is still pending."""
     reasons: list[str] = []
     imp = (context or {}).get("improvement") or {}
     history = imp.get("history") or []
@@ -96,6 +92,16 @@ def evaluate(*, context: dict, repository: str, task_key: str, target_branch: st
         reasons.append("PR is a draft")
     if published.get("commit") and facts.get("head_sha") != published.get("commit"):
         reasons.append("PR head is not the published commit; the reviewed bytes may not be the ones tested")
+    return reasons
+
+
+def evaluate(*, context: dict, repository: str, task_key: str, target_branch: str,
+             facts: dict, blocked: bool = False, required_statuses: tuple[str, ...],
+             head_repository: str | None = None) -> Decision:
+    """The task's review/publication bindings and every required CI result must hold on this exact head."""
+    reasons = binding_reasons(context=context, repository=repository, task_key=task_key,
+                              target_branch=target_branch, facts=facts, blocked=blocked,
+                              head_repository=head_repository)
 
     checks = facts.get("checks") or []
     if not (facts.get("checks_complete") and checks):

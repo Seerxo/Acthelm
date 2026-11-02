@@ -399,8 +399,8 @@ def _git(repo: Path, *args: str, stdin: bytes | None = None, index: str | None =
 
 
 # Credential shapes: specific enough to refuse a publication on. JWTs are recognised by decoding (_jwts), not by shape.
-_CREDENTIAL_SHAPES = (r"sk-ant-[\w-]{8,}|github_pat_\w{8,}|gh[pousr]_\w{16,}|sk-[\w-]{16,}|xox[abprs]-[\w-]{8,}"
-                      r"|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----")
+_CREDENTIAL_SHAPES = (r"(?<!\w)(?:sk-ant-[\w-]{8,}|github_pat_\w{8,}|gh[pousr]_\w{16,}|sk-[\w-]{16,}|xox[abprs]-[\w-]{8,}"
+                      r"|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)")
 _CREDENTIAL = re.compile(_CREDENTIAL_SHAPES)
 # A dotted base64url run, matched only at its start and possessively: linear time on any input (an unanchored
 # backtracking pattern rescanned every suffix of a long run, quadratic in its length). `=` admits padded segments.
@@ -409,14 +409,15 @@ _MAX_JWT_HEADER = 2048   # a JOSE header is a few hundred bytes; longer segments
 # Joining for split-credential detection: line breaks (with their indentation and continuation backslashes) and
 # string-literal boundaries (`"a" "b"`, `'a' + 'b'`) vanish, so a token wrapped over lines or written as adjacent
 # literals reads whole again. Spaces inside a line stay, so words do not glue onto a token and hide it.
-_LINE_JOIN = re.compile(r"[ \t]*\\?[ \t]*(?:\r?\n|\r)[ \t]*")
-_LITERAL_JOIN = re.compile(r"[\"'][ \t]*\+?[ \t]*[\"']")
+_LINE_JOIN = re.compile(r"(?<![ \t])[ \t]*+\\?[ \t]*+(?:\r\n?|\n)[ \t]*+")
+_LITERAL_JOIN = re.compile(r"[\"'][ \t]*+(?:\+[ \t]*+)?[rubfRUBF]{0,2}[\"']")
+_COMMENTS = re.compile(r"#[^\r\n]*")
 
 
 @functools.lru_cache(maxsize=1024)
 def _json_object_segment(segment: str) -> bool:
-    # A JSON object starts with `{`, whose base64 starts with `e`: everything else is rejected without decoding.
-    if len(segment) < 3 or len(segment) > _MAX_JWT_HEADER or segment[0] != "e":
+    # JSON permits leading whitespace, so its base64 header need not start with `e`.
+    if len(segment) < 3 or len(segment) > _MAX_JWT_HEADER:
         return False
     segment = segment.rstrip("=")
     try:
@@ -452,26 +453,31 @@ def _mask_jwts(text: str) -> str:
     return "".join(out) + text[last:]
 
 
+def _joined_forms(text: str) -> set[str]:
+    # Keep both forms: a comment can separate literals or contain the credential itself.
+    return {_LITERAL_JOIN.sub("", _LINE_JOIN.sub("", t)) for t in (text, _COMMENTS.sub("", text))}
+
+
 def _has_credential(text: str) -> bool:
-    """A credential shape or a JWT in `text`, also once it is joined (split literals, wrapped lines)."""
-    joined = _LITERAL_JOIN.sub("", _LINE_JOIN.sub("", text))
-    return any(_CREDENTIAL.search(t) or _jwts(t) for t in (text, joined))
+    """A credential shape or a JWT, including split literals, comments and wrapped lines."""
+    return any(_CREDENTIAL.search(t) or _jwts(t) for t in {text, *_joined_forms(text)})
 
 
 # Masking also takes key=value heuristics; they over-match ordinary code (`token = acquire(...)`), so they mask only.
 # `['"]?` after the key covers JSON ("refresh_token": "...") as well as `token=...`.
 _SECRETS = re.compile(
     r"(?i)(?:" + _CREDENTIAL_SHAPES +
-    r"|(?:bearer|token|authorization)\s*[:=]?\s*[\w.~+/=-]{12,}"
-    r"|(?:api[_-]?key|secret|password|passwd|token)['\"]?\s*[:=]\s*['\"]?[^\s'\"]{6,})")
+    r"|(?:bearer|token|authorization)\s*+(?:[:=]\s*+)?[\w.~+/=-]{12,}"
+    r"|(?:api[_-]?key|secret|password|passwd|token)['\"]?\s*+[:=]\s*+['\"]?[^\s'\"]{6,})")
 
 
 def _redact_secrets(text: str) -> str:
     """URL userinfo and well-known credential shapes, masked. Output that reaches task history or a prompt passes here."""
+    # Check joined fragments before masking can erase their header and leave claims/signatures behind.
+    if any(joined != text and (_CREDENTIAL.search(joined) or _jwts(joined)) for joined in _joined_forms(text)):
+        return "[withheld: credential-shaped content]"
     masked = _SECRETS.sub("***", re.sub(r"://[^@/\s]+@", "://***@", _mask_jwts(text)))
-    # A credential that only appears once the text is joined (wrapped or split over literals) cannot be masked in
-    # place: the whole text is withheld instead.
-    return "[withheld: credential-shaped content]" if _has_credential(masked) else masked
+    return masked
 
 
 def _redact(text: str) -> str:

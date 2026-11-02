@@ -208,10 +208,60 @@ def test_a_jwt_split_over_adjacent_literals_or_lines_is_caught():
     assert stage_c_runner._outgoing_credentials(f"diff --git a/t.py b/t.py\n+X = '{padded}'\n".encode()) == ["t.py"]
 
 
-@pytest.mark.parametrize("text", ["a" * (1 << 20), ("e30." * (1 << 18)), ("a." * (1 << 19))])
+@pytest.mark.parametrize("prefix", ["", "r", "b", "f", "br", "rb", "fr", "rf", "R", "B", "F"])
+def test_prefixed_adjacent_literals_are_detected_before_redaction(prefix):
+    head, rest = ODD_JWTS[0].split(".", 1)
+    text = f'VALUE = ({prefix}"{head}."\n {prefix}"{rest}")'
+    diff = "diff --git a/t.py b/t.py\n" + "\n".join("+" + line for line in text.split("\n")) + "\n"
+    assert stage_c_runner._outgoing_credentials(diff.encode()) == ["t.py"]
+    assert stage_c_runner._redact_secrets(text) == "[withheld: credential-shaped content]"
+
+
+def test_wrapped_token_is_withheld_before_its_header_is_masked():
+    head, rest = ODD_JWTS[0].split(".", 1)
+    assert stage_c_runner._redact_secrets(f"token={head}.\n{rest}") == "[withheld: credential-shaped content]"
+
+
+def test_adjacent_literals_with_a_wrapping_comment_are_detected():
+    head, rest = ODD_JWTS[0].split(".", 1)
+    text = f'VALUE = ("{head}." # wrapped literal\n "{rest}")'
+    diff = "diff --git a/t.py b/t.py\n" + "\n".join("+" + line for line in text.split("\n")) + "\n"
+    assert stage_c_runner._outgoing_credentials(diff.encode()) == ["t.py"]
+    assert stage_c_runner._redact_secrets(text) == "[withheld: credential-shaped content]"
+
+
+def test_jwt_header_with_leading_json_whitespace_is_detected():
+    import base64
+    head = base64.urlsafe_b64encode(b'  {"alg":"HS256"}').decode().rstrip("=")
+    jwt = head + "." + _b64({"sub": "synthetic"}) + ".c2ln"
+    text = f'VALUE = "{jwt}"'
+    assert stage_c_runner._outgoing_credentials(f"diff --git a/t.py b/t.py\n+{text}\n".encode()) == ["t.py"]
+    assert jwt not in stage_c_runner._redact_secrets(text)
+
+
+@pytest.mark.parametrize("name", ["task-repository-guardian", "task-notification-worker"])
+def test_ordinary_task_names_are_not_credentials(name):
+    text = f'branch = "{name}"'
+    assert stage_c_runner._outgoing_credentials(f"diff --git a/t.py b/t.py\n+{text}\n".encode()) == []
+    assert stage_c_runner._redact_secrets(text) == text
+
+
+@pytest.mark.parametrize("text", ["a" * (1 << 20), ("e30." * (1 << 18)), ("a." * (1 << 19)),
+                                  " " * (1 << 20), "\t" * (1 << 20),
+                                  '"' + " " * (1 << 20) + "!", "token" + " " * (1 << 20) + "!"],
+                         ids=["letters", "json-dotted", "dotted", "spaces", "tabs", "literal-spaces", "key-spaces"])
 def test_jwt_scanning_stays_linear_on_hostile_megabyte_inputs(text):
     import time
+    import signal
+    def timed_out(*_):
+        raise AssertionError("credential scanning exceeded five seconds")
+    previous = signal.signal(signal.SIGALRM, timed_out)
+    signal.setitimer(signal.ITIMER_REAL, 5)
     started = time.monotonic()
-    stage_c_runner._redact_secrets(text)
-    stage_c_runner._outgoing_credentials(("diff --git a/t.py b/t.py\n+" + text + "\n").encode())
-    assert time.monotonic() - started < 5   # was over 4 s for 16 KiB of "a" alone
+    try:
+        stage_c_runner._redact_secrets(text)
+        stage_c_runner._outgoing_credentials(("diff --git a/t.py b/t.py\n+" + text + "\n").encode())
+        assert time.monotonic() - started < 5   # was over 4 s for 16 KiB of "a" alone
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)

@@ -952,3 +952,25 @@ def test_ready_whose_approval_no_longer_binds_is_blocked_even_while_ci_reruns():
     out = _ingest(db, t, facts(PENDING, complete=False))
     assert out["outcome"] == "BLOCKED" and t.status == enums.TaskStatus.BLOCKED
     assert any("audit record" in reason for reason in out["reasons"])
+
+
+@pytest.mark.parametrize("changed", ["tested_fingerprint", "published_fingerprint", "review_at", "branch", "coder"])
+def test_ready_rechecks_full_review_binding_while_ci_reruns(changed):
+    db, task = _ready()
+    imp = deepcopy(task.context["improvement"])
+    review = next(h for h in reversed(imp["history"]) if h["stage"] == "INDEPENDENT_REVIEW")
+    published = next(h for h in reversed(imp["history"]) if h["stage"] == "PR_OPEN")
+    if changed == "tested_fingerprint":
+        review["evidence"]["fingerprint"] = "0" * 64
+    elif changed == "published_fingerprint":
+        published["evidence"]["fingerprint"] = "0" * 64
+    elif changed == "review_at":
+        review["at"] = "old-review"
+    elif changed == "branch":
+        published["evidence"]["branch"] = "task/TASK-9999"
+    else:
+        next(h for h in reversed(imp["history"]) if h["stage"] == "TESTING")["evidence"]["coder"] = "codex"
+    task.context = {**task.context, "improvement": imp}
+    out = _ingest(db, task, facts(PENDING, complete=False))
+    assert out["outcome"] == "BLOCKED" and task.status == enums.TaskStatus.BLOCKED
+    assert out["reasons"]
