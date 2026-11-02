@@ -117,8 +117,14 @@ def admission(db, task):
 
 
 def publication_role() -> tuple[str, str]:
-    """GitHub's answer, right now, for the worker token's role on the upstream repository (PASS = read-only)."""
-    return stage_c_credential_boundary.upstream_role(repository=REPOSITORY)
+    """GitHub's answer, right now, for the worker token's role on the upstream repository (PASS = read-only).
+    With a separate PR token (GH_PR_TOKEN), it must be read-only upstream too: it may open PRs, never push or merge."""
+    role = stage_c_credential_boundary.upstream_role(repository=REPOSITORY)
+    pr_token = os.environ.get("GH_PR_TOKEN")
+    if role[0] != "PASS" or not pr_token:
+        return role
+    pr_role = stage_c_credential_boundary.upstream_role({**os.environ, "GH_TOKEN": pr_token}, repository=REPOSITORY)
+    return pr_role if pr_role[0] != "PASS" else role
 
 
 def launcher_cooling(db) -> bool:
