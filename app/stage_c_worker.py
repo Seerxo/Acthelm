@@ -413,7 +413,8 @@ def execute(db, task, spec, usable):
                                 f"https://github.com/{head_repository}.git",
                                 stage_c_runner.gh_pr_opener(REPOSITORY, "main", head_repository),
                                 before_publish=before_publish,
-                                find_pr=stage_c_runner.gh_pr_lookup(REPOSITORY, "main", head_repository))
+                                find_pr=stage_c_runner.gh_pr_lookup(REPOSITORY, "main", head_repository),
+                                pr_absent=stage_c_runner.gh_pr_absent(REPOSITORY, "main", head_repository))
     except PublishedPRRefused as refused:
         out = {"outcome": "PUBLISHED_PR_REFUSED", "reason": refused.reason}
     except Exception as error:

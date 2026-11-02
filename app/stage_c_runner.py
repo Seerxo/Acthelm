@@ -399,7 +399,8 @@ def _redact(text: str) -> str:
 def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Path, remote: str,
             open_pr: PrOpener, ttl: timedelta = timedelta(minutes=10),
             before_publish: Callable[[], None] | None = None,
-            find_pr: Callable[[str, str], str] | None = None) -> dict:
+            find_pr: Callable[[str, str], str] | None = None,
+            pr_absent: Callable[[str], bool] | None = None) -> dict:
     """Push task/<KEY> and open its PR. Outcomes: NOT_APPROVED, LEASE_BUSY, DRIFT, LEASE_LOST,
     PUSH_FAILED, PR_FAILED (branch pushed, delivery unverified), PR_OPEN.
 
@@ -432,6 +433,10 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
             return {"outcome": "NOT_APPROVED", "detail": "no independent approval of exactly this diff"}
         imp = dict(task.context["improvement"])
         approved = imp["approval"]["fingerprint"]
+        pr_title = f"{task.key}: {task.title}"
+        pr_body = (f"Fingerprint `{approved}`, reviewed by {imp['approval']['reviewer']}.\n\n"
+                   f"Success criteria: {task.success_criteria}\n\nOpened by the Company OS "
+                   "control plane. The founder merges; nothing here auto-merges or deploys.")
         try:
             on_branch = _git(worktree, "symbolic-ref", "--short", "HEAD")
             head = _git(worktree, "rev-parse", "HEAD")
@@ -461,7 +466,17 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
                                    protocol=protocol).split("\t")[0]
                 if remote_head != head:
                     raise ValueError("remote head mismatch")
-                url = find_pr(branch, head)
+                try:
+                    url = find_pr(branch, head)
+                except Exception:
+                    # The reviewed commit is pushed but no PR was ever opened (pilot 2026-11-02: the push token could
+                    # not create upstream PRs). Open it once, only if GitHub has no PR at all, open or closed, for this
+                    # head: a closed PR is a founder decision and is never reopened; GitHub refuses a second open PR.
+                    if pr_absent is None or pr_absent(branch) is not True:
+                        raise
+                    if before_publish is not None:
+                        before_publish()           # the token roles are re-read right before writing to GitHub
+                    url = open_pr(branch, pr_title, pr_body, head)
             except Exception:
                 return _stop(db, "PR_FAILED", "existing publication could not be verified", branch=branch, commit=head)
             stage_c.advance(db, task, "PR_OPEN", HOLDER, {"branch": branch, "commit": head,
@@ -490,10 +505,7 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
         if remote_head != commit:
             return _stop(db, "PUSH_FAILED", f"remote {branch} is {remote_head!r}, not {commit}")
         try:
-            url = previous.get("pr") or open_pr(branch, f"{task.key}: {task.title}",
-                          f"Fingerprint `{approved}`, reviewed by {imp['approval']['reviewer']}.\n\n"
-                          f"Success criteria: {task.success_criteria}\n\nOpened by the Company OS "
-                          "control plane. The founder merges; nothing here auto-merges or deploys.", commit)
+            url = previous.get("pr") or open_pr(branch, pr_title, pr_body, commit)
         except Exception as e:
             return _stop(db, "PR_FAILED", _redact(f"{type(e).__name__}: {e}"), branch=branch, commit=commit)
         stage_c.advance(db, task, "PR_OPEN", HOLDER, {"branch": branch, "commit": commit,
@@ -540,6 +552,26 @@ def gh_pr_lookup(repository: str, base_branch: str,
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError):
             raise RuntimeError("PR publication could not be verified; no create retry attempted") from None
     return lookup
+
+
+def gh_pr_absent(repository: str, base_branch: str, head_repository: str | None = None) -> Callable[[str], bool]:
+    """True only when GitHub answers that no PR in any state exists for this task branch into `base_branch`.
+    Any error, an unreadable answer or a single existing PR (open, closed or merged) is False: fail closed."""
+    repository = repo_guardian.repository_name(repository)
+    head_repository = repo_guardian.repository_name(head_repository or repository)
+    if not repository or not head_repository or not repo_guardian_github.BRANCH.fullmatch(base_branch):
+        raise ValueError("PR publication requires a repository and tracked base branch")
+
+    def absent(branch: str) -> bool:
+        _validate_pr_identity(branch, "0" * 40)
+        try:
+            head = quote(f"{head_repository.split('/')[0]}:{branch}", safe="")
+            pulls = repo_guardian_github.api(
+                f"repos/{repository}/pulls?state=all&head={head}&base={quote(base_branch, safe='')}&per_page=2", ".")
+        except Exception:
+            return False
+        return isinstance(pulls, list) and len(pulls) == 0
+    return absent
 
 
 def _validate_pr_identity(branch: str, commit: str) -> None:
