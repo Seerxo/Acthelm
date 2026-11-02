@@ -436,6 +436,7 @@ def execute(db, task, spec, usable):
         cool[LAUNCHER_COOLDOWN_KEY] = {"until": (worker._now() + worker.PROVIDER_COOLDOWN).isoformat(),
                                        "health": "LAUNCHER_UNAVAILABLE"}
         worker._heartbeat(db, cooldown=cool)
+    failure_event = None
     # From here to the final commit nothing commits: the check and every write share the task row lock.
     owns_attempt = owns()
     if capacity_failure:
@@ -504,7 +505,7 @@ def execute(db, task, spec, usable):
                     "branch": out.get("branch"), "commit": out.get("commit"),
                     "fingerprint": approval["fingerprint"], "review_audit_id": approval["audit_id"]}}
         elif owns_attempt:
-            worker._finish_failure(db, task, outcome)
+            failure_event = worker._set_failure(db, task, outcome)
     orphan_pr = None
     if not owns_attempt:
         # Never a delivery or a successful run for this task. A PR pushed while the attempt still owned the task
@@ -530,6 +531,8 @@ def execute(db, task, spec, usable):
         worker._blocked_event(db, task, run.error or outcome)
     else:
         db.commit()
+    if failure_event:
+        worker._event(db, *failure_event, task=task, detail=outcome)
     if orphan_pr:
         worker._event(db, "TASK_FAILED", enums.Severity.HIGH,
                       f"{task.key} changed during Stage C; PR {orphan_pr} is not its delivery: founder review",

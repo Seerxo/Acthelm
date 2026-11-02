@@ -5,6 +5,8 @@ a retry told only "1 failed", a read-only file silently edited, or retries burne
 import subprocess
 from datetime import timedelta
 
+import pytest
+
 from app import enums, models, stage_c_runner, stage_c_worker, worker
 from tests.test_stage_c_worker import Reviewer, pipeline, write_task
 from tests.test_worker import SPECS, _db
@@ -123,6 +125,56 @@ def test_a_different_failure_is_a_normal_retry(monkeypatch, tmp_path):
     assert _tick(db)["verdict"] == "CHECKS_FAILED"
     assert _tick(db)["verdict"] == "CHECKS_FAILED"
     assert task.status == enums.TaskStatus.READY and task.retry_count == 2
+
+
+def test_failed_checks_keep_the_ownership_lock_until_the_audit_commits(monkeypatch, tmp_path):
+    def coder(directory, job):
+        (directory / "tests/test_metrics.py").write_text("def test_metric():\n    assert 1 == 2\n")
+    checks = lambda directory: {"passed": False, "summary": "1 failed", "failures": FAILURES}
+    db, task = _setup(monkeypatch, tmp_path, coder, checks)
+    owner_state, commit = stage_c_worker.owner_state, db.commit
+    locked = False
+    final_commits = []
+
+    def track_ownership(session, task_id, lock=False):
+        nonlocal locked
+        result = owner_state(session, task_id, lock=lock)
+        run = session.query(models.AgentRun).filter_by(task_id=task_id).first()
+        if lock and run and (run.tool_calls or {}).get("outcome") == "CHECKS_FAILED":
+            locked = True
+        return result
+
+    def checked_commit():
+        nonlocal locked
+        if locked:
+            row = db.query(models.AuditLog).filter_by(
+                task_id=task.id, action="task.autonomous-run", reason="CHECKS_FAILED").one_or_none()
+            assert row is not None, "commit released the ownership lock before the final audit"
+            assert row.after["status"] == "READY" and row.after["retry_count"] == 1
+            final_commits.append(True)
+        commit()
+        locked = False
+
+    def failed_notification(session, event):
+        assert final_commits == [True]
+        raise RuntimeError("notification unavailable")
+
+    monkeypatch.setattr(stage_c_worker, "owner_state", track_ownership)
+    monkeypatch.setattr(db, "commit", checked_commit)
+    monkeypatch.setattr(worker.notifier, "dispatch", failed_notification)
+    with pytest.raises(RuntimeError, match="notification unavailable"):
+        _tick(db)
+    db.rollback()
+    db.refresh(task)
+    assert final_commits == [True]
+    assert task.status == enums.TaskStatus.READY and task.retry_count == 1
+    run = db.query(models.AgentRun).filter_by(task_id=task.id).one()
+    assert run.status == enums.AgentRunStatus.FAILED and run.error == "CHECKS_FAILED"
+    assert db.query(models.AuditLog).filter_by(
+        task_id=task.id, action="task.autonomous-run", reason="CHECKS_FAILED").count() == 1
+    event = db.query(models.Event).filter_by(task_id=task.id, event_type="TASK_FAILED").one()
+    assert event.severity == enums.Severity.MEDIUM
+    assert event.payload == {"title": f"{task.key} attempt 1 failed", "message": "CHECKS_FAILED"}
 
 
 def test_failure_classes_and_bounds():
