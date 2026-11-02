@@ -64,3 +64,82 @@ def test_a_pr_token_that_can_write_upstream_stops_publication(monkeypatch):
 def test_the_pr_token_never_reaches_a_provider_cli():
     env = providers.child_env({"GH_PR_TOKEN": "pr-token", "GH_TOKEN": "fork-token", "PATH": "/usr/bin"})
     assert "GH_PR_TOKEN" not in env and "GH_TOKEN" not in env
+
+
+# --------------------------------------------------------------------------- recovery of a pushed, never-opened PR
+import pytest
+
+from app import enums, worker
+from tests.test_stage_c_worker import Reviewer, pipeline, write_task
+from tests.test_worker import SPECS, _db
+
+
+def _first_publish_fails_after_the_push(monkeypatch, tmp_path):
+    """Pilot 2026-11-02 shape: checks pass, Codex approves, the branch is pushed, the PR create fails."""
+    failing = {"on": True}
+
+    def during_open_pr(db, task):
+        if failing["on"]:
+            raise RuntimeError("fork-only token cannot open the upstream PR")
+    pipeline(monkeypatch, tmp_path, {"during_open_pr": during_open_pr}, publish_repository="seerxo-agent/seerxo-os")
+    monkeypatch.setattr(stage_c_runner, "gh_pr_lookup",
+                        lambda *a, **k: (lambda branch, commit: (_ for _ in ()).throw(RuntimeError("no PR"))))
+    db = _db()
+    task = write_task(db)
+    out = worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+    assert out["verdict"] == "PR_FAILED" and task.status == enums.TaskStatus.BLOCKED
+    failing["on"] = False
+    task.status, task.error = enums.TaskStatus.READY, None            # the founder's unblock after the fix
+    db.commit()
+    return db, task
+
+
+@pytest.mark.parametrize("absent, verdict", [(True, "PR_OPEN"), (False, "PR_FAILED"), (None, "PR_FAILED")])
+def test_recovery_opens_the_missing_pr_only_when_github_has_none(monkeypatch, tmp_path, absent, verdict):
+    db, task = _first_publish_fails_after_the_push(monkeypatch, tmp_path)
+    asked = []
+
+    def gh_pr_absent(*a, **k):
+        def check(branch):
+            asked.append(branch)
+            if absent is None:
+                raise RuntimeError("GitHub unreachable")     # gh_pr_absent itself maps errors to False
+            return absent
+        return check
+    monkeypatch.setattr(stage_c_runner, "gh_pr_absent", gh_pr_absent)
+    out = worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+    assert out["verdict"] == verdict, out
+    assert asked == [f"task/{task.key}"]
+    if verdict == "PR_OPEN":
+        assert task.status == enums.TaskStatus.REVIEW
+        assert task.artifacts["pr"] == "https://github.com/seerxo/acthelm/pull/999"
+        assert out["model_calls"] == 0                       # the approved change is published, never re-coded
+
+
+def test_gh_pr_absent_fails_closed(monkeypatch):
+    calls = []
+
+    def api(path, jq):
+        calls.append(path)
+        return answers.pop(0)
+    monkeypatch.setattr(stage_c_runner.repo_guardian_github, "api", api)
+    check = stage_c_runner.gh_pr_absent(UPSTREAM, "main", FORK)
+    answers = [[]]
+    assert check("task/TASK-0001") is True and "state=all" in calls[0] and "seerxo-agent%3Atask%2FTASK-0001" in calls[0]
+    for answer in ([{"number": 5, "state": "closed"}], {"message": "x"}, None):
+        answers = [answer]
+        assert check("task/TASK-0001") is False
+    monkeypatch.setattr(stage_c_runner.repo_guardian_github, "api",
+                        lambda *a: (_ for _ in ()).throw(RuntimeError("down")))
+    assert check("task/TASK-0001") is False
+
+
+def test_a_role_refusal_during_recovery_keeps_its_security_block(monkeypatch, tmp_path):
+    """The re-read before opening the missing PR finds the token can write upstream: the dedicated block, not PR_FAILED."""
+    db, task = _first_publish_fails_after_the_push(monkeypatch, tmp_path)
+    monkeypatch.setattr(stage_c_runner, "gh_pr_absent", lambda *a, **k: (lambda branch: True))
+    answers = iter([("PASS", "read-only"), ("FAIL", "can push")])        # publish start, then right before the create
+    monkeypatch.setattr(stage_c_worker, "publication_role", lambda: next(answers))
+    out = worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+    assert out["verdict"] == "PUBLISHED_PR_REFUSED", out
+    assert task.status == enums.TaskStatus.BLOCKED and task.error.startswith("upstream_role_not_read_only")
