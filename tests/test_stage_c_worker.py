@@ -802,6 +802,15 @@ def runtime_report(db, sha, *, ready=True, age=timedelta(minutes=1), writer="wat
     db.commit()
 
 
+ACCEPTING_FOUNDER = "founder:access:founder@example.invalid"
+
+
+def accept_host(db, sha, checks=None):
+    """The real path: the host wizard's operator candidate, then the verified founder's acceptance."""
+    control.record_acceptance_candidate(db, sha, checks or dict.fromkeys(stage_c_worker.ACCEPTANCE_CHECKS, True))
+    return control.accept_host(db, sha, founder=ACCEPTING_FOUNDER)
+
+
 def fully_accepted(monkeypatch, tmp_path, sha="a" * 40):
     monkeypatch.setenv("STAGE_C_JOBS_ROOT", str(tmp_path))
     monkeypatch.setenv("COMPANY_OS_GIT_SHA", sha)
@@ -809,9 +818,7 @@ def fully_accepted(monkeypatch, tmp_path, sha="a" * 40):
     monkeypatch.setattr(stage_c_worker.shutil, "which", lambda name: "/usr/bin/" + name)
     (tmp_path / ".control/sez-company.git").mkdir(parents=True)
     db = _db()
-    db.add(models.ControlState(key="stage-c-host-acceptance", updated_by="founder", value={
-        "source_sha": sha, "checks": dict.fromkeys(stage_c_worker.ACCEPTANCE_CHECKS, True)}))
-    db.commit()
+    accept_host(db, sha)
     return db
 
 
@@ -863,19 +870,22 @@ def test_acceptance_requires_founder_all_checks_and_this_deployed_source(monkeyp
     checks = {"image_build": True, "egress": True, "launcher": True, "permissions": True,
               "direct_egress_blocked": True, "github_blocked": True, "random_hosts_blocked": True,
               "provider_hosts": True, "claude_edit": True, "offline_checks": True, "credential_isolation": True}
-    # Codex is the reviewer only: its edit sandbox is not an acceptance requirement.
-    row = models.ControlState(key="stage-c-host-acceptance", updated_by="founder",
-                              value={"source_sha": "a" * 40, "checks": checks})
-    db.add(row); db.commit()
+    # A candidate missing a check (here the Codex reviewer probe) can never be accepted.
+    with pytest.raises(ValueError):
+        control.record_acceptance_candidate(db, "a" * 40, checks)
+    with pytest.raises(ValueError):
+        accept_host(db, "a" * 40, {**checks, "codex_review_probe": False})
     assert stage_c_worker.ready(db) == "stage_c_host_not_accepted"
-    row.value = {"source_sha": "a" * 40, "checks": {**checks, "codex_review_probe": True}}
-    db.commit()
+    accept_host(db, "a" * 40, {**checks, "codex_review_probe": True})
     assert stage_c_worker.ready(db) == "stage_c_runtime_not_ready"  # accepted, but nothing watched it live
     runtime_report(db, "a" * 40)
     assert stage_c_worker.ready(db) is None
+    row = db.get(models.ControlState, "stage-c-host-acceptance")
     row.updated_by = "company-worker"; db.commit()
     assert stage_c_worker.ready(db) == "stage_c_host_not_accepted"
-    row.updated_by = "founder"; db.commit()
+    row.updated_by = "founder"; db.commit()                  # the legacy plain name is not a verified identity
+    assert stage_c_worker.ready(db) == "stage_c_host_not_accepted"
+    row.updated_by = ACCEPTING_FOUNDER; db.commit()
     monkeypatch.setenv("COMPANY_OS_GIT_SHA", "b" * 40)
     assert stage_c_worker.ready(db) == "stage_c_host_not_accepted"
 

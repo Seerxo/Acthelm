@@ -1042,6 +1042,23 @@ def stage_c_authorize(body: schemas.StageCAuthorize, request: Request, db: Sessi
     return {k: value[k] for k in ("task_key", "source_sha", "expires_at", "issued_by", "action")}
 
 
+@app.post("/stage-c/acceptance", status_code=201)
+def stage_c_acceptance(request: Request, db: Session = Depends(get_db)) -> dict:
+    """The verified founder accepts the Stage C host for the deployed SHA, from the fresh all-PASS candidate the host
+    wizard recorded. Nothing is taken from the request body; the API and the worker must agree on the SHA."""
+    who = approval_identity.require_founder(request)
+    api_sha = os.environ.get("COMPANY_OS_GIT_SHA") or ""
+    worker_sha = ((worker.worker_state(db).get("runtime") or {}).get("git_sha")) or ""
+    if not api_sha or api_sha != worker_sha:
+        raise HTTPException(409, "the API and the worker do not report the same deployed source SHA")
+    try:
+        value = control.accept_host(db, api_sha, founder=who.id)
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(422, str(e))
+    return {k: value[k] for k in ("source_sha", "candidate_at", "issued_at", "issued_by")}
+
+
 @app.post("/stage-c/standing", status_code=201)
 def stage_c_standing(body: schemas.StageCStanding, request: Request, db: Session = Depends(get_db)) -> dict:
     """Issue the standing Stage C authorization: named files, a few days, a few runs a day, bound to the
