@@ -92,6 +92,33 @@ def test_revise_verdict_carries_reasons_and_an_ambiguous_verdict_is_not_accepted
     assert st["status"] == "REVISE" and any("alternatives" in r for r in st["reasons"])
 
 
+def test_package_hash_is_deterministic_and_sensitive_to_title_and_thumbnail():
+    base = packaging.package_hash("A Title", "ICE AHEAD")
+    assert base == packaging.package_hash("A Title", "ICE AHEAD")
+    assert base != packaging.package_hash("Another Title", "ICE AHEAD")
+    assert base != packaging.package_hash("A Title", "ICE BEHIND")
+
+
+def test_findings_is_empty_for_empty_history():
+    assert packaging.findings("A Fresh Title", "ICE AHEAD", []) == []
+
+
+def test_first_word_seen_once_is_not_flagged():
+    history = [{"title": "Something Else Entirely", "thumbnailText": "NO ESCAPE"},
+               {"title": "Quiet Harbor Mystery", "thumbnailText": "LAST SIGNAL"}]
+    assert packaging.findings("A Fresh Title", "NO TIME LEFT", history) == []
+
+
+def test_only_the_history_window_counts():
+    filler = [{"title": f"Filler{i} Story", "thumbnailText": f"WORD{i} HERE"}
+              for i in range(packaging.HISTORY_WINDOW)]
+    old_repeat = {"title": "Old Unique Title", "thumbnailText": "ICE AHEAD"}
+    assert packaging.findings("A Fresh Title", "ICE AHEAD", filler + [old_repeat]) == []
+    # Control: the same repeat inside the window is flagged.
+    flagged = packaging.findings("A Fresh Title", "ICE AHEAD", filler[:-1] + [old_repeat])
+    assert any("already used" in r for r in flagged)
+
+
 def test_unknown_package_is_unknown_not_approved():
     db = _db()
     assert packaging.status(db, "nope", "deadbeef")["status"] == "UNKNOWN"
