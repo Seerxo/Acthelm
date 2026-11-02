@@ -55,6 +55,42 @@ class Job:
     success_criteria: str
     provider: str              # who codes ("claude" / "codex"); the reviewer must differ
     allowed_new: list[str] = field(default_factory=list)
+    context: list[str] = field(default_factory=list)   # files the coder may read, never change
+
+
+MAX_CONTEXT_FILES = 10
+MAX_FAILURE_LINES, MAX_FAILURE_CHARS = 30, 4000
+MAX_PREVIOUS_DIFF = 6000
+
+
+def failure_class(passed: bool, summary: str, failures: list[str]) -> str | None:
+    """Why the checks failed, from the checks' own bounded output: decides nothing, explains the retry."""
+    if passed:
+        return None
+    text = summary.lower()
+    if "timed out" in text:
+        return "timeout"
+    if "did not run" in text or "refused" in text or "crashed" in text or not summary:
+        return "checks_unavailable"
+    if "error" in text and not any(f.startswith("FAILED ") for f in failures):
+        return "collection_error" if "collected" in text or "interrupted" in text else "test_error"
+    return "test_failure"
+
+
+def _failed_tests(failures: list) -> list[str]:
+    return sorted({f.split(" ", 2)[1] for f in (failures if isinstance(failures, list) else [])
+                   if isinstance(f, str) and f.startswith(("FAILED ", "ERROR ")) and len(f.split(" ")) > 1})
+
+
+def _bounded_failures(raw) -> list[str]:
+    out, total = [], 0
+    for line in raw if isinstance(raw, list) else []:
+        line = _redact(str(line))
+        if total + len(line) > MAX_FAILURE_CHARS or len(out) >= MAX_FAILURE_LINES:
+            break
+        out.append(line)
+        total += len(line)
+    return out
 
 
 Coder = Callable[[Path, Job], None]
@@ -68,6 +104,11 @@ class CoderLaunchRefused(Exception):
 
 class CoderStartStateUnknown(Exception):
     """The coder started, but persisting its start acknowledgement failed."""
+
+
+class LauncherRefused(Exception):
+    """The root launcher refused the request (pause authority, fence, config): infrastructure, never the task's fault.
+    Recognized from the launcher's own `refused` field, never from model output."""
 
 
 def _stop(db: Session, outcome: str, detail: str, **extra) -> dict:
@@ -95,8 +136,11 @@ def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, 
         if ((task.context or {}).get("improvement") or {}).get("stage") != "IMPLEMENTING":
             stage_c.advance(db, task, "IMPLEMENTING", HOLDER, {"base": job.base, "paths": job.paths})
             db.commit()
-        manifest = coder_source.export_source(job.mirror, job.base, job.paths, root / "base")
-        coder_source.export_source(job.mirror, job.base, job.paths, root / "workspace")
+        # Read-only context travels in both exports: the coder reads it, and any edit to it is a diff against base
+        # that is refused below, so reading a module never becomes writing it.
+        exported = job.paths + [c for c in job.context if c not in job.paths]
+        manifest = coder_source.export_source(job.mirror, job.base, exported, root / "base")
+        coder_source.export_source(job.mirror, job.base, exported, root / "workspace")
         try:
             coder(root / "workspace", job)
         except CoderLaunchRefused as e:
@@ -104,6 +148,8 @@ def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, 
             return _stop(db, "OWNER_CHANGED", str(e)[:300])
         except CoderStartStateUnknown:
             return _stop(db, "LEASE_LOST", "could not persist coder start state")
+        except LauncherRefused as e:
+            return _stop(db, "LAUNCHER_REFUSED", str(e)[:300])
         except Exception as e:  # the coder is untrusted; its failure is an outcome, not a crash
             return _stop(db, "CODER_FAILED", f"{type(e).__name__}: {e}")
         if before_write:
@@ -111,6 +157,8 @@ def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, 
         try:
             change = coder_diff.import_changes(root / "base", root / "workspace", manifest,
                                                job.allowed_new)
+            if changed_context := sorted(set(change["modified"]) - set(job.paths)):
+                raise coder_diff.RejectedChange(f"read-only context changed: {', '.join(changed_context)}")
             worktree = stage_c.prepare_worktree(job.mirror, root / "worktrees", job.task_key, job.base)
             coder_diff.apply_to_worktree(worktree, change["diff"], change["fingerprint"])
         except coder_diff.RejectedChange as e:
@@ -129,15 +177,32 @@ def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, 
             result = {"passed": False, "summary": f"checks crashed: {type(e).__name__}: {e}"}
         passed = isinstance(result, dict) and result.get("passed") is True
         summary = str(result.get("summary", "") if isinstance(result, dict) else result)[:300]
+        refused = isinstance(result, dict) and result.get("refused") is True
+        failures = [] if passed else _bounded_failures(result.get("failures") if isinstance(result, dict) else None)
         # A holder whose lease expired during the run must not advance work another task now owns.
         if before_write:
             before_write()
         if not stage_c.holds(db, job.repository, token):
             return _stop(db, "LEASE_LOST", "lease expired or was taken during the run")
         evidence = {"fingerprint": fingerprint, "checks_passed": passed, "checks": summary}
+        if not passed and refused:
+            # The launcher never ran the checks: back to IMPLEMENTING without judging the change.
+            stage_c.advance(db, task, "IMPLEMENTING", HOLDER,
+                            evidence | {"failure_class": "checks_unavailable", "failures": []})
+            return _stop(db, "LAUNCHER_REFUSED", summary, fingerprint=fingerprint)
         if not passed:
+            history = ((task.context or {}).get("improvement") or {}).get("history", [])
+            earlier = next((h.get("evidence", {}) for h in reversed(history[:-1])
+                            if h.get("stage") == "IMPLEMENTING" and h.get("evidence", {}).get("checks_passed") is False
+                            and h.get("evidence", {}).get("failure_class") != "checks_unavailable"), {})
+            failed = _failed_tests(failures)
+            repeated = bool(failed) and failed == _failed_tests(earlier.get("failures"))
+            evidence |= {"failure_class": failure_class(False, summary, failures), "failures": failures,
+                         # The coder's own previous change, bounded: data for the next attempt, never instructions.
+                         "previous_diff": _redact_secrets(change["diff"].decode("utf-8", "replace"))[:MAX_PREVIOUS_DIFF],
+                         "repeated": repeated}
             stage_c.advance(db, task, "IMPLEMENTING", HOLDER, evidence)
-            return _stop(db, "CHECKS_FAILED", summary, fingerprint=fingerprint)
+            return _stop(db, "CHECKS_REPEATED" if repeated else "CHECKS_FAILED", summary, fingerprint=fingerprint)
         stage_c.advance(db, task, "INDEPENDENT_REVIEW", HOLDER, evidence)
         return _stop(db, "READY_FOR_REVIEW", summary, fingerprint=fingerprint,
                      diff=change["diff"], worktree=str(worktree))
@@ -316,8 +381,19 @@ def _git(repo: Path, *args: str, stdin: bytes | None = None, index: str | None =
     return out.strip() if strip else out
 
 
+_SECRETS = re.compile(
+    r"(?i)(?:sk-ant-[\w-]{8,}|github_pat_\w{8,}|gh[pousr]_\w{16,}|sk-[\w-]{16,}|xox[abprs]-[\w-]{8,}|AKIA[0-9A-Z]{16}"
+    r"|(?:bearer|token|authorization)\s*[:=]?\s*[\w.~+/=-]{12,}"
+    r"|(?:api[_-]?key|secret|password|passwd|token)\s*[:=]\s*['\"]?[^\s'\"]{6,})")
+
+
+def _redact_secrets(text: str) -> str:
+    """URL userinfo and well-known credential shapes, masked. Output that reaches task history or a prompt passes here."""
+    return _SECRETS.sub("***", re.sub(r"://[^@/\s]+@", "://***@", text))
+
+
 def _redact(text: str) -> str:
-    return re.sub(r"://[^@/\s]+@", "://***@", text)[:300]
+    return _redact_secrets(text)[:300]
 
 
 def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Path, remote: str,
@@ -505,10 +581,17 @@ def gh_pr_opener(repository: str, base_branch: str, head_repository: str | None 
 # (scripts/company-coder-launch) runs one fixed-profile container and writes done/result.json.
 # For this, `run`'s workdir must be the launcher's jobs root (/srv/company-coder/jobs).
 
+MAX_PROMPT_BYTES = 60 * 1024   # below the launcher's 64 KiB MAX_PROMPT, so an oversized prompt fails here, counted
+
+
 def coder_prompt(job: Job) -> str:
+    context = [c for c in job.context if c not in job.paths]
+    read_only = (f"These files are here for reading only; never change them: {', '.join(context)}.\n"
+                 if context else "")
     return (f"Objective: {job.objective}\nSuccess criteria: {job.success_criteria}\n\n"
-            f"The current directory holds only these files from the repository: {', '.join(job.paths)}.\n"
-            "Edit them to meet the objective. Make the smallest correct change; do not add, "
+            f"The current directory holds these files from the repository. You may edit only: {', '.join(job.paths)}.\n"
+            f"{read_only}"
+            "Read the code you depend on before writing against it. Make the smallest correct change; do not add, "
             "rename or delete files. You cannot run anything; independent tests and a review "
             "by another model follow.")
 
@@ -627,10 +710,16 @@ def launcher_coder(timeout_s: int = 1200, poll_s: float = 5.0, sleep=time.sleep,
                     after_start: Callable[[bool], None] | None = None) -> Coder:
     def call(workspace: Path, job: Job) -> None:
         job_dir = Path(workspace).parent
-        (job_dir / "prompt.txt").write_text(coder_prompt(job))
+        prompt = coder_prompt(job)
+        if len(prompt.encode()) > MAX_PROMPT_BYTES:
+            # Before any request: a spent, finite attempt (CODER_FAILED), never a launcher refusal that loops.
+            raise RuntimeError(f"coder prompt exceeds {MAX_PROMPT_BYTES} bytes")
+        (job_dir / "prompt.txt").write_text(prompt)
         result = _launch(job_dir, {"kind": "code", "provider": job.provider, "timeout_s": timeout_s},
                          timeout_s + 120, poll_s, sleep, before_enqueue, after_start)
-        if result.get("refused") or result.get("timed_out") or result.get("exit") != 0:
+        if result.get("refused"):
+            raise LauncherRefused(f"launcher {result['refused']}"[:300])
+        if result.get("timed_out") or result.get("exit") != 0:
             # run() turns this into CODER_FAILED; detail is bounded, never raw model output.
             raise RuntimeError(f"coder {result.get('refused') or result.get('summary') or 'failed'}"[:300])
         edited = job_dir / "done" / "workspace"
@@ -650,5 +739,6 @@ def launcher_checks(repo: str, timeout_s: int = 1200, poll_s: float = 5.0, sleep
         except (TimeoutError, OSError, ValueError) as e:
             return {"passed": False, "summary": f"checks did not run: {type(e).__name__}"}
         passed = result.get("exit") == 0 and not result.get("timed_out") and not result.get("refused")
-        return {"passed": passed, "summary": str(result.get("refused") or result.get("summary") or "")[:300]}
+        return {"passed": passed, "summary": str(result.get("refused") or result.get("summary") or "")[:300],
+                "refused": bool(result.get("refused")), "failures": _bounded_failures(result.get("failures"))}
     return call

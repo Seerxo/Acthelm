@@ -392,6 +392,49 @@ def test_checks_pass_only_on_exit_zero(L):
         assert checks(job_dir / "checks")["passed"] is passed
 
 
+PYTEST_OUTPUT = """.....F..
+=================================== FAILURES ===================================
+_____ test_check_activation_accepts_non_active_goal_without_selector _____
+    def test_check_activation_accepts_non_active_goal_without_selector():
+>       goals.check_activation(db, goal)
+E       TypeError: check_activation() takes 1 positional argument but 2 were given
+tests/test_goals.py:157: TypeError
+=========================== short test summary info ============================
+FAILED tests/test_goals.py::test_check_activation_accepts_non_active_goal_without_selector
+1 failed, 39 passed in 2.74s
+"""
+
+
+def test_failure_lines_keep_pytests_own_failure_lines_bounded(L):
+    assert L.failure_lines(PYTEST_OUTPUT) == [
+        "FAILED tests/test_goals.py::test_check_activation_accepts_non_active_goal_without_selector",
+        "E       TypeError: check_activation() takes 1 positional argument but 2 were given",
+        "tests/test_goals.py:157: TypeError"]
+    flood = "\n".join("E   " + "x" * 1000 for _ in range(100))
+    lines = L.failure_lines(flood)
+    assert len(lines) == L.MAX_FAILURE_LINES and all(len(l) == L.MAX_FAILURE_CHARS for l in lines)
+    # Long tracebacks never crowd out the node ids that come last in pytest's output.
+    noisy = flood + "\nFAILED tests/test_a.py::test_one\nFAILED tests/test_a.py::test_two\n"
+    assert L.failure_lines(noisy)[:2] == ["FAILED tests/test_a.py::test_one", "FAILED tests/test_a.py::test_two"]
+    assert L.failure_lines("3 passed in 0.1s") == []
+
+
+def test_checks_return_their_failure_lines_and_a_code_job_never_does(L):
+    """A repair attempt needs to know which test failed and why; a code job's stdout is model output and stays out."""
+    job_dir = L.JOBS / "TASK-0101"
+    (job_dir / "checks").mkdir(parents=True)
+    failures = ["FAILED tests/test_goals.py::test_x - TypeError: boom"]
+    checks = stage_c_runner.launcher_checks("sez-company", timeout_s=60, poll_s=0, sleep=lambda _: L.handle(
+        "TASK-0101", CFG, runner=lambda *a: {"exit": 1, "timed_out": False, "summary": "1 failed",
+                                             "failures": failures}))
+    result = checks(job_dir / "checks")
+    assert result["passed"] is False and result["failures"] == failures
+    job = _job(L, key="TASK-0102")
+    L.handle("TASK-0102", CFG, runner=lambda *a: {"exit": 0, "timed_out": False, "summary": "done",
+                                                  "failures": ["FAILED made up by the model"]})
+    assert "failures" not in json.loads((job / "done" / "result.json").read_text())
+
+
 def test_no_launcher_result_is_not_success(tmp_path, monkeypatch):
     (tmp_path / "TASK-0101" / "checks").mkdir(parents=True)
     clock = iter([0, 0, 10_000])

@@ -88,6 +88,8 @@ acthelm <command>
   stage-c authorize   refused here: root on the host is not the verified founder. The one-task, one-shot,
                       deployed-SHA-bound permission is issued by POST /stage-c/authorization (Cloudflare Access).
   stage-c revoke      remove the authorization (root on the host, recorded as operator:host-root)
+  stage-c stop        halt autonomous code writing: pause all agents and revoke the one-task and standing
+                      authorizations (root on the host; resuming is the founder's, from the Desk)
 USAGE
 }
 
@@ -359,7 +361,29 @@ with SessionLocal() as db:
                                         ttl=timedelta(minutes=int(os.environ["MINUTES"])))
         print(json.dumps({k: value[k] for k in ("task_key", "source_sha", "expires_at")}, indent=2))
 ' ;;
-      *) echo "companyctl stage-c: preflight [--json] | status | merge-authorize PR SHA | merge-complete PR SHA ID | authorize | revoke" >&2; exit 2 ;;
+      stop)
+        # One command halts autonomous code writing: pause every agent and withdraw both Stage C authorizations.
+        # Withdrawing authority is open to the host operator; resuming grants it, so it stays with the founder (Desk).
+        [ "$(id -u)" = 0 ] || { echo "companyctl stage-c stop: needs root on the host (sudo)" >&2; exit 1; }
+        # company-api holds the founder pause fence the pause must take.
+        docker exec "$API_CONTAINER" python -c '
+import json
+from app import control
+from app.db import SessionLocal
+
+with SessionLocal() as db:
+    actor, reason = "operator:host-root", "companyctl stage-c stop"
+    # Revoke first: database only, never blocked by a coder start that holds the pause fence.
+    out = {"pilot_revoked": control.revoke_pilot_authorization(db, actor=actor, reason=reason),
+           "standing_revoked": control.revoke_standing(db, actor=actor, reason=reason)}
+    try:
+        out["paused"] = control.set_agents_paused(db, True, actor=actor, reason=reason)["paused"]
+    except control.PauseUnavailable as error:
+        out["paused"], out["pause_error"] = False, str(error)
+    print(json.dumps(out))
+    raise SystemExit(0 if out["paused"] else 3)
+' ;;
+      *) echo "companyctl stage-c: preflight [--json] | status | merge-authorize PR SHA | merge-complete PR SHA ID | authorize | revoke | stop" >&2; exit 2 ;;
     esac
     ;;
 

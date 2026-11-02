@@ -246,6 +246,8 @@ def _admission_gate(db: Session, task: models.Task, specs: dict, *,
         # Lost live readiness skips the write task (no claim, no retry) so Stage B behind it still runs.
         if not stage_c_worker.runtime_ready(db):
             return "stage_c_runtime_not_ready", None
+        if stage_c_worker.launcher_cooling(db):
+            return "stage_c_launcher_cooling", None
     project = db.get(models.Project, task.project_id) if task.project_id is not None else None
     if task.project_id is not None and project is None:
         return "project_missing", None
