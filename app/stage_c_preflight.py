@@ -23,7 +23,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
-from app import enums, models, project_profiles, providers, repo_guardian_github, stage_c_credential_boundary, stage_c_worker
+from app import control, enums, models, project_profiles, providers, repo_guardian_github, stage_c_credential_boundary, stage_c_worker
 
 ACCEPTANCE_CHECKS = stage_c_worker.ACCEPTANCE_CHECKS
 WORKER_UID = 10001  # scripts/company-coder-launch: the only uid that owns the jobs tree
@@ -102,8 +102,8 @@ def evaluate(db, *, host: dict | None, health: dict | None, jobs: Path, flag: bo
 
     row = db.get(models.ControlState, "stage-c-host-acceptance")
     value = row.value if row and isinstance(row.value, dict) else {}
-    add("acceptance_recorded", "PASS" if row and row.updated_by == "founder" else "FAIL",
-        "founder attestation" if row else "no stage-c-host-acceptance row")
+    add("acceptance_recorded", "PASS" if control.acceptance_valid(db, sha) else "FAIL",
+        "verified founder acceptance (Cloudflare Access) with its audit" if row else "no stage-c-host-acceptance row")
     add("acceptance_source_sha", "PASS" if SHA.fullmatch(sha) and value.get("source_sha") == sha else "FAIL",
         "acceptance must name the deployed source SHA")
     attested = value.get("checks") if isinstance(value.get("checks"), dict) else {}

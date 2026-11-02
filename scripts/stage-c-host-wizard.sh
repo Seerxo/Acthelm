@@ -535,26 +535,28 @@ then OK[credential_isolation]=true; say "profiles clean"; else say "profile chec
 ev "credential_isolation=${OK[credential_isolation]:-false}"
 pause
 
-stage "Founder attestation, then preflight"
+stage "Host candidate, then the founder's acceptance"
 say "Results (true only if proven in this run):"
 NEED=(image_build egress launcher permissions direct_egress_blocked github_blocked random_hosts_blocked provider_hosts claude_edit codex_review_probe offline_checks credential_isolation)
 JSON="{"; ALL=1
 for k in "${NEED[@]}"; do v=${OK[$k]:-false}; [[ "$v" == true ]] || ALL=0; JSON+="\"$k\": $v,"; say "$([[ $v == true ]] && echo '✓' || echo '✗') $k"; done
 JSON="${JSON%,}}"
-ev "attestation candidate sha=$WRK $JSON"
-if (( ALL )) && confirm "Record stage-c-host-acceptance for $WRK as the founder? (a different deployed SHA later needs new acceptance)"; then
+ev "acceptance candidate sha=$WRK $JSON"
+# The host (root) only records what it proved, as the operator. Acceptance is the verified founder's: POST
+# /stage-c/acceptance through Cloudflare Access turns a fresh all-PASS candidate for this SHA into it.
+if confirm "Record the host candidate for $WRK (operator; the founder accepts it through Access)?"; then
   printf '%s' "{\"source_sha\": \"$WRK\", \"checks\": $JSON}" | docker exec -i company-worker python -c '
 import json, sys
+from app import control
 from app.db import SessionLocal
-from app import models
-v = json.load(sys.stdin); v["evidence"] = "stage-c-host-wizard accept log"
+v = json.load(sys.stdin)
 with SessionLocal() as db:
-    row = db.get(models.ControlState, "stage-c-host-acceptance")
-    if row: row.value, row.updated_by = v, "founder"
-    else: db.add(models.ControlState(key="stage-c-host-acceptance", value=v, updated_by="founder"))
-    db.commit(); print("recorded")'
-  ev "attestation recorded"
-else warn "not recorded — fix the ✗ items and re-run 'accept'"; fi
+    control.record_acceptance_candidate(db, v["source_sha"], v["checks"], evidence="stage-c-host-wizard accept log")
+print("candidate recorded")'
+  ev "candidate recorded"
+  (( ALL )) && say "Founder: open the Access-protected API and POST /stage-c/acceptance within 2 hours." \
+    || warn "not all checks passed: the founder cannot accept this candidate; fix the ✗ items and re-run 'accept'"
+fi
 say ""
 sudo "$APP/scripts/companyctl" stage-c preflight || true
 sudo setpriv --reuid=10001 --regid=10001 --clear-groups rm -rf "$JOBS/TASK-9001" "$JOBS/TASK-9002" "$JOBS/TASK-9003" 2>/dev/null || true

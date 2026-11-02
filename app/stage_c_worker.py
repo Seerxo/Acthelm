@@ -156,13 +156,8 @@ def host_ready(db):
     """The database-backed half of ready(): founder host acceptance, a supported profile and a fresh watchdog
     preflight, all bound to this deployed source. Any process can check it (the API does, before a founder makes a
     code-writing task READY); the control plane (coder workspace, GitHub token) only exists in the worker."""
-    row = db.get(models.ControlState, "stage-c-host-acceptance")
-    value = row.value if row and isinstance(row.value, dict) else {}
-    sha = os.environ.get("COMPANY_OS_GIT_SHA", "")
-    checks = value.get("checks") or {}
-    if (not row or row.updated_by != "founder" or not re.fullmatch(r"[a-f0-9]{40}", sha)
-            or value.get("source_sha") != sha or not isinstance(checks, dict)
-            or not all(checks.get(k) is True for k in ACCEPTANCE_CHECKS)):
+    # Founder acceptance through the verified identity (control.accept_host), never a row that only names "founder".
+    if not control.acceptance_valid(db, os.environ.get("COMPANY_OS_GIT_SHA", "")):
         return "stage_c_host_not_accepted"
     try:
         profiles = project_profiles.load()

@@ -243,9 +243,10 @@ reaches the provider subprocess environment or either launcher profile. Do not d
 Unfinished requests, changed published branches or ambiguous push/PR failures block for
 the founder instead of being destroyed or blindly retried.
 
-Before admission, the founder must record actual step-4 evidence in the existing
-`control_state` table: key `stage-c-host-acceptance`, `updated_by=founder`, value containing
-the **full deployed** `source_sha` and a `checks` object with each of these booleans true:
+Before admission, the host wizard records the step-4 evidence as an operator candidate
+(`stage-c-host-acceptance-candidate`) and the verified founder accepts it with
+`POST /stage-c/acceptance` (Cloudflare Access). The acceptance names the **full deployed**
+`source_sha` and a `checks` object with each of these booleans true:
 `image_build`, `egress`, `launcher`, `permissions`, `direct_egress_blocked`, `github_blocked`,
 `random_hosts_blocked`, `provider_hosts`, `claude_edit`, `codex_review_probe`,
 `offline_checks`, `credential_isolation`. Keep detailed non-secret acceptance evidence in

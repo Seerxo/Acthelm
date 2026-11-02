@@ -365,3 +365,76 @@ def standing_covers(db: Session, paths: list[str], sha: str, now: datetime | Non
     """Is every file in `paths` inside a currently valid standing authorization for this deployed SHA?"""
     return _standing_denial(db, db.get(models.ControlState, STANDING_AUTHORIZATION), paths, sha,
                             now or datetime.now(timezone.utc)) is None
+
+
+# --------------------------------------------------------------------------- Stage C host acceptance
+# The host wizard proves the 12 isolation checks on the host and records them as a CANDIDATE (operator identity: it
+# runs as host root, which is not the founder). Only the verified founder (Cloudflare Access, through the API) turns a
+# fresh candidate for the deployed SHA into the acceptance. A row merely naming "founder" is never acceptance.
+ACCEPTANCE = "stage-c-host-acceptance"
+ACCEPTANCE_CANDIDATE = "stage-c-host-acceptance-candidate"
+ACCEPTANCE_CANDIDATE_MAX_AGE = timedelta(hours=2)
+_ACCEPTANCE_FIELDS = ("source_sha", "checks", "candidate_at", "issued_at", "issued_by")
+
+
+def record_acceptance_candidate(db: Session, sha: str, checks: dict, *, actor: str = "operator:host-root",
+                                evidence: str = "stage-c-host-wizard accept", now: datetime | None = None) -> dict:
+    """What the host proved, for the founder to accept. Grants nothing by itself."""
+    from app import stage_c_worker  # late: stage_c_worker imports this module
+    if not _SHA.match(sha or "") or not isinstance(checks, dict) or set(checks) != stage_c_worker.ACCEPTANCE_CHECKS \
+            or not all(type(v) is bool for v in checks.values()) or not actor.startswith("operator:"):
+        raise ValueError("a candidate names the deployed SHA and exactly the twelve boolean checks, as the operator")
+    now = now or datetime.now(timezone.utc)
+    value = {"source_sha": sha, "checks": dict(checks), "evidence": evidence, "recorded_at": now.isoformat()}
+    row = db.get(models.ControlState, ACCEPTANCE_CANDIDATE)
+    if row is None:
+        db.add(models.ControlState(key=ACCEPTANCE_CANDIDATE, value=value, updated_by=actor))
+    else:
+        row.value, row.updated_by = value, actor
+    audit.record(db, actor=actor, action="stage-c.acceptance.candidate", entity_type="control_state",
+                 entity_key=ACCEPTANCE_CANDIDATE, reason=f"{sum(checks.values())}/12 @ {sha[:7]}", after=value)
+    db.commit()
+    return value
+
+
+def accept_host(db: Session, sha: str, *, founder: str, now: datetime | None = None) -> dict:
+    """The verified founder accepts the host for the deployed SHA, from a fresh, all-PASS candidate."""
+    from app import stage_c_worker  # late: stage_c_worker imports this module
+    if not approval_identity.is_founder_id(founder):
+        raise PermissionError("only a verified founder identity may accept the Stage C host")
+    now = now or datetime.now(timezone.utc)
+    row = db.get(models.ControlState, ACCEPTANCE_CANDIDATE)
+    cand = row.value if row is not None and isinstance(row.value, dict) else {}
+    recorded = _utc(cand.get("recorded_at"))
+    checks = cand.get("checks") if isinstance(cand.get("checks"), dict) else {}
+    if (not _SHA.match(sha or "") or cand.get("source_sha") != sha or recorded is None
+            or not timedelta(minutes=-1) <= now - recorded <= ACCEPTANCE_CANDIDATE_MAX_AGE
+            or set(checks) != stage_c_worker.ACCEPTANCE_CHECKS or not all(v is True for v in checks.values())):
+        raise ValueError("no fresh, all-PASS host candidate for the deployed SHA: re-run the host wizard")
+    value = {"source_sha": sha, "checks": dict(checks), "evidence": cand.get("evidence"),
+             "candidate_at": recorded.isoformat(), "issued_at": now.isoformat(), "issued_by": founder}
+    acc = db.get(models.ControlState, ACCEPTANCE)
+    before = dict(acc.value) if acc is not None and isinstance(acc.value, dict) else None
+    if acc is None:
+        db.add(models.ControlState(key=ACCEPTANCE, value=value, updated_by=founder))
+    else:
+        acc.value, acc.updated_by = value, founder
+    audit.record(db, actor=founder, action="stage-c.acceptance.record", entity_type="control_state",
+                 entity_key=ACCEPTANCE, reason=f"host accepted @ {sha[:7]}", before=before, after=value)
+    db.commit()
+    return value
+
+
+def acceptance_valid(db: Session, sha: str) -> bool:
+    """Founder acceptance of this host for exactly `sha`: a verified founder id, all twelve checks true, and the
+    endpoint's own audit row for the same values. A hand-written row (any updated_by, no matching audit) is not."""
+    from app import stage_c_worker  # late: stage_c_worker imports this module
+    row = db.get(models.ControlState, ACCEPTANCE)
+    value = row.value if row is not None and isinstance(row.value, dict) else {}
+    checks = value.get("checks") if isinstance(value.get("checks"), dict) else {}
+    return (row is not None and approval_identity.is_founder_id(row.updated_by)
+            and value.get("issued_by") == row.updated_by and bool(_SHA.match(sha or ""))
+            and value.get("source_sha") == sha and set(checks) == stage_c_worker.ACCEPTANCE_CHECKS
+            and all(v is True for v in checks.values())
+            and _issue_audited(db, value, action="stage-c.acceptance.record", key=ACCEPTANCE,
+                               fields=_ACCEPTANCE_FIELDS))

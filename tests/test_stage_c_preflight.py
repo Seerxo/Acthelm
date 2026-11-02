@@ -32,9 +32,10 @@ def world(tmp_path, db=None, **over):
     if not db.query(models.Project).filter_by(key="company-os").first():
         db.add(models.Project(key="company-os", name="Company OS", repository="seerxo/acthelm",
                               status=pf.enums.ProjectStatus.ACTIVE))
-    db.add(models.ControlState(key="stage-c-host-acceptance", updated_by="founder",
-                               value={"source_sha": SHA, "checks": CHECKS}))
     db.commit()
+    if db.get(models.ControlState, "stage-c-host-acceptance") is None:
+        from tests.test_stage_c_worker import accept_host
+        accept_host(db, SHA, dict(CHECKS))
     args = dict(db=db, host=dict(HOST), health=dict(HEALTH), jobs=jobs, uid=os.getuid(), flag=False,
                 environ={"COMPANY_OS_GIT_SHA": SHA, "GH_TOKEN": "x"}, binaries=lambda b: f"/bin/{b}",
                 run=readable)

@@ -71,8 +71,8 @@ def _state(engine, key):
 def _stage_c_ready(engine, *, authorize=True, minutes=30, now=None, code_write=True, preflight_age=1):
     with Session(engine) as db:
         worker._heartbeat(db, autonomy={"code_write_flag": code_write})
-        db.add(models.ControlState(key="stage-c-host-acceptance", updated_by="founder", value={
-            "source_sha": SHA, "checks": dict.fromkeys(stage_c_worker.ACCEPTANCE_CHECKS, True)}))
+        from tests.test_stage_c_worker import accept_host
+        accept_host(db, SHA)
         db.add(models.ControlState(key="stage-c-runtime-readiness", updated_by="watchdog", value={
             "ready": True, "checked_at": (datetime.now(timezone.utc) - timedelta(minutes=preflight_age)).isoformat(), "source_sha": SHA, "failed": []}))
         db.commit()

@@ -91,9 +91,9 @@ from the Founder Desk (`POST /learnings/{id}/approve`).
 - `ENABLE_AUTONOMOUS_CODE_WRITE` stays `false`; issuing an authorization enables nothing by itself.
 - `companyctl stage-c authorize` now refuses (root on the host is not the verified founder) and prints the API to use.
   `companyctl stage-c revoke` still works for root and is recorded as `operator:host-root`.
-- Not covered: `stage-c-host-acceptance` (`updated_by == "founder"`, written by `scripts/stage-c-host-wizard.sh`) is still a
-  string-trusted founder attestation read by `stage_c_worker.ready()`. It needs the same principal treatment before Stage C
-  activation (separate change: wizard + `stage_c_worker.ready`).
+- `stage-c-host-acceptance`: the host wizard (root) records only an operator candidate; the verified founder turns a
+  fresh all-PASS candidate for the deployed SHA into the acceptance with `POST /stage-c/acceptance`, audited.
+  `control.acceptance_valid` (read by `stage_c_worker.ready()` and the preflight) refuses any row without that.
 
 ## Contract: Agent 4 (Stage C cleanup)
 
@@ -139,7 +139,8 @@ retroactively invalidated.
 
 ## Residual risk
 
-- `stage-c-host-acceptance` and the host wizard still trust `updated_by == "founder"` (see above).
+- A writer with database or host-root access can forge any audited control row (acceptance and both Stage C
+  authorizations alike); the boundary is the API's verified principal, not the database.
 - `models.Learning.status` defaults to APPROVED; protected by a static test only.
 - Remaining routes (checkpoints, notes, decisions, incidents) store client-supplied labels; they confer no founder authority.
 - `operator:local` is root on the host; it can still decide LOW/MEDIUM approvals and revoke an authorization.
