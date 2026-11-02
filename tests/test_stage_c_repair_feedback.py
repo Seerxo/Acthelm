@@ -175,7 +175,9 @@ def test_a_launcher_refusal_is_infrastructure_not_a_spent_retry(monkeypatch, tmp
     assert cooldowns[stage_c_worker.LAUNCHER_COOLDOWN_KEY]["health"] == "LAUNCHER_UNAVAILABLE"
     assert "claude" not in cooldowns                                     # other workloads keep the provider
     assert worker._capacity_only(db.get(models.AgentRun, out["run_id"]))      # not counted against daily budgets
-    assert stage_c_worker.admission(db, task) == "stage_c_launcher_cooling"
+    # The cooldown holds new coder claims only; admission (hand-off routing, PR reconcile) is untouched.
+    assert stage_c_worker.launcher_cooling(db) and stage_c_worker.admission(db, task) is None
+    assert {s["reason"] for s in _tick(db)["skipped"]} == {"stage_c_launcher_cooling"}
 
 
 def test_consecutive_free_refusals_block_the_task_instead_of_looping(monkeypatch, tmp_path):

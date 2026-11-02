@@ -105,10 +105,6 @@ def admission(db, task):
                        for p in paths) or len(set(paths)) != len(paths)
             or not {"paths"} <= set(scope) <= {"paths", "context"}):
         return "stage_c_scope_refused"
-    from app import worker  # late: worker imports this module
-    cooling = worker._cooldowns(db).get(LAUNCHER_COOLDOWN_KEY)
-    if cooling and datetime.fromisoformat(cooling["until"]) > worker._now():
-        return "stage_c_launcher_cooling"
     # Read-only context: any safe repository file the coder may read; never write scope (run() refuses edits).
     context = scope.get("context", [])
     if (not isinstance(context, list) or len(context) > stage_c_runner.MAX_CONTEXT_FILES
@@ -122,6 +118,14 @@ def admission(db, task):
 def publication_role() -> tuple[str, str]:
     """GitHub's answer, right now, for the worker token's role on the upstream repository (PASS = read-only)."""
     return stage_c_credential_boundary.upstream_role(repository=REPOSITORY)
+
+
+def launcher_cooling(db) -> bool:
+    """Stage C's launcher refused recently: no new coder claim until the cooldown ends. Checked only at the claim
+    gate, never in admission(), which also routes hand-offs and reconciles PRs that never touch the launcher."""
+    from app import worker  # late: worker imports this module
+    cooling = worker._cooldowns(db).get(LAUNCHER_COOLDOWN_KEY)
+    return bool(cooling) and datetime.fromisoformat(cooling["until"]) > worker._now()
 
 
 def runtime_ready(db, now: datetime | None = None) -> bool:
