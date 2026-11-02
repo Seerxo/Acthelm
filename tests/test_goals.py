@@ -153,6 +153,14 @@ def test_active_goal_requires_a_metric_selector():
     assert actions.count("goal.update") == 1 and actions.count("goal.create") == 1
 
 
+def test_check_activation_accepts_non_active_goal_without_selector():
+    goals.check_activation(models.Goal(status=enums.GoalStatus.PROPOSED, metric_selector=None))
+
+
+def test_check_activation_accepts_active_goal_with_well_formed_selector():
+    goals.check_activation(models.Goal(status=enums.GoalStatus.ACTIVE, metric_selector=SEL))
+
+
 def test_tasks_link_to_open_goals_only():
     db = _db()
     g = _goal(db)
