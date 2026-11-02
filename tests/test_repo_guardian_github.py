@@ -130,10 +130,11 @@ def test_merge_statuses_is_required_and_strictly_shaped():
             github.merge_statuses(policy)
 
 
-def test_checked_in_policy_requires_the_frontend_and_python_workflows():
+def test_checked_in_policy_requires_the_frontend_python_and_secret_scan_workflows():
     from pathlib import Path
     policy = github.load_policy(Path(__file__).resolve().parents[1] / "agents/repository_guardian.yaml")
-    assert policy["workflows"] == [".github/workflows/frontend.yml", ".github/workflows/python-tests.yml"]
+    assert policy["workflows"] == [".github/workflows/frontend.yml", ".github/workflows/python-tests.yml",
+                                   ".github/workflows/secret-scan.yml"]
     # CircleCI does not report on Seerxo/Acthelm: no commit status is required, so the workflows are the evidence.
     assert github.merge_statuses(policy) == ({"login": "circleci-app[bot]", "id": 127350680}, ())
 

@@ -138,25 +138,30 @@ def _eligibility(db: Session, task: models.Task, context: dict, facts: dict,
         target_branch=tracked_branch or "", facts=facts,
         blocked=task.status == enums.TaskStatus.BLOCKED and not allow_blocked_recovery,
         required_statuses=required_statuses, head_repository=head_repository)
+    if not _approval_recorded(db, task, context):
+        decision.eligible = False
+        decision.reasons.append("review approval does not match its task audit record")
+    return decision
+
+
+def _approval_recorded(db: Session, task: models.Task, context: dict) -> bool:
+    """The task's approval is the reviewer's audited record (fingerprint, reviewer, coder, review time)."""
     approval = ((context or {}).get("improvement") or {}).get("approval") or {}
     audit_id = approval.get("audit_id")
     event = db.get(models.AuditLog, audit_id) if isinstance(audit_id, int) and not isinstance(audit_id, bool) else None
-    recorded = (event and event.action == "improvement.review_approved" and event.entity_type == "task"
+    return bool(event and event.action == "improvement.review_approved" and event.entity_type == "task"
                 and event.entity_key == task.key and event.task_id == task.id
                 and event.actor == approval.get("reviewer")
                 and (event.after or {}).get("fingerprint") == approval.get("fingerprint")
                 and (event.after or {}).get("reviewer") == approval.get("reviewer")
                 and (event.after or {}).get("coder") == approval.get("coder")
                 and (event.after or {}).get("review_stage_at") == approval.get("review_stage_at"))
-    if not recorded:
-        decision.eligible = False
-        decision.reasons.append("review approval does not match its task audit record")
-    return decision
 
 
 def repairs_used(task: models.Task) -> int:
     hist = ((task.context or {}).get("improvement") or {}).get("history", [])
-    return sum(1 for a, b in zip(hist, hist[1:]) if a["stage"] == "CI" and b["stage"] == "IMPLEMENTING")
+    return sum(1 for a, b in zip(hist, hist[1:])
+               if a["stage"] in ("CI", "READY_TO_MERGE") and b["stage"] == "IMPLEMENTING")
 
 
 def pr_number(url_or_number) -> int | None:
@@ -359,11 +364,19 @@ def ingest(db: Session, task: models.Task, facts: dict, max_repairs: int = MAX_R
         return {"outcome": "SKIPPED", "reason": f"stage {stage}"}
     if task.status == enums.TaskStatus.BLOCKED:
         return {"outcome": "SKIPPED", "reason": "blocked; waiting for the founder"}
-    if stage == "READY_TO_MERGE":
-        return {"outcome": "WAITING", "reason": "ready; the founder merges"}
+    # READY_TO_MERGE is re-judged on every poll like CI: a head moved since the review, a red re-run or a broken
+    # approval binding must not stay READY while the founder decides.
     if not commit or facts.get("head_sha") != commit:
         # Someone else moved the PR head: the CI result is not about the reviewed bytes.
+        if stage == "READY_TO_MERGE":
+            _block(db, task, "PR head moved after READY_TO_MERGE; the reviewed commit is no longer the head",
+                   {**base, "head": facts.get("head_sha")})
         return {"outcome": "HEAD_MOVED", "expected": commit, "head": facts.get("head_sha")}
+    # Checked before any pending/re-run return: a broken approval binding never waits as READY.
+    if stage == "READY_TO_MERGE" and not _approval_recorded(db, task, task.context or {}):
+        why = "review approval does not match its task audit record"
+        _block(db, task, "Merge eligibility refused: " + why, {**base, "merge_eligibility": "refused", "reasons": [why]})
+        return {"outcome": "BLOCKED", "reasons": [why]}
 
     checks = facts.get("checks") or []
     if stage == "PR_OPEN":
@@ -413,6 +426,16 @@ def ingest(db: Session, task: models.Task, facts: dict, max_repairs: int = MAX_R
         waiting_on = [context for context in required_statuses if statuses.get(context) in (None, "pending")]
         if waiting_on and not facts.get("status_problems") and facts.get("statuses_complete"):
             return {"outcome": "WAITING", "reason": "commit statuses pending: " + ", ".join(waiting_on)}
+        if stage == "READY_TO_MERGE":
+            # Same head, still green: the approval must still bind it (fingerprint, audit record, published commit,
+            # whose tree publish proved is base + the approved diff). Never recorded twice.
+            decision = _eligibility(db, task, task.context or {}, facts, repository, tracked_branch,
+                                    required_statuses, head_repository=head_repository)
+            if not decision.eligible:
+                _block(db, task, "Merge eligibility refused: " + "; ".join(decision.reasons),
+                       {**base, "merge_eligibility": "refused", "reasons": decision.reasons})
+                return {"outcome": "BLOCKED", "reasons": decision.reasons}
+            return {"outcome": "WAITING", "reason": "ready; the founder merges"}
         context = dict(task.context or {})
         improvement = dict(context.get("improvement") or {})
         improvement["stage"] = "READY_TO_MERGE"
@@ -425,6 +448,8 @@ def ingest(db: Session, task: models.Task, facts: dict, max_repairs: int = MAX_R
             return {"outcome": "BLOCKED", "reasons": decision.reasons}
         _record_ready(db, task, base)
         return {"outcome": "READY_TO_MERGE"}
+    if stage == "READY_TO_MERGE":
+        return {"outcome": "WAITING", "reason": "ready; the founder merges (CI re-run pending)"}
     return {"outcome": "WAITING", "reason": "CI pending or incomplete"}
 
 

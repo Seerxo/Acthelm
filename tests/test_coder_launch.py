@@ -6,6 +6,7 @@ controls (symlinks, extra fields, metered keys) reaches root or the container.""
 import importlib.machinery
 import importlib.util
 from contextlib import contextmanager
+import io
 import json
 import os
 import subprocess
@@ -98,6 +99,8 @@ def test_checks_run_without_network_or_credentials(L, tmp_path):
     joined = " ".join(argv)
     assert "--network=none" in argv and "PROXY" not in joined and "env-file" not in joined
     assert argv[-4:] == ["python", "-m", "pytest", "-q"]
+    # Per-test evidence comes from an env var, so the pinned checks command (and the host config) stay unchanged.
+    assert "--env=PYTEST_ADDOPTS=-rfEp" in argv
 
 
 @pytest.mark.parametrize("kind", ["code", "checks"])
@@ -249,6 +252,26 @@ def test_a_cancelled_request_is_refused_before_the_container_runner(L, tmp_path)
     assert json.loads((job / "done" / "result.json").read_text())["refused"]
 
 
+class FakeProcess:
+    """Popen stand-in for run_container: in-memory pipes; `read` runs on the first stdout read (the container)."""
+    returncode = 0
+
+    def __init__(self, out=b"", read=None):
+        outer = self
+
+        class Out(io.BytesIO):
+            def read1(self, size=-1):
+                if outer.read:
+                    outer.read, hook = None, outer.read
+                    hook()
+                return super().read1(size)
+        self.args, self.read = ["docker"], read
+        self.stdin, self.stdout, self.stderr = io.BytesIO(), Out(out), io.BytesIO()
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
 def test_container_start_is_acknowledged_from_inside_the_coder_container(L, monkeypatch, tmp_path):
     import threading
     events = []
@@ -256,19 +279,12 @@ def test_container_start_is_acknowledged_from_inside_the_coder_container(L, monk
     started_file = tmp_path / "ack" / "started"
     started_file.parent.mkdir()
 
-    class Process:
-        returncode = 0
+    def spawn(*args, **kwargs):
+        events.append("spawned")
+        started_file.touch()
+        return FakeProcess(b"done", read=lambda: (started.wait(2), events.append("finished")))
 
-        def __init__(self, *args, **kwargs):
-            events.append("spawned")
-            started_file.touch()
-
-        def communicate(self, prompt, timeout):
-            assert started.wait(2)
-            events.append("finished")
-            return b"done", b""
-
-    monkeypatch.setattr(L.subprocess, "Popen", Process)
+    monkeypatch.setattr(L.subprocess, "Popen", spawn)
     result = L.run_container(["docker"], b"prompt", 1, "coder",
                              on_started=lambda: (events.append("started"), started.set()),
                              started_file=started_file)
@@ -279,16 +295,10 @@ def test_container_start_is_acknowledged_from_inside_the_coder_container(L, monk
 
 def test_container_exit_before_the_start_ack_never_releases_the_owner_lock(L, monkeypatch, tmp_path):
     events = []
-    class Process:
+    class Process(FakeProcess):
         returncode = 1
 
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def communicate(self, prompt, timeout):
-            return b"", b""
-
-    monkeypatch.setattr(L.subprocess, "Popen", Process)
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: Process())
     result = L.run_container(["docker"], b"prompt", 1, "coder", on_started=lambda: events.append("started"),
                              started_file=tmp_path / "missing-ack")
 
@@ -392,6 +402,40 @@ def test_checks_pass_only_on_exit_zero(L):
         assert checks(job_dir / "checks")["passed"] is passed
 
 
+@pytest.mark.parametrize("summary, passed", [
+    ("", False), ("done", False), ("no tests ran in 0.01s", False), ("0 passed", False),
+    ("1 failed, 3 passed in 0.2s", False), ("3 passed, 1 error in 0.2s", False), ("2 errors in 0.1s", False),
+    ("12 passed in 3.1s", True), ("========= 12 passed, 2 skipped, 1 warning in 3.10s =========", True),
+])
+def test_exit_zero_passes_only_with_a_pytest_result(L, summary, passed):
+    """An import-time os._exit(0) ends pytest with exit 0 before any test ran: exit 0 alone is not a result."""
+    job_dir = L.JOBS / "TASK-0101"
+    (job_dir / "checks").mkdir(parents=True)
+    checks = stage_c_runner.launcher_checks("sez-company", timeout_s=60, poll_s=0, sleep=lambda _: L.handle(
+        "TASK-0101", CFG, runner=lambda *a: {"exit": 0, "timed_out": False, "summary": summary}))
+    result = checks(job_dir / "checks")
+    assert result["passed"] is passed
+    if not passed:
+        assert result["summary"] in (summary, "checks did not report a pytest result")
+
+
+def test_a_flood_of_output_keeps_only_the_tail_and_the_real_summary(L, monkeypatch):
+    """A test printing forever cannot exhaust root's memory: stdout is drained in chunks into a capped tail."""
+    monkeypatch.setattr(L, "MAX_STDOUT", 4096)
+    flood = b"".join(b"noise %d\n" % i for i in range(20_000))
+    summary = (b"\nFAILED tests/test_a.py::test_one - assert 0\nPASSED tests/test_b.py::test_two\n"
+               b"1 failed, 1 passed in 0.1s\n")
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: FakeProcess(flood + summary))
+    seen = []
+    real = L.bounded_communicate
+    monkeypatch.setattr(L, "bounded_communicate", lambda *a: seen.append(real(*a)) or seen[-1])
+    result = L.run_container(["docker"], b"", 5, "checks")
+    assert len(seen[0][0]) == 4096 and seen[0][0].endswith(summary)
+    assert result["summary"] == "1 failed, 1 passed in 0.1s"
+    assert result["failures"] == ["FAILED tests/test_a.py::test_one - assert 0"]
+    assert result["passed_files"] == ["tests/test_b.py"]
+
+
 PYTEST_OUTPUT = """.....F..
 =================================== FAILURES ===================================
 _____ test_check_activation_accepts_non_active_goal_without_selector _____
@@ -431,8 +475,10 @@ def test_checks_return_their_failure_lines_and_a_code_job_never_does(L):
     assert result["passed"] is False and result["failures"] == failures
     job = _job(L, key="TASK-0102")
     L.handle("TASK-0102", CFG, runner=lambda *a: {"exit": 0, "timed_out": False, "summary": "done",
-                                                  "failures": ["FAILED made up by the model"]})
-    assert "failures" not in json.loads((job / "done" / "result.json").read_text())
+                                                  "failures": ["FAILED made up by the model"],
+                                                  "passed_files": ["tests/made_up.py"]})
+    result = json.loads((job / "done" / "result.json").read_text())
+    assert "failures" not in result and "passed_files" not in result
 
 
 def test_no_launcher_result_is_not_success(tmp_path, monkeypatch):
@@ -500,17 +546,11 @@ def test_long_running_checks_are_not_misclassified_as_an_unstarted_container(L, 
     started_file.parent.mkdir()
     finished = threading.Event()
 
-    class Process:
-        returncode = 0
+    def spawn(*args, **kwargs):
+        started_file.touch()  # the wrapper's first action, before the checks command runs
+        return FakeProcess(b"2 passed", read=lambda: finished.wait(5))  # runs well past START_TIMEOUT
 
-        def __init__(self, *args, **kwargs):
-            started_file.touch()  # the wrapper's first action, before the checks command runs
-
-        def communicate(self, prompt, timeout):
-            assert finished.wait(5)  # runs well past START_TIMEOUT
-            return b"2 passed", b""
-
-    monkeypatch.setattr(L.subprocess, "Popen", Process)
+    monkeypatch.setattr(L.subprocess, "Popen", spawn)
     threading.Timer(0.6, finished.set).start()
     result = L.run_container(["docker"], b"", 10, "checks", started_file=started_file)
     assert result.get("exit") == 0 and not result.get("timed_out"), result
@@ -524,20 +564,13 @@ def test_a_checks_container_that_never_signals_still_fails_closed_as_unstarted(L
     started_file.parent.mkdir()
     finished = threading.Event()
 
-    class Process:
+    class Process(FakeProcess):   # no start marker ever written
         returncode = None
-
-        def __init__(self, *args, **kwargs):
-            pass  # no start marker ever written
 
         def kill(self):
             finished.set()
 
-        def communicate(self, prompt=None, timeout=None):
-            finished.wait(5)
-            return b"", b""
-
-    monkeypatch.setattr(L.subprocess, "Popen", Process)
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: Process(read=lambda: finished.wait(5)))
     monkeypatch.setattr(L.subprocess, "run", lambda *a, **k: None)
     result = L.run_container(["docker"], b"", 10, "checks", started_file=started_file)
     assert result.get("summary") == "coder container did not start"
