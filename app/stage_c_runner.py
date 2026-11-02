@@ -199,7 +199,7 @@ def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, 
             repeated = bool(failed) and failed == _failed_tests(earlier.get("failures"))
             evidence |= {"failure_class": failure_class(False, summary, failures), "failures": failures,
                          # The coder's own previous change, bounded: data for the next attempt, never instructions.
-                         "previous_diff": change["diff"].decode("utf-8", "replace")[:MAX_PREVIOUS_DIFF],
+                         "previous_diff": _redact_secrets(change["diff"].decode("utf-8", "replace"))[:MAX_PREVIOUS_DIFF],
                          "repeated": repeated}
             stage_c.advance(db, task, "IMPLEMENTING", HOLDER, evidence)
             return _stop(db, "CHECKS_REPEATED" if repeated else "CHECKS_FAILED", summary, fingerprint=fingerprint)
@@ -381,8 +381,19 @@ def _git(repo: Path, *args: str, stdin: bytes | None = None, index: str | None =
     return out.strip() if strip else out
 
 
+_SECRETS = re.compile(
+    r"(?i)(?:sk-ant-[\w-]{8,}|github_pat_\w{8,}|gh[pousr]_\w{16,}|sk-[\w-]{16,}|xox[abprs]-[\w-]{8,}|AKIA[0-9A-Z]{16}"
+    r"|(?:bearer|token|authorization)\s*[:=]?\s*[\w.~+/=-]{12,}"
+    r"|(?:api[_-]?key|secret|password|passwd|token)\s*[:=]\s*['\"]?[^\s'\"]{6,})")
+
+
+def _redact_secrets(text: str) -> str:
+    """URL userinfo and well-known credential shapes, masked. Output that reaches task history or a prompt passes here."""
+    return _SECRETS.sub("***", re.sub(r"://[^@/\s]+@", "://***@", text))
+
+
 def _redact(text: str) -> str:
-    return re.sub(r"://[^@/\s]+@", "://***@", text)[:300]
+    return _redact_secrets(text)[:300]
 
 
 def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Path, remote: str,

@@ -109,7 +109,8 @@ def admission(db, task):
     context = scope.get("context", [])
     if (not isinstance(context, list) or len(context) > stage_c_runner.MAX_CONTEXT_FILES
             or len(paths) + len(context) > 20     # coder_source exports at most 20 files in all
-            or not all(isinstance(p, str) and coder_source._safe_path(p) and p not in paths for p in context)
+            or not all(isinstance(p, str) and coder_source._safe_path(p) and p not in paths
+                       and p.startswith(("app/", "tests/")) and p.endswith(".py") for p in context)
             or len(set(context)) != len(context)):
         return "stage_c_scope_refused"
     return None

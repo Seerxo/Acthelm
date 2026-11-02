@@ -241,3 +241,23 @@ def test_the_launcher_refused_field_becomes_launcher_refused(tmp_path):
         assert "fence busy" in str(e)
     else:
         raise AssertionError("a launcher refusal must raise LauncherRefused")
+
+
+def test_context_is_only_application_or_test_source():
+    db = _db()
+    task = write_task(db)
+    for bad in ([".git-credentials"], ["docs/notes.md"], ["app/static/desk.html"], ["scripts/deploy.sh"]):
+        task.context = {**task.context, "stage_c": {"paths": ["tests/test_metrics.py"], "context": bad}}
+        assert stage_c_worker.admission(db, task) == "stage_c_scope_refused", bad
+
+
+def test_feedback_masks_credential_shapes_before_history_or_prompt():
+    leaky = ["E   Authorization: Bearer abcdefghijklmnopqrstuv",
+             "E   token=ghp_ABCDEFGHIJKLMNOPQRSTUVWX12 sk-ant-oat01-secretsecret",
+             "E   password = 'hunter2hunter2'", "FAILED tests/test_a.py::test_x - AssertionError: 1 != 2"]
+    out = stage_c_runner._bounded_failures(leaky)
+    joined = "\n".join(out)
+    for secret in ("abcdefghijklmnopqrstuv", "ghp_ABCDEF", "sk-ant-oat01", "hunter2"):
+        assert secret not in joined, secret
+    assert out[-1] == "FAILED tests/test_a.py::test_x - AssertionError: 1 != 2"       # ordinary failures stay readable
+    assert "sk-ant-" not in stage_c_runner._redact_secrets("+ key = 'sk-ant-api03-abcdefghijkl'")
