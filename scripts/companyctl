@@ -373,10 +373,15 @@ from app.db import SessionLocal
 
 with SessionLocal() as db:
     actor, reason = "operator:host-root", "companyctl stage-c stop"
-    out = {"paused": control.set_agents_paused(db, True, actor=actor, reason=reason)["paused"],
-           "pilot_revoked": control.revoke_pilot_authorization(db, actor=actor, reason=reason),
+    # Revoke first: database only, never blocked by a coder start that holds the pause fence.
+    out = {"pilot_revoked": control.revoke_pilot_authorization(db, actor=actor, reason=reason),
            "standing_revoked": control.revoke_standing(db, actor=actor, reason=reason)}
+    try:
+        out["paused"] = control.set_agents_paused(db, True, actor=actor, reason=reason)["paused"]
+    except control.PauseUnavailable as error:
+        out["paused"], out["pause_error"] = False, str(error)
     print(json.dumps(out))
+    raise SystemExit(0 if out["paused"] else 3)
 ' ;;
       *) echo "companyctl stage-c: preflight [--json] | status | merge-authorize PR SHA | merge-complete PR SHA ID | authorize | revoke | stop" >&2; exit 2 ;;
     esac

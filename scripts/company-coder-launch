@@ -368,13 +368,13 @@ MAX_FAILURE_LINES, MAX_FAILURE_CHARS = 30, 300
 def failure_lines(text: str) -> list[str]:
     """pytest's own failure lines (FAILED/ERROR node ids, `E` assertion lines, file:line), bounded, so a repair
     attempt learns which test failed and why. handle() returns them for checks only, never model output."""
-    out = []
+    summary, detail = [], []
     for line in text.splitlines():
         if FAILURE_LINE.match(line):
-            out.append(line.rstrip()[:MAX_FAILURE_CHARS])
-            if len(out) >= MAX_FAILURE_LINES:
-                break
-    return out
+            (summary if line.startswith(("FAILED ", "ERROR ")) else detail).append(line.rstrip()[:MAX_FAILURE_CHARS])
+    # The node ids decide whether a repair repeats a failure: they come first and are never crowded out.
+    summary = summary[:MAX_FAILURE_LINES]
+    return summary + detail[:MAX_FAILURE_LINES - len(summary)]
 
 
 def launch_lock(job: Path, timeout_s: int = 10) -> int:

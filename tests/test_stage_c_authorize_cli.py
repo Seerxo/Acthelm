@@ -159,3 +159,14 @@ def test_stop_pauses_agents_and_withdraws_both_authorizations_in_one_command(hos
             ["agents.pause", "stage-c.standing.revoke"]))}
     assert actors == {"operator:host-root"}
     assert host("stop").returncode == 0            # idempotent: nothing left to withdraw is not an error
+
+
+def test_stop_revokes_even_when_the_pause_fence_is_unavailable(host, tmp_path):
+    with Session(host.engine) as db:
+        control.issue_standing(db, ["tests/test_metrics.py"], SHA, founder=FOUNDER, days=1, max_per_day=1)
+    res = host("stop", CODER_PAUSE_FENCE_ENABLED="true")      # fence enabled but absent: the pause cannot apply
+    assert res.returncode == 3
+    out = json.loads(res.stdout)
+    assert out["standing_revoked"] is True and out["paused"] is False and "pause_error" in out
+    with Session(host.engine) as db:
+        assert db.get(models.ControlState, control.STANDING_AUTHORIZATION) is None

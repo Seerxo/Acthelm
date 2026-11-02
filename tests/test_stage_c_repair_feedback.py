@@ -28,8 +28,15 @@ def _setup(monkeypatch, tmp_path, coder, checks=None):
     def launcher_coder(**kw):
         def call(directory, job):
             kw["before_enqueue"]()
+            try:
+                coder(directory, job)
+            except stage_c_runner.LauncherRefused:
+                # Like the real launcher: a refusal leaves its result behind and the coder never started.
+                (directory.parent / "done").mkdir(exist_ok=True)
+                (directory.parent / "done" / "result.json").write_text('{"exit": null, "refused": "Refused"}')
+                kw["after_start"](False)
+                raise
             kw["after_start"](True)
-            coder(directory, job)
         return call
     monkeypatch.setattr(stage_c_runner, "launcher_coder", launcher_coder)
     if checks is not None:
@@ -164,8 +171,37 @@ def test_a_launcher_refusal_is_infrastructure_not_a_spent_retry(monkeypatch, tmp
     out = _tick(db)
     assert out["verdict"] == "LAUNCHER_REFUSED", out
     assert task.status == enums.TaskStatus.READY and task.retry_count == 0
-    assert worker._cooldowns(db)["claude"]["health"] == "LAUNCHER_UNAVAILABLE"
+    cooldowns = worker._cooldowns(db)
+    assert cooldowns[stage_c_worker.LAUNCHER_COOLDOWN_KEY]["health"] == "LAUNCHER_UNAVAILABLE"
+    assert "claude" not in cooldowns                                     # other workloads keep the provider
     assert worker._capacity_only(db.get(models.AgentRun, out["run_id"]))      # not counted against daily budgets
+    assert stage_c_worker.admission(db, task) == "stage_c_launcher_cooling"
+
+
+def test_consecutive_free_refusals_block_the_task_instead_of_looping(monkeypatch, tmp_path):
+    def coder(directory, job):
+        raise stage_c_runner.LauncherRefused("launcher Refused: unknown repository for checks")
+    db, task = _setup(monkeypatch, tmp_path, coder)
+    monkeypatch.setattr(worker, "PROVIDER_COOLDOWN", timedelta(0))
+    for _ in range(stage_c_worker.MAX_LAUNCHER_REFUSALS - 1):
+        assert _tick(db)["verdict"] == "LAUNCHER_REFUSED" and task.status == enums.TaskStatus.READY
+    assert _tick(db)["verdict"] == "LAUNCHER_REFUSED"
+    assert task.status == enums.TaskStatus.BLOCKED and task.error.startswith("LAUNCHER_REFUSED")
+    assert task.retry_count == 0
+
+
+def test_an_oversized_prompt_is_a_counted_coder_failure_not_a_refusal(tmp_path):
+    job_dir = tmp_path / "TASK-0101"
+    (job_dir / "workspace").mkdir(parents=True)
+    coder = stage_c_runner.launcher_coder(timeout_s=5, poll_s=0, sleep=lambda _: None)
+    job = stage_c_runner.Job("TASK-0101", "r", tmp_path, "0" * 40, ["a.py"], "x" * 70000, "c", "claude")
+    try:
+        coder(job_dir / "workspace", job)
+    except RuntimeError as e:
+        assert "exceeds" in str(e) and not isinstance(e, stage_c_runner.LauncherRefused)
+    else:
+        raise AssertionError("an oversized prompt must fail before any request")
+    assert not (job_dir / "request.json").exists()
 
 
 def test_refused_checks_never_judge_the_change(monkeypatch, tmp_path):
@@ -175,7 +211,9 @@ def test_refused_checks_never_judge_the_change(monkeypatch, tmp_path):
                                 "summary": "Refused: founder pause authority is unavailable"}
     db, task = _setup(monkeypatch, tmp_path, coder, checks)
     assert _tick(db)["verdict"] == "LAUNCHER_REFUSED"
-    assert task.retry_count == 0 and _last_evidence(task)["failure_class"] == "checks_unavailable"
+    assert _last_evidence(task)["failure_class"] == "checks_unavailable"
+    # The coder already ran: the attempt is spent, so a refusing checks step can never buy free coder runs.
+    assert task.retry_count == 1 and not worker._capacity_only(db.get(models.AgentRun, 1))
 
 
 def test_model_output_that_says_refused_is_still_a_coder_failure(monkeypatch, tmp_path):

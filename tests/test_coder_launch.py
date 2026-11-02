@@ -407,12 +407,15 @@ FAILED tests/test_goals.py::test_check_activation_accepts_non_active_goal_withou
 
 def test_failure_lines_keep_pytests_own_failure_lines_bounded(L):
     assert L.failure_lines(PYTEST_OUTPUT) == [
+        "FAILED tests/test_goals.py::test_check_activation_accepts_non_active_goal_without_selector",
         "E       TypeError: check_activation() takes 1 positional argument but 2 were given",
-        "tests/test_goals.py:157: TypeError",
-        "FAILED tests/test_goals.py::test_check_activation_accepts_non_active_goal_without_selector"]
+        "tests/test_goals.py:157: TypeError"]
     flood = "\n".join("E   " + "x" * 1000 for _ in range(100))
     lines = L.failure_lines(flood)
     assert len(lines) == L.MAX_FAILURE_LINES and all(len(l) == L.MAX_FAILURE_CHARS for l in lines)
+    # Long tracebacks never crowd out the node ids that come last in pytest's output.
+    noisy = flood + "\nFAILED tests/test_a.py::test_one\nFAILED tests/test_a.py::test_two\n"
+    assert L.failure_lines(noisy)[:2] == ["FAILED tests/test_a.py::test_one", "FAILED tests/test_a.py::test_two"]
     assert L.failure_lines("3 passed in 0.1s") == []
 
 

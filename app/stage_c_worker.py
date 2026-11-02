@@ -105,6 +105,10 @@ def admission(db, task):
                        for p in paths) or len(set(paths)) != len(paths)
             or not {"paths"} <= set(scope) <= {"paths", "context"}):
         return "stage_c_scope_refused"
+    from app import worker  # late: worker imports this module
+    cooling = worker._cooldowns(db).get(LAUNCHER_COOLDOWN_KEY)
+    if cooling and datetime.fromisoformat(cooling["until"]) > worker._now():
+        return "stage_c_launcher_cooling"
     # Read-only context: any safe repository file the coder may read; never write scope (run() refuses edits).
     context = scope.get("context", [])
     if (not isinstance(context, list) or len(context) > stage_c_runner.MAX_CONTEXT_FILES
@@ -418,11 +422,14 @@ def execute(db, task, spec, usable):
         attempts = [{"provider": name, "health": capacity.value}]
         run.tool_calls = {**run.tool_calls, "attempts": attempts, "capacity_failure": True}
         worker._cool(db, attempts)  # commits (heartbeat): before the ownership check, never between it and the writes
+    # A launcher refusal is free only if no model ran: a refused checks step after a coder run is a spent attempt.
+    free_refusal = outcome == "LAUNCHER_REFUSED" and calls == 0
     if outcome == "LAUNCHER_REFUSED":
-        # Cool the coder down (commits via the heartbeat) before the ownership check, like a capacity failure.
+        # Stage C's launcher cools down (commits via the heartbeat) before the ownership check, like a capacity
+        # failure. Its own key: a launcher problem must not stop other workloads that use the same provider.
         cool = worker._cooldowns(db)
-        cool[run.provider] = {"until": (worker._now() + worker.PROVIDER_COOLDOWN).isoformat(),
-                              "health": "LAUNCHER_UNAVAILABLE"}
+        cool[LAUNCHER_COOLDOWN_KEY] = {"until": (worker._now() + worker.PROVIDER_COOLDOWN).isoformat(),
+                                       "health": "LAUNCHER_UNAVAILABLE"}
         worker._heartbeat(db, cooldown=cool)
     # From here to the final commit nothing commits: the check and every write share the task row lock.
     owns_attempt = owns()
@@ -431,15 +438,23 @@ def execute(db, task, spec, usable):
         if owns_attempt:
             task.status = enums.TaskStatus.READY
         run.status = enums.AgentRunStatus.FAILED
-    elif outcome == "LAUNCHER_REFUSED":
-        # The host launcher refused (pause authority, fence, config): infrastructure. No retry or standing run is
-        # spent, and the coder cools down so a persistent refusal is not retried every tick.
+    elif free_refusal:
+        # The host launcher refused before any model ran (pause authority, fence, config): infrastructure. No retry
+        # or standing run is spent; repeated refusals stop the task for the founder instead of looping.
         control.refund_standing_run(db, task, run.id)
-        if owns_attempt:
-            task.status = enums.TaskStatus.READY
         run.status, run.error = enums.AgentRunStatus.FAILED, outcome
         run.tool_calls = {**run.tool_calls, "attempts": [{"provider": run.provider, "health": "DISABLED"}],
                           "capacity_failure": True}
+        if owns_attempt:
+            recent = db.scalars(select(models.AgentRun.error).where(models.AgentRun.task_id == task.id,
+                                                                    models.AgentRun.id != run.id)
+                                .order_by(models.AgentRun.id.desc()).limit(MAX_LAUNCHER_REFUSALS - 1)).all()
+            if len(recent) == MAX_LAUNCHER_REFUSALS - 1 and all(e == "LAUNCHER_REFUSED" for e in recent):
+                task.status = enums.TaskStatus.BLOCKED
+                task.error = (f"LAUNCHER_REFUSED: the host launcher refused {MAX_LAUNCHER_REFUSALS} attempts in a row; "
+                              "check the launcher and pause fence, then set READY")
+            else:
+                task.status = enums.TaskStatus.READY
     elif outcome == "PR_OPEN":
         if owns_attempt:
             task.status = enums.TaskStatus.REVIEW
@@ -563,6 +578,8 @@ def published_pr_number(task) -> int | None:
 
 REPAIR_STAGES = ("IMPLEMENTING", "TESTING", "INDEPENDENT_REVIEW")
 MAX_FEEDBACK_CHARS = 12000
+MAX_LAUNCHER_REFUSALS = 3                  # consecutive free refusals before the task is BLOCKED
+LAUNCHER_COOLDOWN_KEY = "stage_c_launcher"  # worker cooldown entry that pauses Stage C admission only
 
 
 def task_context_files(task) -> list[str]:

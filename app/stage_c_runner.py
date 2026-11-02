@@ -193,8 +193,8 @@ def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, 
         if not passed:
             history = ((task.context or {}).get("improvement") or {}).get("history", [])
             earlier = next((h.get("evidence", {}) for h in reversed(history[:-1])
-                            if h.get("stage") == "IMPLEMENTING" and h.get("evidence", {}).get("checks_passed") is False),
-                           {})
+                            if h.get("stage") == "IMPLEMENTING" and h.get("evidence", {}).get("checks_passed") is False
+                            and h.get("evidence", {}).get("failure_class") != "checks_unavailable"), {})
             failed = _failed_tests(failures)
             repeated = bool(failed) and failed == _failed_tests(earlier.get("failures"))
             evidence |= {"failure_class": failure_class(False, summary, failures), "failures": failures,
@@ -570,6 +570,9 @@ def gh_pr_opener(repository: str, base_branch: str, head_repository: str | None 
 # (scripts/company-coder-launch) runs one fixed-profile container and writes done/result.json.
 # For this, `run`'s workdir must be the launcher's jobs root (/srv/company-coder/jobs).
 
+MAX_PROMPT_BYTES = 60 * 1024   # below the launcher's 64 KiB MAX_PROMPT, so an oversized prompt fails here, counted
+
+
 def coder_prompt(job: Job) -> str:
     context = [c for c in job.context if c not in job.paths]
     read_only = (f"These files are here for reading only; never change them: {', '.join(context)}.\n"
@@ -696,7 +699,11 @@ def launcher_coder(timeout_s: int = 1200, poll_s: float = 5.0, sleep=time.sleep,
                     after_start: Callable[[bool], None] | None = None) -> Coder:
     def call(workspace: Path, job: Job) -> None:
         job_dir = Path(workspace).parent
-        (job_dir / "prompt.txt").write_text(coder_prompt(job))
+        prompt = coder_prompt(job)
+        if len(prompt.encode()) > MAX_PROMPT_BYTES:
+            # Before any request: a spent, finite attempt (CODER_FAILED), never a launcher refusal that loops.
+            raise RuntimeError(f"coder prompt exceeds {MAX_PROMPT_BYTES} bytes")
+        (job_dir / "prompt.txt").write_text(prompt)
         result = _launch(job_dir, {"kind": "code", "provider": job.provider, "timeout_s": timeout_s},
                          timeout_s + 120, poll_s, sleep, before_enqueue, after_start)
         if result.get("refused"):
