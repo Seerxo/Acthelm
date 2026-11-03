@@ -735,3 +735,22 @@ def test_launcher_masking_keeps_the_base_whole_value(L):
 def test_launcher_masks_url_userinfo_before_key_value_rules(L, url):
     out = stage_c_runner._redact_secrets(L.mask("E   " + url))
     assert out == "E   https://***@hostname"
+
+
+@pytest.mark.parametrize("path", ["tests/test_token_refresh_flow.py", "tests/tokens/test_cache.py",
+                                  "tests/test_bearer_token_parsing.py"])
+def test_token_named_test_files_still_count_as_passed(L, monkeypatch, path):
+    out = f"PASSED {path}::test_a\n1 passed in 0.1s\n".encode()
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: FakeProcess(out))
+    assert L.run_container(["docker"], b"", 5, "checks")["passed_files"] == [path]
+
+
+def test_a_jwt_wrapped_inside_its_header_in_check_output_is_withheld(L, monkeypatch):
+    import base64, os
+    b = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    jwt = b(json.dumps({"alg": "RS256", "typ": "JWT", "kid": "k" * 40}).encode()) + "." + b(os.urandom(280)) + "." + b(os.urandom(256))
+    out = ("FAILED tests/test_a.py::test_one - AssertionError\n" + "".join("E   " + jwt[i:i + 76] + "\n" for i in range(0, len(jwt), 76))
+           + "1 failed in 0.1s\n").encode()
+    monkeypatch.setattr(L.subprocess, "Popen", lambda *a, **k: FakeProcess(out))
+    result = L.run_container(["docker"], b"", 5, "checks")
+    assert result["failures"] == [L.WITHHELD] and jwt[80:160] not in json.dumps(result)

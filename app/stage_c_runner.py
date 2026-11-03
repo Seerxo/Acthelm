@@ -90,11 +90,22 @@ def _failed_tests(failures: list) -> list[str]:
                    if isinstance(f, str) and f.startswith(("FAILED ", "ERROR ")) and len(f.split(" ")) > 1})
 
 
+_GLUE = re.compile(r"(?m)^E {1,4}+|\s++")   # pytest continuation prefixes and all whitespace
+
+
+def _list_must_withhold(items: list) -> bool:
+    """A JWT or key anywhere in a list of strings, also when split across items or wrapped inside a segment: the list
+    is judged joined by newlines, glued with nothing, and glued with whitespace and `E   ` prefixes removed."""
+    joined = "\n".join(items)
+    return any(_must_withhold(form) or _jwts(form) for form in (joined, "".join(items), _GLUE.sub("", joined)))
+
+
 def _redact_items(items: list) -> list[str]:
     """Each item redacted; but a JWT header anywhere in the list withholds all of it, since its payload and signature
-    can sit on the next line (a wrapped exception message) and per-item masking would keep them."""
+    can sit on the next line or item (a wrapped message, a token split across findings) and per-item masking would
+    keep them."""
     items = [str(item) for item in items]
-    return [_WITHHELD] if _must_withhold("\n".join(items)) else [_redact(item) for item in items]
+    return [_WITHHELD] if _list_must_withhold(items) else [_redact(item) for item in items]
 
 
 def _bounded_failures(raw) -> list[str]:
@@ -1002,7 +1013,7 @@ def launcher_checks(repo: str, timeout_s: int = 1200, poll_s: float = 5.0, sleep
             passed, summary = False, "checks did not report a pytest result"
         files = result.get("passed_files") if isinstance(result.get("passed_files"), list) else []
         failures = result.get("failures") if isinstance(result.get("failures"), list) else []
-        if _must_withhold("\n".join([summary, *map(str, failures)])):
+        if _list_must_withhold([summary, *map(str, failures)]):
             # Summary and failure lines are one stdout: a JWT wrapped across them is withheld everywhere.
             summary, failures = _WITHHELD, [_WITHHELD]
         return {"passed": passed, "summary": summary, "refused": bool(result.get("refused")),

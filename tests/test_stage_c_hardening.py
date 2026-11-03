@@ -485,3 +485,28 @@ def test_a_token_glued_after_a_word_tail_is_caught():
     token = "sk-ant-" + "oat01-" + "AbCdEfGh" * 6
     assert _scan(f"v = 'ab{token}'") == ["t.py"]
     assert token not in stage_c_runner._redact_secrets(f"E   ab{token}")
+
+
+def _rs256_like():
+    import base64, os
+    b = lambda raw: base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    head = _b64({"alg": "RS256", "typ": "JWT", "kid": "k" * 40})
+    return head, b(os.urandom(280)), b(os.urandom(256))
+
+
+@pytest.mark.parametrize("cut", [40, 76])
+def test_a_jwt_split_across_findings_cannot_be_rebuilt(cut):
+    head, pay, sig = _rs256_like()
+    jwt = f"{head}.{pay}.{sig}"
+    first, rest = jwt[:cut], jwt[cut:]
+    items = [f"see {first}"] + [rest[i:i + 280] for i in range(0, len(rest), 280)]
+    out = stage_c_runner._redact_items(items)
+    glued = "".join(out)
+    assert out == [stage_c_runner._WITHHELD] and pay not in glued and sig not in glued
+
+
+def test_a_jwt_wrapped_in_pytest_lines_is_withheld_from_failures():
+    head, pay, sig = _rs256_like()
+    jwt = f"{head}.{pay}.{sig}"
+    lines = ["E   AssertionError: token"] + ["E   " + jwt[i:i + 76] for i in range(0, len(jwt), 76)]
+    assert stage_c_runner._bounded_failures(lines) == [stage_c_runner._WITHHELD]
