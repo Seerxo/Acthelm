@@ -206,6 +206,9 @@ services:
     pids_limit: 256
     cpus: 1.0
     mem_limit: 2g
+    # No swap (memory.swap.max = 0): the Codex reviewer's run files sit on the /tmp tmpfs, whose pages would
+    # otherwise swap to the host's unencrypted swap file (app/providers.swap_off refuses a run without this).
+    memswap_limit: 2g
     networks: [reasoner-net, review-net]
     logging: *logging
 

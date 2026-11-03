@@ -36,3 +36,17 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if Path(str(item.fspath)).name in NEEDS_GIT_REPOSITORY:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _fake_tmpfs(monkeypatch):
+    """Codex runs only on a tmpfs (app/providers.volatile_root) that cannot swap (providers.swap_off). A test
+    directory named `fake-tmpfs*` counts as such a tmpfs, on every platform; nothing else changes."""
+    from app import providers
+    real = providers._fs_type
+
+    def fs_type(path):
+        return "tmpfs" if Path(path).name.startswith("fake-tmpfs") else real(path)
+    monkeypatch.setattr(providers, "_fs_type", fs_type)
+    monkeypatch.setattr(providers, "swap_off", lambda: True)   # tests with swap on set it back explicitly
+    return real
