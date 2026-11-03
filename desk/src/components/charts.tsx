@@ -51,7 +51,7 @@ const COLUMN_COLORS = ["var(--chart-3)", "var(--chart-4)", "oklch(0.72 0.12 220)
 
 export function PipelineChart() {
   const { data } = useDesk()
-  const parts = COLUMNS.map(([label, states], i) => ({ label, value: data!.tasks.filter(t => states.includes(t.status)).length, fill: COLUMN_COLORS[i] }))
+  const parts = COLUMNS.map(([label, states], i) => ({ label, value: data!.task_counts ? states.reduce((n, s) => n + (data!.task_counts![s] ?? 0), 0) : data!.tasks.filter(t => states.includes(t.status)).length, fill: COLUMN_COLORS[i] }))
   const total = parts.reduce((n, p) => n + p.value, 0)
   const config = Object.fromEntries(parts.map(p => [p.label, { label: p.label, color: p.fill }])) satisfies ChartConfig
   return (
@@ -86,7 +86,7 @@ export function WorkloadChart() {
   const { data, open } = useDesk()
   const rows = data!.agents.map(a => {
     const mine = data!.tasks.filter(t => t.agent === a.key)
-    return { a, done: mine.filter(t => t.status === "DONE").length, parts: LOAD.map(([label, s, color]) => ({ label, color, n: mine.filter(t => s.includes(t.status)).length })) }
+    return { a, done: a.tasks_done ?? mine.filter(t => t.status === "DONE").length, parts: LOAD.map(([label, s, color]) => ({ label, color, n: mine.filter(t => s.includes(t.status)).length })) }
   })
   const openOf = (r: (typeof rows)[number]) => r.parts.reduce((n, p) => n + p.n, 0)
   const max = Math.max(1, ...rows.map(openOf))

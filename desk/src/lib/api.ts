@@ -16,7 +16,7 @@ export interface Agent {
   key: string; name: string; role: string; team?: string; reports_to: string | null
   enabled?: boolean; status: string; current_task: { key: string; title: string; status: string } | null
   last_run: string | null; last_success: string | null; last_error: string | null
-  cost_today_usd?: number; model_class?: string
+  cost_today_usd?: number; model_class?: string; tasks_done?: number
 }
 export interface Need {
   kind: string; rank: number; level: "critical" | "warning" | "info" | string
@@ -123,6 +123,8 @@ export interface DeskState {
     pending_approvals: number; system_health: string
   }
   agents: Agent[]; tasks: TaskRow[]; approvals: Approval[]; incidents: Incident[]; activity: Event[]
+  /** Exact totals by status. `tasks` holds every open task but only the newest closed ones. Absent = older API. */
+  task_counts?: Record<string, number>; tasks_total?: number; tasks_truncated?: number
   health: {
     api: string; postgresql: string
     resources: { cpu_percent: number | null; ram_percent: number | null; disk_percent: number | null; at: string | null }

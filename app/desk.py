@@ -1,10 +1,11 @@
 """PostgreSQL read models for the Founder Desk."""
 import functools
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from statistics import median
 
-from sqlalchemy import func, inspect, select, text
+from sqlalchemy import String, cast, func, inspect, or_, select, text
 from sqlalchemy.orm import Session
 
 import yaml
@@ -24,9 +25,14 @@ def cost_view(db: Session) -> dict:
     """Costs as classes, not a single "$0": the company has approved costs; the metric
     that must stay zero is new spend an agent created."""
     policy = yaml.safe_load(COST_POLICY.read_text()) if COST_POLICY.exists() else {"items": {}}
-    runs = db.execute(select(models.AgentRun.tool_calls)).scalars().all()
-    new_spend = sum(float((tc or {}).get("incremental_cost_usd") or 0) for tc in runs)
-    return {"new_autonomous_spend_usd": new_spend,
+    # Group raw JSON values and convert in Python: both dialects then match the old per-run sum exactly
+    # ("" and null count 0, a non-numeric string raises) instead of PG erroring and SQLite coercing '1.25oops'.
+    # ponytail: one row per distinct cost value; fine while runs are subscription-only (null/0). If metered costs
+    # appear, move to a SQL SUM with a dialect-aware numeric filter.
+    cost = cast(models.AgentRun.tool_calls["incremental_cost_usd"], String)
+    costs = db.execute(select(cost, func.count()).group_by(cost).execution_options(yield_per=1000))
+    new_spend = sum(float(json.loads(value or "null") or 0) * count for value, count in costs)
+    return {"new_autonomous_spend_usd": float(new_spend),
             "items": [{"key": k, **v} for k, v in (policy.get("items") or {}).items()]}
 from app.registry import AgentSpec
 
@@ -330,6 +336,9 @@ def current_priority(goals, open_tasks, agents_by_id, progress_of=None) -> dict 
 
 
 IMPROVEMENT_DONE = {"MEASURED", "ABANDONED"}
+# Closed tasks only grow; /desk/state lists the newest CLOSED_TASKS_SHOWN (task_counts stays exact).
+CLOSED_TASK_STATES = (enums.TaskStatus.DONE, enums.TaskStatus.CANCELLED)
+CLOSED_TASKS_SHOWN = 100
 
 
 def improvements(tasks: list) -> list[dict]:
@@ -399,9 +408,31 @@ def build_state(db: Session, specs: dict[str, AgentSpec], paused: bool) -> dict:
     agents = list(db.execute(select(models.Agent).where(
         models.Agent.key.in_(specs)
     )).scalars())
-    tasks = list(db.execute(select(models.Task).order_by(
-        models.Task.priority, models.Task.created_at.desc()
-    )).scalars())
+    # Every task that can still need attention (FAILED included) plus the newest closed ones;
+    # exact per-status counts come from SQL, so a long history no longer grows the payload.
+    closed = models.Task.status.in_(CLOSED_TASK_STATES)
+    ranked = select(models.Task.id, func.count().over(partition_by=models.Task.status).label("total"),
+                    func.count().filter(models.Task.status == enums.TaskStatus.DONE).over(
+                        partition_by=models.Task.assigned_agent_id).label("agent_done"),
+                    func.row_number().over(partition_by=models.Task.assigned_agent_id,
+                                           order_by=models.Task.id).label("agent_row"),
+                    func.row_number().over(partition_by=closed, order_by=(
+                        models.Task.updated_at.desc(), models.Task.id.desc())).label("recent"),
+                    func.row_number().over(partition_by=models.Task.status, order_by=(
+                        models.Task.updated_at.desc(), models.Task.id.desc())).label("status_row")).cte()
+    # The extra first row per status carries totals even when that status falls outside the cap.
+    rows = db.execute(select(models.Task, ranked.c.total, ranked.c.recent, ranked.c.agent_done).join(
+        ranked, ranked.c.id == models.Task.id).where(or_(
+            ~closed, ranked.c.recent <= CLOSED_TASKS_SHOWN, ranked.c.status_row == 1,
+            ranked.c.agent_row == 1)).order_by(
+                models.Task.priority, models.Task.created_at.desc()))
+    tasks, task_counts, agent_done = [], {}, {}
+    for task, total, recent, done in rows:
+        task_counts[task.status.value] = total
+        agent_done[task.assigned_agent_id] = done
+        if task.status not in CLOSED_TASK_STATES or recent <= CLOSED_TASKS_SHOWN:
+            tasks.append(task)
+    tasks_total = sum(task_counts.values())
     projects = list(db.execute(select(models.Project)).scalars())
     units = list(db.execute(select(models.BusinessUnit)).scalars())
     runs = list(db.execute(select(models.AgentRun).order_by(
@@ -488,6 +519,10 @@ def build_state(db: Session, specs: dict[str, AgentSpec], paused: bool) -> dict:
     project_by_id = {p.id: p for p in projects}
     unit_by_id = {b.id: b for b in units}
     task_by_id = {t.id: t for t in tasks}
+    # Activity rows name their task even when it closed long ago and is outside the list.
+    missing = {e.task_id for e in events if e.task_id} - task_by_id.keys()
+    if missing:
+        task_by_id.update((t.id, t) for t in db.scalars(select(models.Task).where(models.Task.id.in_(missing))))
     service_by_id = {s.id: s for s in services}
 
     def unit_of(unit_id=None, service_id=None, project_id=None, task=None):
@@ -502,7 +537,8 @@ def build_state(db: Session, specs: dict[str, AgentSpec], paused: bool) -> dict:
     for agent in agents:
         own_tasks = [t for t in tasks if t.assigned_agent_id == agent.id]
         own_runs = [r for r in runs if r.agent_id == agent.id]
-        agent_rows.append(_agent_summary(agent, specs[agent.key], own_tasks, own_runs, paused))
+        agent_rows.append({**_agent_summary(agent, specs[agent.key], own_tasks, own_runs, paused),
+                           "tasks_done": agent_done.get(agent.id, 0)})
     agent_rows.sort(key=lambda a: (a["reports_to"] != "founder", a["name"]))
 
     degraded = any(i.severity in (enums.IncidentSeverity.SEV0, enums.IncidentSeverity.SEV1)
@@ -537,13 +573,20 @@ def build_state(db: Session, specs: dict[str, AgentSpec], paused: bool) -> dict:
                                    service_by_id[i.service_id].name if i.service_id in service_by_id else None) if x)
                                    for i in incidents}),
         "portfolio": metrics_store.portfolio(db),
-        "improvements": improvements(tasks),
+        "improvements": improvements(tasks + [t for t in db.scalars(select(models.Task).where(
+            # A closed task can still carry Stage C work in flight (merged, verifying).
+            models.Task.status.in_(CLOSED_TASK_STATES),
+            models.Task.context["improvement"]["stage"].as_string().not_in(tuple(IMPROVEMENT_DONE))))
+            if t not in tasks]),
         "current_priority": current_priority(
             list(db.execute(select(models.Goal)).scalars()), open_tasks, agent_by_id,
             progress_of=lambda g: goals.progress(db, g)),
         "costs": cost_view(db),
         "run_series": run_series(runs),
-        "task_lead_time": task_lead_time(tasks),
+        "task_lead_time": task_lead_time([t for t in tasks if t.status != enums.TaskStatus.DONE] + list(
+            db.execute(select(models.Task.status, models.Task.created_at, models.Task.completed_at).where(
+                models.Task.status == enums.TaskStatus.DONE,
+                models.Task.completed_at >= datetime.now(timezone.utc) - timedelta(days=31))))),
         "revenue": revenue,
         # What a new task can be attached to (Create Task form). Closed goals take no new work.
         "catalog": {
@@ -571,6 +614,8 @@ def build_state(db: Session, specs: dict[str, AgentSpec], paused: bool) -> dict:
                        for t in priorities[:3]],
         "agents": agent_rows,
         "tasks": [_task_summary(t, agent_by_id, project_by_id, unit_by_id) for t in tasks],
+        "task_counts": task_counts, "tasks_total": tasks_total,
+        "tasks_truncated": tasks_total - len(tasks),
         "approvals": [
             {"key": a.key, "action": a.action, "reason": a.reason,
              "expected_effect": a.expected_effect, "risk": a.risk_level.value,
