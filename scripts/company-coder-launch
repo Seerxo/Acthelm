@@ -416,7 +416,10 @@ def run_container(argv: list[str], prompt: bytes, timeout_s: int, name: str,
         # pytest summary the checks fail closed.
         return {"exit": proc.returncode, "timed_out": False, "summary": OVERFLOWED, "failures": [OVERFLOWED],
                 "passed_files": []}
-    withheld = has_jose_header(text, token=True) or bool(PRIVATE_KEY.search(text))
+    # Also glued (whitespace and pytest `E   ` prefixes removed), so a header wrapped inside its segment reads whole.
+    glued = GLUE.sub("", text)
+    withheld = (has_jose_header(text, token=True) or has_jose_header(glued, token=True)
+                or bool(PRIVATE_KEY.search(text)))
     masked = mask(text)   # before lines are clipped, so a credential straddling a clip is masked whole
     tail = (masked.strip().splitlines()[-1:] or [""])[0][:300]
     failures = failure_lines(masked)
@@ -426,7 +429,9 @@ def run_container(argv: list[str], prompt: bytes, timeout_s: int, name: str,
         failures = [WITHHELD] if failures else []
         tail = tail if PYTEST_SUMMARY.fullmatch(tail) else WITHHELD
     return {"exit": proc.returncode, "timed_out": False, "summary": tail, "failures": failures,
-            "passed_files": [f for f in passed_files(masked) if "***" not in f]}
+            # Node ids from the unmasked text (key=value masking would hit `tests/test_token_refresh.py`); only a path
+            # that itself carries a credential shape is dropped.
+            "passed_files": [f for f in passed_files(text) if not SHAPES.search(f)]}
 
 
 # pytest's final line: counts of words (passed, failed, subtests passed, ...) and the duration. Spaces between count
@@ -451,6 +456,8 @@ ENV_ASSIGN = (
     r"|(?i:\b[a-z][a-z0-9+.-]{0,30}+)://[^@/\s:{}$<>%?#]*+:[^@/\s{}$<>%?#]++@")
 # As in the runner: the base masking first (leftmost, whole values), then the credential-word second pass.
 SECRETS = re.compile(r"(?i)(?:" + CREDENTIAL_SHAPES + KV_BASE + ")")
+SHAPES = re.compile(CREDENTIAL_SHAPES)
+GLUE = re.compile(r"(?m)^E {1,4}+|\s++")
 ENV = re.compile(ENV_ASSIGN)
 
 
