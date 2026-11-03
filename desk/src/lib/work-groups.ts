@@ -26,3 +26,9 @@ export function signals(tasks: Pick<TaskRow, "priority" | "risk">[]): string[] {
 
 /** Tasks in a group that were not there when the page was opened (keys seen at first render). */
 export const arrived = (tasks: Pick<TaskRow, "key">[], seen: Set<string>) => tasks.filter(t => !seen.has(t.key)).length
+
+/** The API lists only the newest closed tasks; tasks_truncated counts the older ones it left out. */
+export const closedScope = (loaded: number, truncated = 0) => truncated ? `showing newest ${loaded} of ${loaded + truncated}` : null
+/** Shown whenever a search could miss older closed tasks, whatever the result groups are (even non-empty). */
+export const searchScope = (searching: boolean, coversClosed: boolean, loaded: number, truncated = 0) =>
+  searching && coversClosed && truncated ? `Search covers the newest ${loaded} closed tasks; ${truncated} older are not included.` : null

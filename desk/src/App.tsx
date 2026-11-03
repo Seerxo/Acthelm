@@ -206,6 +206,7 @@ function CommandPalette({ open, setOpen, onCreate, onShortcuts, t }: {
       <Command loop shouldFilter={false} className="p-0">
         <CommandInput value={text} onValueChange={setText} placeholder="Search, or write an instruction for the CEO…" />
         <CommandList className="max-h-[min(440px,58dvh)] px-1.5 pb-1.5">
+          {!!data?.tasks_truncated && <p role="status" className="px-3 py-2 text-xs text-muted-foreground">Task search excludes {data.tasks_truncated} older closed tasks.</p>}
           <CommandEmpty className="px-4 py-8 text-[13px] text-muted-foreground">
             {instruction.length < 3 ? "No matches. Keep typing to write an instruction for the CEO." : "No matches."}
           </CommandEmpty>

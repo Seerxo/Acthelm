@@ -8,7 +8,7 @@ import { DeliveryTrack } from "@/components/delivery"
 import { ago } from "@/lib/format"
 import type { TaskRow } from "@/lib/api"
 import { attentionBreakdown, GROUPS, groupOf, nextLine, oldestUpdate, type Group } from "@/lib/task-story"
-import { arrived, isOpen, pinned, signals } from "@/lib/work-groups"
+import { arrived, closedScope, isOpen, pinned, searchScope, signals } from "@/lib/work-groups"
 import { useReasons } from "@/lib/use-reasons"
 import { useChange, useChanges, useData, useDesk, useDraft } from "@/state"
 import { homeAfterCreate } from "@/lib/draft"
@@ -193,9 +193,12 @@ export function TasksPage() {
   const q = query.trim().toLocaleLowerCase()
   const matches = (t: TaskRow) => (unit === "all" || t.business_unit === unit) &&
     (!q || [t.key, t.title, t.agent, t.business_unit, t.origin?.trigger, t.origin?.by].filter(Boolean).join(" ").toLocaleLowerCase().includes(q))
-  const inFilter = (t: TaskRow, f: Filter) => f === "all" || (f === "active" ? ACTIVE.includes(groupOf(t.status)) : groupOf(t.status) === f)
-  const count = (f: Filter) => d.tasks.filter(t => inFilter(t, f)).length
-  const tasks = d.tasks.filter(t => inFilter(t, filter) && matches(t))
+  const inFilter = (status: string, f: Filter) => f === "all" || (f === "active" ? ACTIVE.includes(groupOf(status)) : groupOf(status) === f)
+  // Exact totals from the API: the list carries only the newest closed tasks.
+  const count = (f: Filter) => d.task_counts
+    ? Object.entries(d.task_counts).reduce((n, [s, c]) => n + (inFilter(s, f) ? c : 0), 0)
+    : d.tasks.filter(t => inFilter(t.status, f)).length
+  const tasks = d.tasks.filter(t => inFilter(t.status, filter) && matches(t))
     .sort((a, b) => a.priority.localeCompare(b.priority) || b.updated_at.localeCompare(a.updated_at))
   const groups = GROUPS.filter(g => filter === "all" || filter === "active" ? (filter === "all" || ACTIVE.includes(g.key)) : g.key === filter)
     .map(g => ({ ...g, tasks: tasks.filter(t => groupOf(t.status) === g.key) })).filter(g => g.tasks.length)
@@ -204,6 +207,8 @@ export function TasksPage() {
   // Overview filters (Active, All) collapse every group but Needs attention; a search or a business unit narrows and opens.
   const overview = filter === "active" || filter === "all"
   const searching = q !== "" || unit !== "all"
+  const closedLoaded = d.tasks.filter(t => groupOf(t.status) === "closed").length
+  const scope = searchScope(searching, filter === "all" || filter === "closed", closedLoaded, d.tasks_truncated)
   const reviewOldest = oldestUpdate(d.tasks, "REVIEW")
   const lead = d.task_lead_time
   const changes = useChanges()
@@ -237,6 +242,7 @@ export function TasksPage() {
             {[...new Set(d.tasks.map(t => t.business_unit).filter(Boolean))].sort().map(u => <SelectItem key={u} value={u!}>{u}</SelectItem>)}</SelectContent>
         </Select>
       </div>
+      {scope && <p role="status" className="text-xs text-muted-foreground">{scope}</p>}
       {lead && <p className="text-xs text-muted-foreground">
         Median lead time, created → done, last 30 days: <b className="num font-medium text-foreground">{lead.median_hours === null ? "no completions" : `${lead.median_hours} h`}</b>
         {` · ${lead.sample_size} completed · ${lead.review_pending} awaiting review`}</p>}
@@ -261,7 +267,7 @@ export function TasksPage() {
             {g.key === "review" && reviewOldest && <span className="text-xs text-muted-foreground">oldest untouched {ago(reviewOldest)}</span>}
             {fresh > 0 && <span className="rounded-full bg-info/10 px-1.5 text-[11px] leading-[18px] font-medium text-info">+{fresh} new</span>}
             {moved > 0 && <span className="rounded-full bg-info/10 px-1.5 text-[11px] leading-[18px] font-medium text-info">{moved} just changed</span>}
-            {g.key !== "attention" && <span className="ml-auto text-xs text-muted-foreground">{open ? "Hide" : `Show all ${g.tasks.length}`}</span>}
+            {g.key !== "attention" && <span className="ml-auto text-xs text-muted-foreground">{[g.key === "closed" && closedScope(closedLoaded, d.tasks_truncated), open ? "Hide" : `Show all ${g.tasks.length}`].filter(Boolean).join(" · ")}</span>}
           </button>
           {(open ? g.tasks : pinned(g.tasks)).map(t => <TaskLine key={t.key} t={t} reason={reasons[t.key]} paused={paused} />)}
         </section>

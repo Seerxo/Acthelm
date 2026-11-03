@@ -15,12 +15,12 @@ const LANE: Group[] = ["attention", "running", "review", "next", "waiting"]   //
 const LABEL: Partial<Record<Group, string>> = { attention: "stopped", running: "running", review: "in review", next: "queued", waiting: "waiting outside" }
 
 /** One agent's own tasks by group. Failed and blocked are named separately because they need different action. */
-function workload(tasks: TaskRow[]) {
+function workload(tasks: TaskRow[], done = tasks.filter(t => t.status === "DONE").length) {
   const by = (g: Group) => tasks.filter(t => groupOf(t.status) === g).length
   const failed = tasks.filter(t => t.status === "FAILED").length, blocked = tasks.filter(t => t.status === "BLOCKED").length
   const approval = tasks.filter(t => t.status === "WAITING_APPROVAL").length
   const parts = [failed && `${failed} failed`, blocked && `${blocked} blocked`, approval && `${approval} awaiting approval`,
-    ...LANE.filter(g => g !== "attention").map(g => by(g) && `${by(g)} ${LABEL[g]}`), by("closed") && `${by("closed")} done`].filter(Boolean) as string[]
+    ...LANE.filter(g => g !== "attention").map(g => by(g) && `${by(g)} ${LABEL[g]}`), done && `${done} done`].filter(Boolean) as string[]
   return { open: LANE.reduce((n, g) => n + by(g), 0), segments: LANE.map(g => ({ g, n: by(g) })).filter(s => s.n), parts }
 }
 
@@ -29,7 +29,7 @@ function AgentLane({ agent, tasks, reportsTo }: { agent: Agent; tasks: TaskRow[]
   const title = agent.current_task?.title
   const st = agentState(agent, useData(), useNow("minute"))
   const availability = st.value
-  const w = workload(tasks)
+  const w = workload(tasks, agent.tasks_done)
   const changed = useChange("agent", agent.key)
   return (
     <button type="button" onClick={() => open({ kind: "agent", key: agent.key })}
