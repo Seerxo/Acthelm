@@ -63,7 +63,8 @@ The Access founder can reach the two routes through `api_auth.FOUNDER_SCOPE`; th
 | `POST /experiments...` founder steps (approve, accept, reject) | Founder-only, enforce-always | route layer is Agent 3's; contract below |
 | `POST /experiments...` other steps | Authenticated principal, enforce-always | actor = `principal_of(request).id` |
 | `POST /learnings`, incident resolve (learning) | Authenticated operator | always writes a CANDIDATE; created_by/audit = real principal |
-| `PATCH /goals/{id}`, `POST /tasks/{key}/assign` | Authenticated operator / Desk | unchanged authority; audit actor = real principal, client `actor` kept as `client_claimed_actor` |
+| `POST /goals`, `PATCH /goals/{id}` | Founder-only, enforce-always | `require_founder` (goals steer the business reconciler; no operator or admin path); created_by/audit actor = founder id, client `created_by`/`actor` kept as `client_claimed_actor` |
+| `POST /tasks/{key}/assign` | Authenticated operator / Desk | unchanged authority; audit actor = real principal, client `actor` kept as `client_claimed_actor` |
 | Checkpoints, notes, decisions, incidents, metrics, webhooks | Scoped service / operator | unchanged; they do not confer founder authority (residual: some still store a client-supplied `actor`/`created_by` label) |
 | GET routes, `/health` | Read-only / public | unchanged |
 

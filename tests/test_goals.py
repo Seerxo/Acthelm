@@ -1,15 +1,18 @@
 """Operational goals: measured by one verified observation; never invented progress."""
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from app import desk, enums, goals, main, metrics_store, models, schemas
+from app import approval_identity, desk, enums, goals, main, metrics_store, models, schemas
 
 NOW = datetime.now(timezone.utc)
 SEL = {"subject": "youtube:channel", "metric": "views", "window": "7d"}
+# Goal writes are founder-only (app/main.py create_goal/update_goal); in-process calls carry a verified founder.
+FOUNDER = SimpleNamespace(state=SimpleNamespace(principal=approval_identity.founder("founder@example.invalid")))
 
 
 def _db():
@@ -30,7 +33,7 @@ def _observe(db, value, at=NOW, source="youtube-data-api"):
 def _goal(db, **kw):
     body = dict(title="Grow channel reach", metric="Channel views, 7 days", baseline="10,000",
                 target="20,000", selector=schemas.GoalSelector(**SEL), status=enums.GoalStatus.ACTIVE)
-    return main.create_goal(schemas.GoalCreate(**(body | kw)), db)
+    return main.create_goal(schemas.GoalCreate(**(body | kw)), db, FOUNDER)
 
 
 def test_progress_is_unknown_until_a_verified_observation_exists():
@@ -143,11 +146,11 @@ def test_active_goal_requires_a_metric_selector():
     assert e.value.status_code == 422
     proposed = _goal(db, selector=None, status=enums.GoalStatus.PROPOSED)
     with pytest.raises(HTTPException) as e:
-        main.update_goal(proposed["id"], schemas.GoalUpdate(status=enums.GoalStatus.ACTIVE), db)
+        main.update_goal(proposed["id"], schemas.GoalUpdate(status=enums.GoalStatus.ACTIVE), db, FOUNDER)
     assert e.value.status_code == 422
     assert db.get(models.Goal, proposed["id"]).status == enums.GoalStatus.PROPOSED  # rolled back
     ok = main.update_goal(proposed["id"], schemas.GoalUpdate(status=enums.GoalStatus.ACTIVE,
-                                                            selector=schemas.GoalSelector(**SEL)), db)
+                                                            selector=schemas.GoalSelector(**SEL)), db, FOUNDER)
     assert ok["status"] == "ACTIVE"
     actions = db.scalars(select(models.AuditLog.action).where(models.AuditLog.entity_type == "goal")).all()
     assert actions.count("goal.update") == 1 and actions.count("goal.create") == 1
@@ -171,7 +174,7 @@ def test_tasks_link_to_open_goals_only():
     with pytest.raises(HTTPException) as e:
         main.create_task(schemas.TaskCreate(title="x", success_criteria="yyy", goal=999), db)
     assert e.value.status_code == 404
-    main.update_goal(g["id"], schemas.GoalUpdate(status=enums.GoalStatus.ABANDONED), db)
+    main.update_goal(g["id"], schemas.GoalUpdate(status=enums.GoalStatus.ABANDONED), db, FOUNDER)
     with pytest.raises(HTTPException) as e:
         main.create_task(schemas.TaskCreate(title="x", success_criteria="yyy", goal=g["id"]), db)
     assert e.value.status_code == 409
@@ -253,3 +256,10 @@ def test_config_issues_are_independent_of_any_reading():
     assert goals.config_issues(models.Goal(metric_selector=SEL, baseline="5", target="5")) == ["TARGET_EQUALS_BASELINE"]
     assert goals.config_issues(models.Goal(metric_selector=SEL, baseline="NaN", target="Infinity")) == [
         "BASELINE_INVALID", "TARGET_INVALID"]
+
+
+def test_an_in_process_call_without_a_verified_founder_is_refused():
+    db = _db()
+    with pytest.raises(HTTPException) as e:
+        main.create_goal(schemas.GoalCreate(title="Grow reach", metric="views", target="1"), db)
+    assert e.value.status_code == 401 and db.scalar(select(models.Goal.id)) is None

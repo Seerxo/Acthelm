@@ -480,3 +480,51 @@ def test_falsy_malformed_selector_is_a_config_repair_not_a_silent_skip(selector,
     assert task.approval_required and task.assigned_agent_id is None and task.context["autonomous"] is False
     json.dumps(task.context)
     assert br.reconcile(db, NOW) == [] and db.query(models.Task).count() == 1
+
+
+# --- kill switch: pausing agents stops goal planning too ------------------------------------
+def _pause(db, value):
+    db.merge(models.ControlState(key="agents_paused", value=value, updated_by="operator:local"))
+    db.commit()
+
+
+def _task_count(db):
+    return len(db.execute(select(models.Task)).scalars().all())
+
+
+@pytest.mark.parametrize("value", [{"paused": True}, ["not", "a", "dict"]])
+def test_paused_or_malformed_pause_state_skips_reconcile_and_says_so(value):
+    # Break caught: the kill switch stopped the worker but the reconciler kept opening tasks every tick.
+    db = _db()
+    _goal(db)
+    _pause(db, value)
+    out = br.reconcile(db, NOW)
+    assert out == [] and out.paused is True and out.goals_total is None and _task_count(db) == 0
+    _pause(db, {"paused": False})
+    out = br.reconcile(db, NOW)
+    assert out.paused is False and out.goals_total == 1 and _task_count(db) == 1
+
+
+def test_unreadable_pause_state_counts_as_paused(monkeypatch):
+    db = _db()
+    _goal(db)
+    real = db.get
+
+    def get(model, *a, **kw):
+        if model is models.ControlState:
+            raise RuntimeError("database unavailable")
+        return real(model, *a, **kw)
+    monkeypatch.setattr(db, "get", get)
+    out = br.reconcile(db, NOW)
+    assert out.paused is True and _task_count(db) == 0
+
+
+def test_the_heartbeat_records_a_paused_skip_without_claiming_goals_were_checked():
+    from app import reconciler_heartbeat as hb
+    db = _db()
+    _goal(db)
+    _pause(db, {"paused": True})
+    hb.run(db, br.reconcile)
+    row = db.get(models.ControlState, hb.KEY, populate_existing=True)
+    assert row.value["paused"] is True and row.value["per_goal_outcome"] == "unknown"
+    assert row.value["created_task_count"] == 0 and hb.view(db)["per_goal_outcome"] == "unknown"

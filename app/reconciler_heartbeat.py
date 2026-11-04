@@ -149,6 +149,7 @@ def run(db: Session, reconcile) -> list[str]:
     keys = [str(k) for k in opened]
     _update(db, finish({"outcome": "COMPLETED", "completed_at": done, "duration_ms": int((time.monotonic() - t0) * 1000),
                         "created_task_count": len(keys), "created_task_keys": keys[:MAX_KEYS],
+                        "paused": getattr(opened, "paused", False) is True,
                         **_structured(opened, errors.count)}, done))
     return opened
 
