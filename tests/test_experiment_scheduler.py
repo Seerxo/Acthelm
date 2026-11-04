@@ -704,3 +704,60 @@ def test_compose_passes_both_switches_to_the_api_and_defaults_them_off():
     compose = (ROOT / "docker-compose.yml").read_text()
     assert "EXPERIMENT_SCHEDULER_ENABLED: ${EXPERIMENT_SCHEDULER_ENABLED:-false}" in compose
     assert "EXPERIMENT_SCHEDULER_APPLY: ${EXPERIMENT_SCHEDULER_APPLY:-}" in compose
+
+
+# --- kill switch -----------------------------------------------------------------------------
+def _pause(db, value):
+    db.merge(models.ControlState(key="agents_paused", value=value, updated_by="operator:local"))
+    db.commit()
+
+
+@pytest.mark.parametrize("value", [{"paused": True}, "garbage"])
+def test_paused_agents_stop_the_scheduler_and_the_skip_is_reported(value):
+    # Break caught: the kill switch stopped the worker while the scheduler kept closing windows and evaluating.
+    db = _db()
+    exp = _running(db)
+    _pause(db, value)
+    before = _audits(db)
+    result = sched.tick(db, END, commit=True)
+    assert result.paused is True and result.outcomes == [] and result.transitions == 0
+    assert result.to_dict()["paused"] is True
+    assert exp.status == enums.ExperimentStatus.RUNNING and _audits(db) == before
+    _pause(db, {"paused": False})
+    result = sched.tick(db, END, commit=True)
+    assert result.paused is False and result.transitions == 1
+    assert exp.status == enums.ExperimentStatus.AWAITING_MEASUREMENT
+
+
+def test_unreadable_pause_state_stops_the_scheduler(monkeypatch):
+    db = _db()
+    exp = _running(db)
+    real = db.get
+
+    def get(model, *a, **kw):
+        if model is models.ControlState and a and a[0] == "agents_paused":
+            raise RuntimeError("database unavailable")
+        return real(model, *a, **kw)
+    monkeypatch.setattr(db, "get", get)
+    result = sched.tick(db, END, commit=True)
+    assert result.paused is True and result.transitions == 0 and exp.status == enums.ExperimentStatus.RUNNING
+
+
+def test_the_watchdog_entry_point_reports_a_paused_scheduler(monkeypatch):
+    from app import watchdog
+    db = _db()
+    _running(db)
+    _pause(db, {"paused": True})
+    monkeypatch.setenv("EXPERIMENT_SCHEDULER_ENABLED", "true")
+    monkeypatch.setenv("EXPERIMENT_SCHEDULER_APPLY", "yes")
+    monkeypatch.setattr(watchdog, "SessionLocal", lambda: Session(db.get_bind()))
+    assert watchdog.run_experiment_scheduler() == {"counts": {}, "truncated": False, "paused": True}
+
+
+def test_a_dry_run_is_skipped_while_paused_too(monkeypatch):
+    db = _db()
+    _running(db)
+    _pause(db, {"paused": True})
+    monkeypatch.setattr(sched, "_candidates", lambda *a: pytest.fail("no candidate query while paused"))
+    result = sched.tick(db, END, dry_run=True)
+    assert result.paused is True and result.dry_run is True and result.outcomes == [] and result.transitions == 0

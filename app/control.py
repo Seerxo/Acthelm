@@ -1,5 +1,6 @@
 """Persistent controls for agent execution. Production services are never touched."""
 import fcntl
+import logging
 import os
 import re
 import stat
@@ -11,6 +12,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import approval_identity, audit, models
+
+log = logging.getLogger("company.control")
 
 _PAUSE_KEY = "agents_paused"
 CODER_PAUSE_FENCE = "/run/company-coder-pause.lock"
@@ -59,6 +62,25 @@ def coder_pause_fence():
 def agents_paused(db: Session) -> bool:
     row = db.get(models.ControlState, _PAUSE_KEY, populate_existing=True)
     return bool((row.value or {}).get("paused")) if row else False
+
+
+def paused_or_unreadable(db: Session) -> bool:
+    """The kill switch for background loops (business reconciler, experiment scheduler): fail closed.
+    An unreadable or malformed pause row counts as paused; the session is rolled back after a failed read."""
+    try:
+        row = db.get(models.ControlState, _PAUSE_KEY, populate_existing=True)
+        if row is None:
+            return False
+        if not isinstance(row.value, dict):
+            return True
+        return bool(row.value.get("paused"))
+    except Exception:  # noqa: BLE001 - any read failure means "do not act"
+        log.warning("agents_paused unreadable; treating agents as paused", exc_info=True)
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        return True
 
 
 def set_agents_paused(db: Session, paused: bool, *, actor: str, reason: str) -> dict:
