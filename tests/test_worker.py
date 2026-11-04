@@ -319,12 +319,20 @@ def test_claude_adapter_parses_structured_output_and_strips_metered_env():
                                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"}
 
 
-def test_codex_adapter_classifies_usage_limit_as_quota_never_buys():
+def _codex_home(tmp_path) -> str:
+    """A synthetic Codex login (never the operator's ~/.codex): the provider refuses to run without one to guard."""
+    (tmp_path / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "tokens": {"refresh_token": "rt_" + "S1" * 20}}))
+    (tmp_path / "fake-tmpfs").mkdir(exist_ok=True)
+    return str(tmp_path)
+
+
+def test_codex_adapter_classifies_usage_limit_as_quota_never_buys(tmp_path):
     events = "\n".join(json.dumps(e) for e in [
         {"type": "turn.started"},
         {"type": "turn.failed", "error": {"message": "You've hit your usage limit. "
                                                      "Upgrade to Pro or purchase more credits"}}])
-    p = providers.CodexProvider(environ={"PATH": "/bin"}, runner=_runner(1, events))
+    p = providers.CodexProvider(environ={"PATH": "/bin", "CODEX_HOME": _codex_home(tmp_path),
+                                        "CODEX_VOLATILE_DIR": str(tmp_path / "fake-tmpfs")}, runner=_runner(1, events))
     p.health_check = lambda: (Health.AVAILABLE, None)
     r = p.run("hi", {}, cwd="/tmp", timeout_s=5, max_turns=2)
     assert r.health == Health.QUOTA_EXHAUSTED and not r.ok
@@ -338,14 +346,16 @@ def test_codex_api_key_auth_is_metered(tmp_path):
 
 
 def test_codex_chatgpt_auth_file_is_configuration_not_live_model_proof(tmp_path):
-    (tmp_path / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "refresh_token": "not-a-real-secret"}))
-    p = providers.CodexProvider(environ={"PATH": "/usr/bin:/bin", "CODEX_HOME": str(tmp_path)})
+    (tmp_path / "auth.json").write_text(json.dumps({"auth_mode": "chatgpt", "refresh_token": "not-a-real-secret-" + "x" * 24}))
+    (tmp_path / "fake-tmpfs").mkdir()
+    p = providers.CodexProvider(environ={"PATH": "/usr/bin:/bin", "CODEX_HOME": str(tmp_path),
+                                         "CODEX_VOLATILE_DIR": str(tmp_path / "fake-tmpfs")})
     p.binary = "sh"
     assert p.health_check()[0] == Health.CREDENTIALS_CONFIGURED
 
     def answer(argv, cwd, timeout, env, stdin=None):
-        Path(argv[argv.index("-o") + 1]).write_text('{"ok": true}')
-        return 0, '{"type":"turn.completed","usage":{}}', ""
+        final = {"type": "item.completed", "item": {"type": "agent_message", "text": '{"ok": true}'}}
+        return 0, json.dumps(final) + '\n{"type":"turn.completed","usage":{}}', ""
 
     p.runner = answer
     result = p.run("reply", {"type": "object"}, cwd="/tmp", timeout_s=5, max_turns=1)
@@ -681,11 +691,13 @@ def test_the_real_runner_feeds_stdin_beyond_the_argv_limit(tmp_path):
     assert code == 0 and out.strip() == "300000"
 
 
-def test_a_release_sized_prompt_reaches_codex_on_stdin_not_argv():
+def test_a_release_sized_prompt_reaches_codex_on_stdin_not_argv(tmp_path):
     """B-14 for codex: `codex exec -` reads the prompt from stdin; a 153 KB review packet in argv raised E2BIG."""
     seen = {}
     big = "x" * 300_000
-    p = providers.CodexProvider(environ={"PATH": "/bin"}, runner=_runner(0, "", seen=seen))
+    p = providers.CodexProvider(environ={"PATH": "/bin", "CODEX_HOME": _codex_home(tmp_path),
+                                        "CODEX_VOLATILE_DIR": str(tmp_path / "fake-tmpfs")},
+                                runner=_runner(0, "", seen=seen))
     p.health_check = lambda: (Health.AVAILABLE, None)
     p.run(big, {}, cwd="/tmp", timeout_s=5, max_turns=1)
     assert seen["stdin"] == big and seen["argv"][-1] == "-" and sum(map(len, seen["argv"])) < 10_000

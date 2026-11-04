@@ -41,3 +41,4 @@ desk/dist/
 .DS_Store
 .idea/
 .vscode/
+.bundle-test-*

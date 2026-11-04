@@ -367,7 +367,8 @@ def review(db: Session, task: models.Task, diff: bytes, reviewer: Reviewer,
     try:
         verdict = reviewer(packet)
     except Exception as e:
-        return {"outcome": "REVIEW_FAILED", "detail": f"{type(e).__name__}: {e}"[:300]}
+        # Provider errors carry model and CLI text: masked like any other output before the history keeps them.
+        return {"outcome": "REVIEW_FAILED", "detail": _redact(f"{type(e).__name__}: {e}")}
     if (not isinstance(verdict, dict) or verdict.get("verdict") not in ("APPROVE", "REJECT")
             or verdict.get("fingerprint") != fingerprint):
         # No valid verdict about these bytes: neither an approval nor grounds to rework the code.
@@ -546,9 +547,11 @@ def _must_withhold(text: str) -> bool:
     return bool(_PRIVATE_KEY.search(text)) or _has_jose_header(text)
 
 # Masking also takes key=value heuristics; they over-match ordinary code (`token = acquire(...)`), so they mask only.
-# `['"]?` after the key covers JSON ("refresh_token": "...") as well as `token=...`.
+# `['"]?` after the key covers JSON ("refresh_token": "...") as well as `token=...`; a bare `rt_...` value is masked
+# too. Not in _CREDENTIAL_SHAPES: publication blocking keeps its precision (`rt_` also starts ordinary identifiers).
 _KV_BASE = (r"|(?:bearer|token|authorization)\s*+(?:[:=]\s*+)?[\w.~+/=-]{12,}"
-            r"|(?:api[_-]?key|secret|password|passwd|token)['\"]?\s*+[:=]\s*+['\"]?[^\s'\"]{6,}")
+            r"|(?:api[_-]?key|secret|password|passwd|token)['\"]?\s*+[:=]\s*+['\"]?[^\s'\"]{6,}"
+            r"|(?<![\w-])(?-i:rt_)[\w.-]{32,}+")   # a bare Codex refresh token (its JSON key gone): masked only
 _SECRETS = re.compile(r"(?i)(?:" + _CREDENTIAL_SHAPES + _KV_BASE + ")")
 # Second pass after the base masking (which keeps its leftmost, whole-value matches): credential-word assignments
 # the base misses, e.g. a quoted value with spaces.
