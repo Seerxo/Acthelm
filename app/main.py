@@ -26,7 +26,7 @@ from app import (api_auth, approval_identity, audit, keys, context_builder, cont
 from app.config import settings
 from app.db import get_db
 from app.notify import NotificationService, fingerprint, notifier
-from app.redact import _redact_secrets
+from app.redact import redact
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("company.api")
@@ -891,9 +891,9 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
         # model_class, not a model id: router.toml owns which model runs (§84).
         model=(st.get("workflow") or {}).get("name"),
         supervisor_verdict=outcome.supervisor_verdict,
-        supervisor_notes=outcome.summary and _redact_secrets(outcome.summary),
+        supervisor_notes=outcome.summary and redact(outcome.summary),
         result=st.get("goal"),
-        error=(_redact_secrets(str((st.get("checks") or {}).get("summary") or "")) or None
+        error=(redact(str((st.get("checks") or {}).get("summary") or "")) or None
                if outcome.run_status == enums.AgentRunStatus.FAILED else None),
         tool_calls={
             "herdr_state": st.get("state"),
@@ -1286,7 +1286,7 @@ def list_notes(agent: str | None = None, include_archived: bool = False,
         stmt.order_by(models.AgentNote.reference_count.desc(),
                       models.AgentNote.last_seen_at.desc()).limit(limit)
     ).scalars().all()
-    return [{"id": n.id, "note": _redact_secrets(n.note), "refs": n.reference_count, "tags": n.tags,
+    return [{"id": n.id, "note": redact(n.note), "refs": n.reference_count, "tags": n.tags,
              "last_seen_at": n.last_seen_at.isoformat(),
              "promoted": n.promoted_learning_id is not None,
              "archived": n.archived_at.isoformat() if n.archived_at else None}

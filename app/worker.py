@@ -32,7 +32,7 @@ from app import (audit, context_builder, control, dispatch, enums, keys, livenes
 from app.notify import fingerprint, notifier
 from app.providers import (FALLBACK_HEALTH, RUNNABLE_HEALTH, Health, Provider,
                           ProviderResult, default_providers)
-from app.redact import _redact_secrets
+from app.redact import redact
 
 log = logging.getLogger("company.worker")
 
@@ -871,7 +871,7 @@ def supervise(task: models.Task, raw: dict | None) -> tuple[enums.SupervisorVerd
 
 def _set_failure(db: Session, task: models.Task, error: str) -> tuple:
     task.retry_count += 1
-    task.error = _redact_secrets(error)[:2000]   # Stage C outcomes reach here too, not only _finish_result
+    task.error = redact(error)[:2000]   # Stage C outcomes reach here too, not only _finish_result
     if task.retry_count < task.max_attempts:
         task.status = enums.TaskStatus.READY
         return "TASK_FAILED", enums.Severity.MEDIUM, f"{task.key} attempt {task.retry_count} failed"
@@ -1112,11 +1112,12 @@ def _finish_result(db: Session, task: models.Task, run: models.AgentRun, agent: 
     if not holds_attempt(db, task, run):
         return _superseded(db, task, run, verdict.value)
     # Provider error or model text: redacted once, before it becomes run/agent/task error, notes or audit reason.
-    notes = _redact_secrets(notes)
+    notes = redact(notes)
     ctx = task.context if isinstance(task.context, dict) else {}
     run.ended_at = _now()
     run.tool_calls = {key: value for key, value in (run.tool_calls or {}).items() if key != "result_checkpoint"}
-    run.result = parsed.summary if parsed else None
+    summary = redact(parsed.summary) if parsed else None   # model text: run/task result and event title
+    run.result = summary
     run.supervisor_verdict = verdict
     run.supervisor_notes = notes
     before = audit.snapshot(task)
@@ -1125,7 +1126,7 @@ def _finish_result(db: Session, task: models.Task, run: models.AgentRun, agent: 
     if verdict == enums.SupervisorVerdict.APPROVED:
         run.status = enums.AgentRunStatus.SUCCEEDED
         task.status = enums.TaskStatus.REVIEW  # never DONE: the founder closes tasks (§45)
-        task.result = parsed.summary
+        task.result = summary
         task.artifacts = {"evidence": parsed.evidence, "artifacts": parsed.artifacts,
                           "actions": [a[:MAX_ACTION_CHARS] for a in parsed.actions[:MAX_ACTIONS]],
                           "run_id": run.id}
@@ -1146,7 +1147,7 @@ def _finish_result(db: Session, task: models.Task, run: models.AgentRun, agent: 
             task.artifacts = {**task.artifacts, "auto_close": {"policy": "GOAL_NO_WORK",
                                                                 "task_keys": materialized["auto_ready"]}}
         event = ("TASK_COMPLETED", enums.Severity.INFO,
-                 f"{task.key} {'auto-closed' if auto_closed else 'ready for review'}: {parsed.summary[:120]}")
+                 f"{task.key} {'auto-closed' if auto_closed else 'ready for review'}: {summary[:120]}")
     elif verdict == enums.SupervisorVerdict.ESCALATE:
         run.status = enums.AgentRunStatus.ESCALATED
         task.status = enums.TaskStatus.BLOCKED

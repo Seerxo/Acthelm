@@ -16,8 +16,8 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app import cloudflare_access, enums, main, models, notebook, providers, worker
-from app.providers import Health
+from app import cloudflare_access, enums, main, models, notebook, providers, redact, worker
+from app.providers import Health, ProviderResult
 
 DESK_HOST, FOUNDER = "desk.example.invalid", "founder@example.invalid"
 ASSERT = {"Cf-Access-Jwt-Assertion": "founder-assertion"}
@@ -225,3 +225,111 @@ def test_a_same_origin_or_non_browser_write_still_passes(env, headers):
     assert r.status_code == 201, r.text
     # A GET is never refused for its origin headers.
     assert client.get("/desk/state", headers={**ASSERT, "Sec-Fetch-Site": "cross-site"}).status_code == 200
+
+
+def test_origin_is_compared_with_the_configured_desk_host_not_the_host_port(env):
+    client, host = _desk(), {"Host": f"{DESK_HOST}:443"}
+    same = {**ASSERT, **host, "Origin": f"https://{DESK_HOST}", "Sec-Fetch-Site": "same-origin"}
+    assert client.post("/desk/command", headers=same, json={"text": "summarise the week"}).status_code == 201
+    evil = {**ASSERT, **host, "Origin": "https://evil.example"}
+    r = client.post("/desk/command", headers=evil, json={"text": "summarise the month"})
+    assert r.status_code == 403 and r.json()["detail"] == "cross-site request refused"
+
+
+# --------------------------------------------------------------------------- write side (F1): stored rows, notifier
+
+from tests.test_worker import SPECS, FakeProvider, _db, _good, _task   # noqa: E402
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    payloads = []
+    monkeypatch.setattr(worker, "notifier", type("N", (), {"dispatch": lambda self, db, ev: payloads.append(
+        json.dumps(ev.payload))})())
+    return payloads
+
+
+def test_a_model_reported_failure_is_redacted_in_every_stored_row_and_the_notification(sent):
+    db = _db()
+    task = _task(db)
+    worker.run_once(db, {"claude": FakeProvider("claude", [_good(task.key, status="failed",
+                                                                  error=f"stderr Bearer {BEARER_BODY} {GH}")])}, SPECS)
+    run = db.scalar(select(models.AgentRun))
+    agent = db.scalar(select(models.Agent).where(models.Agent.key == "research"))
+    db.refresh(task)
+    events = [json.dumps(e.payload) for e in db.scalars(select(models.Event))]
+    assert run.error and task.error and sent
+    _no_leak("\n".join([run.error, run.supervisor_notes, agent.last_error, task.error, *events]))
+    _no_leak("\n".join(sent))   # Telegram is its own egress channel
+
+
+def test_an_approved_summary_is_redacted_in_the_result_and_the_notification_title(sent):
+    db = _db()
+    task = _task(db)
+    worker.run_once(db, {"claude": FakeProvider("claude", [_good(task.key, summary=f"done {GH}")])}, SPECS)
+    db.refresh(task)
+    run = db.scalar(select(models.AgentRun))
+    assert task.status == enums.TaskStatus.REVIEW and any(task.key in p for p in sent)
+    _no_leak("\n".join([task.result, run.result, *sent]))
+
+
+def test_provider_run_redacts_any_providers_error():
+    raw = ProviderResult("claude", Health.AVAILABLE, error=f"reasoner said token={GH}")
+    assert "***" in FakeProvider("claude", [raw]).run("p", {}, cwd="/tmp", timeout_s=5, max_turns=1).error
+    _no_leak(raw.error)
+
+
+def test_a_herdr_run_report_stores_redacted_checks_and_notes(env):
+    with Session(env) as db:
+        db.add(models.Task(key="TASK-0102", title="herdr", success_criteria="s", status=enums.TaskStatus.IN_PROGRESS))
+        db.commit()
+    state = {"state": "running", "created_at": "2026-11-04T10:00:00Z", "updated_at": "2026-11-04T10:05:00Z",
+             "workflow": {"name": f"wf {SK}"}, "checks": {"status": "failed", "summary": f"E {GH}"}}
+    r = TestClient(main.app, client=("127.0.0.1", 5000)).post("/tasks/TASK-0102/run-report", json={"herdr_state": state})
+    assert r.status_code == 201, r.status_code
+    with Session(env) as db:
+        run = db.scalar(select(models.AgentRun).where(models.AgentRun.provider == main.HERDR_PROVIDER))
+        assert run.error and run.supervisor_notes
+        _no_leak(run.error + run.supervisor_notes)
+
+
+# --------------------------------------------------------------------------- fail closed, and no false positives
+
+def test_a_broken_redactor_fails_closed_on_the_desk_and_in_notifications(env, sent, monkeypatch, caplog):
+    def broken(text):
+        raise RuntimeError("scanner unavailable")
+    caplog.set_level("ERROR", logger="company.redact")
+    monkeypatch.setattr(redact, "_redact_secrets", broken)
+    client = _desk()
+    for path in ("/desk/state", "/tasks/TASK-0101", "/agents/research", "/desk/memory"):
+        r = client.get(path, headers=ASSERT)
+        assert r.status_code == 200, path
+        _no_leak(r.text)
+    t = client.get("/tasks/TASK-0101", headers=ASSERT)
+    assert t.json()["error"] == redact.UNAVAILABLE == "[unavailable]"   # a fixed constant: no length or fragment
+    assert "scanner unavailable" not in t.text and "RuntimeError" not in t.text
+    db = _db()
+    task = _task(db)
+    worker.run_once(db, {"claude": FakeProvider("claude", [_good(task.key, status="failed", error=f"Bearer {BEARER_BODY}")])},
+                    SPECS)
+    assert sent and redact.UNAVAILABLE in sent[-1]
+    _no_leak("\n".join(sent))
+    assert not any("scanner unavailable" in p or "RuntimeError" in p for p in sent)
+    logged = [r for r in caplog.records if r.name == "company.redact"]
+    assert logged and {r.getMessage() for r in logged} == {"redaction_failed"} and not any(r.exc_info for r in logged)
+    assert providers.provider_error(f"token={GH}") == redact.UNAVAILABLE
+
+
+ORDINARY = ["codex run refused: its login could not be snapshotted or its output could not be checked",
+            "subscription usage limit reached; waiting for reset (provider says: try again at 5:00 PM)",
+            "timeout after 600s", "exit 1", "FileNotFoundError: /srv/worktree/app/main.py line 42",
+            "commit a1b2c3d failed CI on main", "https://github.com/Seerxo/Acthelm/pull/61",
+            "TASK-8101 blocked: CHECKS_REPEATED: the same tests failed in consecutive attempts",
+            "FAILED tests/test_calc.py::test_add - assert 3 == 4"]
+
+
+@pytest.mark.parametrize("text", ORDINARY, ids=range(len(ORDINARY)))
+def test_ordinary_text_passes_through_unchanged(text):
+    from app import desk
+    assert desk._clean(text) == text
+    assert providers.provider_error(text) == text and providers.provider_error(text, tail=True) == text

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from app.redact import _redact_secrets
+from app.redact import redact
 
 # Any of these in the worker's environment means a run could bill per token.
 METERED_ENV = (
@@ -138,7 +138,7 @@ MAX_ERROR_CHARS, MAX_ERROR_SCAN = 500, 8000
 def provider_error(raw: str, *, tail: bool = False) -> str:
     """CLI or model text bound for run.error, task history and the Desk: redacted first, then bounded, so the cut
     never leaves part of a credential unmasked. The scan window keeps a hostile megabyte cheap."""
-    text = _redact_secrets(raw[-MAX_ERROR_SCAN:] if tail else raw[:MAX_ERROR_SCAN])
+    text = redact(raw[-MAX_ERROR_SCAN:] if tail else raw[:MAX_ERROR_SCAN])
     return text[-MAX_ERROR_CHARS:] if tail else text[:MAX_ERROR_CHARS]
 
 
@@ -192,7 +192,7 @@ class Provider:
         result = self._run(prompt, schema, cwd=cwd, timeout_s=timeout_s, max_turns=max_turns)
         result.duration_s = round(time.monotonic() - started, 2)
         if result.error:   # every provider, the remote one too: no unredacted error leaves run()
-            result.error = _redact_secrets(result.error)
+            result.error = redact(result.error)
         return result
 
     def _run(self, prompt, schema, *, cwd, timeout_s, max_turns) -> ProviderResult:

@@ -3,6 +3,7 @@ stores or serves provider/model text (worker errors, Desk read models). Stdlib o
 import base64
 import functools
 import json
+import logging
 import re
 
 # Credential shapes: specific enough to refuse a publication on. JWTs are recognised by decoding (_jwts), not by shape.
@@ -149,3 +150,16 @@ def _redact_secrets(text: str) -> str:
 
 def _redact(text: str) -> str:
     return _redact_secrets(text)[:300]
+
+
+UNAVAILABLE = "[unavailable]"
+
+
+def redact(text: str) -> str:
+    """_redact_secrets for text bound for the database, the Desk or a notification, failing closed: a scanner error
+    yields a fixed placeholder, never the raw text."""
+    try:
+        return _redact_secrets(text)
+    except Exception:  # noqa: BLE001 - any failure, including a non-string, must not let the text through
+        logging.getLogger("company.redact").error("redaction_failed")   # fixed name: no text, no exception detail
+        return UNAVAILABLE

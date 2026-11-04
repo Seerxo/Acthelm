@@ -15,7 +15,7 @@ from pathlib import Path
 
 from app import business_reconciler, enums, goals, metrics_store, models, reconciler_heartbeat, watchdog, worker
 from app.notify import NotificationService
-from app.redact import _redact_secrets
+from app.redact import redact
 
 COST_POLICY = Path(__file__).resolve().parent.parent / "agents" / "cost_policy.yaml"
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,10 +45,13 @@ def _iso(value):
     return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
 
 
+MAX_SCAN = 8000   # as providers.MAX_ERROR_SCAN: a hostile stored megabyte stays cheap to serve
+
+
 def _clean(text, limit: int | None = None) -> str | None:
     """Stored provider/model text, redacted again on the way out: rows written before write-time redaction are not.
     Redacted first, then bounded."""
-    return None if text is None else _redact_secrets(str(text))[:limit]
+    return None if text is None else redact(str(text)[:MAX_SCAN])[:limit]
 
 
 def _run(row: models.AgentRun, task_key: str | None = None) -> dict:
@@ -540,7 +543,7 @@ def build_state(db: Session, specs: dict[str, AgentSpec], paused: bool) -> dict:
             "type": source_event.event_type,
             "severity": (latest or {}).get("severity", source_event.severity.value),
             "title": (latest or {}).get("title") or source_payload.get("title") or source_event.event_type,
-            "detail": (latest or {}).get("detail") or source_payload.get("detail"),
+            "detail": _clean((latest or {}).get("detail") or source_payload.get("detail"), 300),
             "observed_at": (latest or {}).get("observed_at") or source_payload.get("last_seen_at"),
             "episode": condition_state.episode,
             "delivery_status": condition_state.delivery_status,
@@ -704,8 +707,8 @@ def build_state(db: Session, specs: dict[str, AgentSpec], paused: bool) -> dict:
             {"id": e.id, "type": e.event_type, "source": e.source,
              "severity": e.severity.value, "at": _iso(e.occurred_at),
              "notified": e.notified, "notify_reason": e.notify_reason,
-             "title": (e.payload or {}).get("title") or e.event_type,
-             "detail": _clean((e.payload or {}).get("detail") or (e.payload or {}).get("message")),
+             "title": _clean((e.payload or {}).get("title")) or e.event_type,
+             "detail": _clean((e.payload or {}).get("detail") or (e.payload or {}).get("message"), 300),
              "latest_observation": _latest_watchdog_observation(e, condition_observations),
              "task": task_by_id[e.task_id].key if e.task_id in task_by_id else None,
              "business_unit": unit_of(unit_id=e.business_unit_id, service_id=e.service_id,
@@ -820,7 +823,7 @@ def task_detail(db: Session, task: models.Task) -> dict:
         "retry_count": task.retry_count, "max_attempts": task.max_attempts,
         "dependencies": [{"key": d.key, "status": d.status.value} for d in dependencies],
         "runs": [_run(r, task.key) for r in run_rows],
-        "artifacts": _artifacts_view(task.artifacts), "result": task.result, "error": _clean(task.error),
+        "artifacts": _artifacts_view(task.artifacts), "result": _clean(task.result), "error": _clean(task.error),
         "supervisor": ({"verdict": verdict.supervisor_verdict.value,
                         "notes": _clean(verdict.supervisor_notes)} if verdict else None),
         "created_at": _iso(task.created_at), "started_at": _iso(task.started_at),
