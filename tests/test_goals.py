@@ -223,6 +223,28 @@ def test_selector_valid_accepts_only_well_formed_selectors(selector, expected):
     assert goals.selector_valid(selector) is expected
 
 
+def test_selector_valid_rejects_empty_string_source():
+    assert goals.selector_valid(SEL | {"source": ""}) is False
+
+
+def test_selector_valid_accepts_missing_window_and_none_source():
+    base = {"subject": "youtube:channel", "metric": "views"}
+    assert goals.selector_valid(base) is True
+    assert goals.selector_valid(base | {"source": None}) is True
+    assert goals.selector_valid(SEL | {"source": None}) is True
+
+
+def test_config_issues_reports_several_problems_in_documented_order():
+    bad_all = models.Goal(metric_selector={"subject": "", "metric": "views"}, baseline="abc", target=None)
+    assert goals.config_issues(bad_all) == ["SELECTOR_INVALID", "BASELINE_INVALID", "TARGET_INVALID"]
+    assert goals.config_issues(models.Goal(metric_selector=SEL | {"source": ""}, baseline=None, target="10")) == [
+        "SELECTOR_INVALID", "BASELINE_INVALID"]
+    assert goals.config_issues(models.Goal(metric_selector=None, baseline="5", target="x")) == [
+        "SELECTOR_INVALID", "TARGET_INVALID"]
+    assert goals.config_issues(models.Goal(metric_selector=None, baseline="5", target="5")) == [
+        "SELECTOR_INVALID", "TARGET_EQUALS_BASELINE"]
+
+
 def test_config_issues_are_independent_of_any_reading():
     ok = models.Goal(metric_selector=SEL, baseline="0", target="10")
     assert goals.config_issues(ok) == []
