@@ -119,6 +119,37 @@ def test_only_the_history_window_counts():
     assert any("already used" in r for r in flagged)
 
 
+def _title_history(*titles):
+    return [{"title": t, "thumbnailText": f"UNIQUE{i} THUMB"} for i, t in enumerate(titles)]
+
+
+def test_title_head_seen_in_one_recent_title_is_not_flagged():
+    history = _title_history("Dark Harbor Mystery", "Something Else Entirely")
+    assert packaging.findings("Dark Harbor Returns", "ICE AHEAD", history) == []
+
+
+def test_title_head_seen_in_two_recent_titles_is_flagged():
+    history = _title_history("Dark Harbor Mystery", "Something Else Entirely", "Dark Harbor Secrets")
+    out = packaging.findings("Dark Harbor Returns", "ICE AHEAD", history)
+    assert len(out) == 1 and "dark harbor" in out[0] and "2 recent titles" in out[0]
+
+
+def test_title_head_repeat_outside_history_window_does_not_count():
+    # History is newest first: the second match sits beyond the window, so only one counts.
+    filler = _title_history(*[f"Filler{i} Story" for i in range(packaging.HISTORY_WINDOW - 1)])
+    old = [{"title": "Dark Harbor Old", "thumbnailText": "OLD ONE"}]
+    recent = [{"title": "Dark Harbor Mystery", "thumbnailText": "RECENT ONE"}]
+    assert packaging.findings("Dark Harbor Returns", "ICE AHEAD", recent + filler + old) == []
+    # Control: with the older match moved inside the window it is flagged.
+    assert any("dark harbor" in r for r in packaging.findings(
+        "Dark Harbor Returns", "ICE AHEAD", recent + old + filler))
+
+
+def test_one_word_title_never_triggers_the_title_rule():
+    history = _title_history("Titanic Story", "Titanic Secrets", "Titanic")
+    assert packaging.findings("Titanic", "ICE AHEAD", history) == []
+
+
 def test_unknown_package_is_unknown_not_approved():
     db = _db()
     assert packaging.status(db, "nope", "deadbeef")["status"] == "UNKNOWN"
