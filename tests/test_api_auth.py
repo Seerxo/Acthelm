@@ -75,7 +75,7 @@ def test_desk_scope_is_exactly_the_founder_desk_routes():
     assert set(api_auth.DESK) == {
         ("GET", r"/desk/state"), ("GET", r"/agents/[A-Za-z0-9_-]+"), ("GET", r"/tasks/[A-Za-z0-9_-]+"),
         ("GET", r"/company/brief"), ("GET", r"/desk/memory"), ("POST", r"/desk/command"),
-        ("GET", r"/desk/metrics/series"), ("GET", r"/desk/stream"),
+        ("GET", r"/desk/metrics/series"), ("GET", r"/desk/stream"), ("GET", r"/stage-c/state"),
         ("POST", r"/tasks/[A-Za-z0-9_-]+/assign"), ("POST", r"/dispatch/run"),
         ("POST", r"/control/agents"), ("POST", r"/approvals/[A-Za-z0-9_-]+"),
     }

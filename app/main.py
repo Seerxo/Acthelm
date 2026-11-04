@@ -1028,6 +1028,15 @@ def run_outer_loop(db: Session = Depends(get_db)) -> dict:
     }
 
 
+@app.get("/stage-c/state")
+def stage_c_state_view(request: Request, db: Session = Depends(get_db)) -> dict:
+    """The Desk's one read model for Stage C (app/stage_c_state.py): read-only, allowlisted, no free text.
+    Founder only, from the verified principal, so API_AUTH_MODE=log cannot widen it."""
+    approval_identity.require_founder(request)
+    from app import stage_c_state
+    return stage_c_state.build(db)
+
+
 @app.post("/stage-c/authorization", status_code=201)
 def stage_c_authorize(body: schemas.StageCAuthorize, request: Request, db: Session = Depends(get_db)) -> dict:
     """Issue the one-task, one-SHA, short-lived Stage C pilot authorization. Founder only, derived from the
