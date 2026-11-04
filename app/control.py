@@ -283,8 +283,16 @@ def write_authorization_denial(db: Session, task, sha: str, now: datetime | None
     standing = _standing_denial(db, row, _task_paths(task), sha, now)
     if standing is None:
         return None
-    # Report the form the founder actually issued; with neither, the pilot wording stays (existing behaviour).
-    return pilot if row is None or db.get(models.ControlState, PILOT_AUTHORIZATION) is not None else standing
+    # Both forms deny; the decision is made above and only the reported reason is chosen here. Report the
+    # standing reason whenever a standing row exists, unless a pilot row was issued for THIS task and is
+    # broken (invalid), which is then the relevant one. A pilot row that is absent, for another task, already
+    # consumed or expired is stale and must not mask the standing blocker. With no standing row (never issued
+    # or revoked), the pilot wording stays. Standing reasons follow _standing_denial's order:
+    # missing > invalid > expired > scope > daily_limit.
+    pilot_row = db.get(models.ControlState, PILOT_AUTHORIZATION)
+    pilot_value = pilot_row.value if pilot_row is not None and isinstance(pilot_row.value, dict) else {}
+    pilot_is_relevant = pilot == "stage_c_authorization_invalid" and pilot_value.get("task_key") == task.key
+    return pilot if row is None or pilot_is_relevant else standing
 
 
 def issue_standing(db: Session, paths: list[str], sha: str, *, founder: str, days: int = 3, max_per_day: int = 1,
