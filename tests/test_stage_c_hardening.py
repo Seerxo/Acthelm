@@ -291,7 +291,9 @@ def test_ordinary_names_do_not_block_publication(name):
 
 @pytest.mark.parametrize("text", ['" #' * (1 << 18), '"\n"' * (1 << 18), "ghp_" * (1 << 18),
                                   " " * (1 << 20), "\t \n" * (1 << 18), "token" + " " * (1 << 20), "token:" * (1 << 17),
-                                  "'" + " " * (1 << 20) + "'", "A" * (1 << 20), ("abcdefgh " * (1 << 17))])
+                                  "'" + " " * (1 << 20) + "'", "A" * (1 << 20), ("abcdefgh " * (1 << 17))],
+                         ids=["quote-hash", "quote-newline", "ghp-run", "spaces", "tab-newline", "token-spaces",
+                              "token-colons", "quoted-spaces", "letters", "words"])
 def test_scanning_stays_linear_on_hostile_blank_and_word_runs(text):
     import time
     started = time.monotonic()
