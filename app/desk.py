@@ -15,7 +15,7 @@ from pathlib import Path
 
 from app import business_reconciler, enums, goals, metrics_store, models, reconciler_heartbeat, watchdog, worker
 from app.notify import NotificationService
-from app.redact import redact
+from app.redact import MAX_SCAN_CHARS, redact
 
 COST_POLICY = Path(__file__).resolve().parent.parent / "agents" / "cost_policy.yaml"
 ROOT = Path(__file__).resolve().parent.parent
@@ -45,20 +45,20 @@ def _iso(value):
     return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
 
 
-MAX_SCAN = 8000   # as providers.MAX_ERROR_SCAN: a hostile stored megabyte stays cheap to serve
+MAX_SCAN = MAX_SCAN_CHARS
 
 
 def _clean(text, limit: int | None = None) -> str | None:
     """Stored provider/model text, redacted again on the way out: rows written before write-time redaction are not.
     Redacted first, then bounded."""
-    return None if text is None else redact(str(text)[:MAX_SCAN])[:limit]
+    return None if text is None else redact(str(text))[:limit]
 
 
 def _run(row: models.AgentRun, task_key: str | None = None) -> dict:
     # No raw model summary (`result`): the Desk never shows it.
     return {
         "id": row.id, "task": task_key, "status": row.status.value,
-        "provider": row.provider, "model_class": row.model,
+        "provider": row.provider, "model_class": _clean(row.model),
         "started_at": _iso(row.started_at), "ended_at": _iso(row.ended_at),
         "cost_usd": float(row.estimated_cost_usd or 0),
         "error": _clean(row.error),
@@ -128,7 +128,7 @@ def _task_summary(task: models.Task, agents: dict[int, models.Agent],
     project = projects.get(task.project_id)
     unit = units.get(task.business_unit_id)
     return {
-        "key": task.key, "title": task.title, "status": task.status.value,
+        "key": task.key, "title": _clean(task.title), "status": task.status.value,
         "priority": task.priority.value, "risk": task.risk_level.value,
         "agent": agent.key if agent else None,
         "project": project.key if project else None,
@@ -188,7 +188,7 @@ def _agent_summary(agent: models.Agent, spec: AgentSpec, tasks: list[models.Task
         "team": spec.team, "reports_to": spec.reports_to,
         "business_units": spec.business_units,
         "enabled": agent.enabled, "status": status,
-        "current_task": ({"key": current.key, "title": current.title,
+        "current_task": ({"key": current.key, "title": _clean(current.title),
                           "status": current.status.value} if current else None),
         "last_run": _iso(runs[0].started_at) if runs else None,
         "last_success": _iso(agent.last_success_at or last_success),
@@ -251,8 +251,8 @@ def needs_you(approvals, incidents, open_tasks, w: dict, backup, paused: bool,
     items = []
 
     def add(kind, level, title, why, affected, since, evidence, action, page, key=None):
-        items.append({"kind": kind, "rank": _RANK[kind], "level": level, "title": title,
-                      "why": why, "affected": affected, "since": _iso(since) if isinstance(since, datetime) else since,
+        items.append({"kind": kind, "rank": _RANK[kind], "level": level, "title": _clean(title),
+                      "why": _clean(why), "affected": affected, "since": _iso(since) if isinstance(since, datetime) else since,
                       "evidence": evidence, "action": action, "target": {"page": page, "key": key}})
 
     for i in incidents:
@@ -375,7 +375,7 @@ def current_priority(goals, open_tasks, agents_by_id, progress_of=None) -> dict 
     task = next((t for t in open_tasks if t.priority in (enums.Priority.P0, enums.Priority.P1)), None)
     if task:
         agent = agents_by_id.get(task.assigned_agent_id)
-        return {"kind": "task", "key": task.key, "title": task.title, "why": task.objective,
+        return {"kind": "task", "key": task.key, "title": _clean(task.title), "why": _clean(task.objective),
                 "success": task.success_criteria, "owner": agent.key if agent else None,
                 "status": task.status.value, "priority": task.priority.value}
     return None
@@ -397,9 +397,9 @@ def improvements(tasks: list) -> list[dict]:
         ev = {}
         for step in imp.get("history", []):
             ev.update(step.get("evidence") or {})
-        out.append({"task": t.key, "title": t.title, "stage": imp["stage"],
+        out.append({"task": t.key, "title": _clean(t.title), "stage": _scalar(imp["stage"]),
                     "updated_at": imp["history"][-1]["at"] if imp.get("history") else None,
-                    **{k: _clean(v) if isinstance(v := ev.get(k), str) else v
+                    **{k: _scalar(ev.get(k))
                        for k in ("repository", "branch", "pr_number", "pr_state",
                                  "ci_state", "failed_check", "repairs",
                                  "review_verdict", "risk", "expected_effect",
@@ -779,10 +779,10 @@ def agent_detail(db: Session, agent: models.Agent, spec: AgentSpec, paused: bool
         },
         "schedule": spec.schedule, "triggers": spec.triggers,
         "memory_policy": spec.memory_policy,
-        "recent_tasks": [{"key": t.key, "title": t.title, "status": t.status.value,
+        "recent_tasks": [{"key": t.key, "title": _clean(t.title), "status": t.status.value,
                           "priority": t.priority.value} for t in tasks],
         "recent_runs": [_run(row, key) for row, key in run_rows],
-        "recent_learnings": [{"title": x.title, "lesson": x.lesson, "status": x.status.value,
+        "recent_learnings": [{"title": _clean(x.title), "lesson": _clean(x.lesson), "status": x.status.value,
                               "created_at": _iso(x.created_at)} for x in learnings],
         "notebook": [{"note": _clean(n.note), "refs": n.reference_count,
                       "last_seen_at": _iso(n.last_seen_at)} for n in notes],
@@ -809,14 +809,14 @@ def task_detail(db: Session, task: models.Task) -> dict:
         .order_by(models.AuditLog.id).limit(1)).scalar_one_or_none()
     goal = db.get(models.Goal, task.goal_id) if task.goal_id else None
     return {
-        "key": task.key, "title": task.title, "description": task.description,
-        "objective": task.objective, "status": task.status.value,
+        "key": task.key, "title": _clean(task.title), "description": _clean(task.description),
+        "objective": _clean(task.objective), "status": task.status.value,
         "priority": task.priority.value, "risk": task.risk_level.value,
         "assigned_agent": agent.key if agent else None,
         "project": project.key if project else None,
         "business_unit": unit.key if unit else None,
         "success_criteria": task.success_criteria, "context": _context_view(task.context),
-        "origin": {**origin(task), "reason": created},
+        "origin": {**origin(task), "reason": _clean(created)},
         "goal": {"id": goal.id, "title": goal.title, "status": goal.status.value} if goal else None,
         "approval_required": task.approval_required,
         # Attempts used and allowed: the worker stops retrying at the limit (the Desk says so before Mark READY).

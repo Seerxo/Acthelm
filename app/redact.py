@@ -153,13 +153,28 @@ def _redact(text: str) -> str:
 
 
 UNAVAILABLE = "[unavailable]"
+MAX_SCAN_CHARS = 8000
 
 
 def redact(text: str) -> str:
     """_redact_secrets for text bound for the database, the Desk or a notification, failing closed: a scanner error
     yields a fixed placeholder, never the raw text."""
     try:
+        # A cut fragment can hide a URL delimiter or JWT header. Scan whole or withhold whole.
+        if len(text) > MAX_SCAN_CHARS:
+            return UNAVAILABLE
         return _redact_secrets(text)
     except Exception:  # noqa: BLE001 - any failure, including a non-string, must not let the text through
         logging.getLogger("company.redact").error("redaction_failed")   # fixed name: no text, no exception detail
         return UNAVAILABLE
+
+
+def redact_data(value):
+    """Redact every string in JSON-shaped model output and audit snapshots, including object keys."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [redact_data(item) for item in value]
+    if isinstance(value, dict):
+        return {redact(key): redact_data(item) for key, item in value.items()}
+    return value

@@ -32,7 +32,7 @@ from app import (audit, context_builder, control, dispatch, enums, keys, livenes
 from app.notify import fingerprint, notifier
 from app.providers import (FALLBACK_HEALTH, RUNNABLE_HEALTH, Health, Provider,
                           ProviderResult, default_providers)
-from app.redact import redact
+from app.redact import redact, redact_data
 
 log = logging.getLogger("company.worker")
 
@@ -977,10 +977,11 @@ def execute(db: Session, task: models.Task, spec: registry.AgentSpec,
         return {"task": task.key, "provider": None, "verdict": "NO_CAPACITY",
                 "task_status": task.status.value, "run_id": run.id, "notes": run.error}
 
-    verdict, notes, parsed = (supervise(task, result.output) if result and result.ok
+    output = redact_data(result.output) if result and result.ok else None
+    verdict, notes, parsed = (supervise(task, output) if result and result.ok
                               else (enums.SupervisorVerdict.FAILED,
                                     (result.error if result else None) or "no provider ran", None))
-    run.model = result.model if result else None
+    run.model = redact(result.model) if result and result.model is not None else None
     run.input_tokens = result.input_tokens if result else None
     run.output_tokens = result.output_tokens if result else None
     run.estimated_cost_usd = 0  # subscription access; list price kept in tool_calls
@@ -996,13 +997,13 @@ def execute(db: Session, task: models.Task, spec: registry.AgentSpec,
                       "company_os_git_sha": os.environ.get("COMPANY_OS_GIT_SHA"),
                       "image": os.environ.get("WORKER_IMAGE"),
                       "context_hash": _hash(prompt),
-                      "result_hash": _hash(result.output) if result and result.output else None,
+                      "result_hash": _hash(output) if output else None,
                       "new_task_candidates": [c.model_dump() for c in parsed.new_task_candidates]
                       if parsed else []}
     if result and result.ok and parsed is not None:
         # Commit the answer before routing proposals/notes/events: a crash there must not buy another model run.
         run.tool_calls = {**run.tool_calls, "result_checkpoint": {
-            "version": 1, "task_hash": task_hash, "output": result.output,
+            "version": 1, "task_hash": task_hash, "output": output,
             "finalizations": 0, "claim": None, "claim_until": None}}
         db.commit()
     run.tool_calls = {**run.tool_calls, "provider_cli_version": used.version() if used else None}
@@ -1073,9 +1074,11 @@ def _resume_result(db: Session, run_id: int, specs: dict) -> dict | None:
         return {"task": task.key, "provider": run.provider, "verdict": "RESULT_BLOCKED",
                 "task_status": task.status.value, "run_id": run.id, "notes": why}
     token = uuid.uuid4().hex
-    saved = {**saved, "finalizations": saved["finalizations"] + 1, "claim": token,
+    saved = {**saved, "output": redact_data(saved["output"]),
+             "finalizations": saved["finalizations"] + 1, "claim": token,
              "claim_until": (_now() + RESULT_CLAIM_TTL).isoformat()}
-    run.tool_calls = {**run.tool_calls, "result_checkpoint": saved}
+    run.tool_calls = {**run.tool_calls, "result_checkpoint": saved, "result_hash": _hash(saved["output"]),
+                      "new_task_candidates": redact_data(run.tool_calls.get("new_task_candidates", []))}
     db.commit()  # Retain the attempt and lease even if the process dies during finalization.
     # A competing worker may briefly inspect the lease after commit; its lock must not strand the owner.
     task, run = _result_rows(db, run_id, wait=True)
@@ -1120,20 +1123,22 @@ def _finish_result(db: Session, task: models.Task, run: models.AgentRun, agent: 
     run.result = summary
     run.supervisor_verdict = verdict
     run.supervisor_notes = notes
-    before = audit.snapshot(task)
+    before = redact_data(audit.snapshot(task))
     auto_closed = False
 
     if verdict == enums.SupervisorVerdict.APPROVED:
         run.status = enums.AgentRunStatus.SUCCEEDED
         task.status = enums.TaskStatus.REVIEW  # never DONE: the founder closes tasks (§45)
         task.result = summary
-        task.artifacts = {"evidence": parsed.evidence, "artifacts": parsed.artifacts,
-                          "actions": [a[:MAX_ACTION_CHARS] for a in parsed.actions[:MAX_ACTIONS]],
-                          "run_id": run.id}
+        task.artifacts = redact_data({"evidence": parsed.evidence, "artifacts": parsed.artifacts,
+                                      "actions": parsed.actions[:MAX_ACTIONS], "run_id": run.id})
+        task.artifacts["actions"] = [a[:MAX_ACTION_CHARS] for a in task.artifacts["actions"]]
         agent.last_success_at = run.ended_at
         for lesson in parsed.learning_candidates:
             notebook.record(db, note=lesson, agent_key=agent.key, task_key=task.key, commit=False)
-        materialized = task_materializer.materialize(db, task, run, parsed.new_task_candidates)
+        candidates = [c.model_copy(update={"title": redact(c.title), "reason": redact(c.reason)})
+                      for c in parsed.new_task_candidates]
+        materialized = task_materializer.materialize(db, task, run, candidates)
         run.tool_calls = {**run.tool_calls, "materialized": materialized}
         # Only a linked, owned read-only child proves this internal planning task is finished.
         auto_closed = (os.environ.get("AUTO_CLOSE_GOAL_NO_WORK", "false").lower() == "true"
@@ -1162,7 +1167,7 @@ def _finish_result(db: Session, task: models.Task, run: models.AgentRun, agent: 
     audit.record(db, actor="company-worker", action="task.autonomous-run", entity_type="task",
                  entity_key=task.key, reason=(f"{verdict.value}: {notes}; auto-closed GOAL_NO_WORK"
                                               if auto_closed else f"{verdict.value}: {notes}")[:500],
-                 before=before, after=audit.snapshot(task), task_id=task.id)
+                 before=before, after=redact_data(audit.snapshot(task)), task_id=task.id)
     # Event delivery may fail or terminate the process; state, children, memory and audit commit together first.
     _event(db, *event, task=task, detail=notes if verdict not in (
         enums.SupervisorVerdict.APPROVED, enums.SupervisorVerdict.ESCALATE) else "")

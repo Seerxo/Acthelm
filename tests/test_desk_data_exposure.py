@@ -16,7 +16,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app import cloudflare_access, enums, main, models, notebook, providers, redact, worker
+from app import cloudflare_access, desk, enums, main, models, notebook, providers, redact, worker
 from app.providers import Health, ProviderResult
 
 DESK_HOST, FOUNDER = "desk.example.invalid", "founder@example.invalid"
@@ -51,10 +51,13 @@ def env(monkeypatch):
         research = models.Agent(key="research", role="Research", enabled=True,
                                 last_error=f"provider said: id_token {JWT}")
         s.add_all([ceo, research])
+        project = models.Project(key="canary", name="Canary")
+        s.add(project)
         s.flush()
         task = models.Task(
-            key="TASK-0101", title="leaky", success_criteria="s", status=enums.TaskStatus.BLOCKED,
-            assigned_agent_id=research.id,
+            key="TASK-0101", title=f"leaky {GH}", objective=f"investigate {SK}",
+            success_criteria="s", status=enums.TaskStatus.BLOCKED, priority=enums.Priority.P1,
+            assigned_agent_id=research.id, project_id=project.id,
             error=f"codex: stderr tail ... Authorization: Bearer {BEARER_BODY}",
             context={"write": True, "autonomous": True, "source": "founder-desk-command",
                      "approval": {"fingerprint": f"token={GH}"}, "verify": {"one_of": [SK]},
@@ -62,6 +65,7 @@ def env(monkeypatch):
                          {"stage": "PR_OPEN", "at": "2026-11-04T00:00:00+00:00", "actor": "stage-c-worker",
                           "evidence": {"pr": PR, "pr_number": 7, "commit": "a" * 40, "ci_state": "failed",
                                        "failed_check": f"python ({GH})", "verdict": "APPROVE",
+                                       "risk": {"detail": GH}, "expected_effect": [{"detail": SK}],
                                        "previous_diff": f"+KEY = '{GH}'\n+URL = 'https://u:{PASSWORD}@h'",
                                        "failures": [f"E   {SK}"], "findings": [{"detail": [JWT]}]}}]}},
             artifacts={"actions": ["Ranked item one", f"leak {SK}"], "evidence": [GH], "artifacts": {"k": [JWT]},
@@ -69,11 +73,13 @@ def env(monkeypatch):
         s.add(task)
         s.flush()
         s.add(models.AgentRun(agent_id=research.id, task_id=task.id, provider="codex", started_at=now,
-                              status=enums.AgentRunStatus.FAILED, error=f"stderr: token={GH}",
+                              model=f"legacy {SK}", status=enums.AgentRunStatus.FAILED, error=f"stderr: token={GH}",
                               supervisor_verdict=enums.SupervisorVerdict.FAILED,
                               supervisor_notes=f"model wrote {SK}", result=f"summary {GH}"))
         s.add(models.AgentNote(agent_id=research.id, task_id=task.id, note=f"clone https://u:{PASSWORD}@git.example",
                                fingerprint="leaky-note"))
+        s.add(models.Learning(title="Legacy learning", lesson=f"learned {GH}", project_id=project.id,
+                              status=enums.LearningStatus.APPROVED))
         s.add(models.Incident(key="INC-0101", title="leak", description=f"stderr {GH}", root_cause=f"key {SK}",
                               severity=enums.IncidentSeverity.SEV3, status=enums.IncidentStatus.OPEN,
                               detected_by="watchdog", started_at=now))
@@ -145,6 +151,50 @@ def test_provider_error_is_redacted_before_it_is_bounded():
     codex = providers.provider_error("z" * 9000 + f" Bearer {BEARER_BODY}", tail=True)
     assert len(codex) <= providers.MAX_ERROR_CHARS
     _no_leak(codex)
+
+
+def _boundary_url(boundary):
+    url = f" https://u:{PASSWORD}@git.example "
+    return "x" * (boundary - url.index("@")) + url
+
+
+def test_the_scan_boundary_withholds_whole_text_and_never_exposes_a_jwt_tail(monkeypatch):
+    url = _boundary_url(8000)
+    jwt = _b64({"alg": "HS256"}) + "." + "A" * 8500 + "." + JWT_SIG
+    assert url.index("@") == redact.MAX_SCAN_CHARS
+    scanned = []
+    monkeypatch.setattr(redact, "_redact_secrets", lambda text: scanned.append(text) or text)
+    for text in (url, jwt):
+        assert desk._clean(text) == redact.UNAVAILABLE
+        assert providers.provider_error(text) == redact.UNAVAILABLE
+        assert providers.provider_error(text, tail=True) == redact.UNAVAILABLE
+    assert not scanned   # no head or tail was passed to the scanner
+
+
+def test_a_jwt_is_redacted_whole_before_taking_a_short_tail():
+    jwt = _b64({"alg": "HS256"}) + "." + "A" * 1000 + "." + JWT_SIG
+    _no_leak(providers.provider_error(jwt, tail=True))
+
+
+def test_quota_reset_text_is_redacted_before_extraction_and_truncation():
+    message = "quota: try again at " + _boundary_url(providers.MAX_ERROR_CHARS)
+    _no_leak(providers.quota_message(message))
+    jwt = "quota: try again at " + JWT
+    _no_leak(providers.quota_message(jwt))
+
+
+def test_improvement_evidence_drops_containers_but_keeps_scalars(env):
+    improvement = _desk().get("/desk/state", headers=ASSERT).json()["improvements"][0]
+    assert improvement["risk"] is None and improvement["expected_effect"] is None
+    assert improvement["pr_number"] == 7 and improvement["ci_state"] == "failed"
+
+
+def test_legacy_learning_lessons_are_redacted_on_both_desk_reads(env):
+    client = _desk()
+    recent = client.get("/agents/research", headers=ASSERT).json()["recent_learnings"]
+    memory = client.get("/desk/memory", headers=ASSERT).json()["learnings"]
+    assert recent and memory
+    assert recent[0]["lesson"] == memory[0]["lesson"] == "learned ***"
 
 
 def test_failure_and_notes_are_redacted_when_written(env):
@@ -273,6 +323,82 @@ def test_an_approved_summary_is_redacted_in_the_result_and_the_notification_titl
     _no_leak("\n".join([task.result, run.result, *sent]))
 
 
+@pytest.mark.parametrize("boundary", [worker.MAX_ACTION_CHARS, redact.MAX_SCAN_CHARS], ids=["storage", "scan-cap"])
+def test_approved_actions_are_redacted_before_storage_truncation(sent, boundary):
+    db = _db()
+    task = _task(db)
+    action = _boundary_url(boundary)
+    assert action.index("@") == boundary
+    result = worker.run_once(db, {"claude": FakeProvider("claude", [_good(task.key, actions=[action])])}, SPECS)
+    db.refresh(task)
+    assert result["verdict"] == "APPROVED"
+    stored = task.artifacts["actions"][0]
+    assert len(stored) <= worker.MAX_ACTION_CHARS and PASSWORD[:8] not in stored
+    assert ("***" in stored) if boundary == worker.MAX_ACTION_CHARS else (stored == redact.UNAVAILABLE)
+
+
+def test_approved_output_is_redacted_in_artifacts_child_tasks_checkpoints_and_nested_audits(sent, monkeypatch):
+    db = _db()
+    task = _task(db, artifacts={"legacy": {"nested": [{"detail": GH, GH: "keep this text"}]}})
+    original_materialize = worker.task_materializer.materialize
+    original_resume = worker._resume_result
+    observed = []
+
+    def resume(db, run_id, specs):
+        run = db.get(models.AgentRun, run_id)
+        assert run.tool_calls["result_checkpoint"]["output"]["actions"]
+        _no_leak(json.dumps(run.tool_calls))
+        observed.append("checkpoint")
+        return original_resume(db, run_id, specs)
+
+    def materialize(db, parent, run, candidates):
+        observed.append("materialize")
+        _no_leak(json.dumps([c.model_dump() for c in candidates]))
+        _no_leak(json.dumps(run.tool_calls))
+        return original_materialize(db, parent, run, candidates)
+
+    monkeypatch.setattr(worker.task_materializer, "materialize", materialize)
+    monkeypatch.setattr(worker, "_resume_result", resume)
+    result = worker.run_once(db, {"claude": FakeProvider("claude", [_good(
+        task.key, actions=[f"action {GH}"], evidence=[f"selftest-x {task.key} {SK}"],
+        artifacts=[json.dumps({"nested": [{"detail": GH}, {"detail": JWT}]})],
+        new_task_candidates=[{"title": f"Research {GH}", "reason": f"Investigate {SK}", "kind": "research"}])])}, SPECS)
+    db.refresh(task)
+    assert result["verdict"] == "APPROVED" and observed == ["checkpoint", "materialize"]
+    _no_leak(json.dumps(task.artifacts))
+    child = db.scalar(select(models.Task).where(models.Task.created_by == "task-materializer"))
+    assert child is not None and child.title and child.objective and child.context["reason"]
+    _no_leak(json.dumps({"title": child.title, "objective": child.objective, "context": child.context}))
+    audit = db.scalar(select(models.AuditLog).where(models.AuditLog.action == "task.autonomous-run"))
+    assert audit.before["artifacts"]["legacy"]["nested"] and audit.after["artifacts"]["artifacts"]
+    assert audit.before["artifacts"]["legacy"]["nested"][0]["***"] == "keep this text"
+    _no_leak(json.dumps({"before": audit.before, "after": audit.after, "reason": audit.reason}))
+
+
+def test_legacy_notes_and_run_text_are_redacted_in_the_provider_prompt(sent):
+    db = _db()
+    task = _task(db)
+    db.add(models.AgentNote(agent_id=task.assigned_agent_id, task_id=task.id,
+                            note=f"legacy note {GH}", fingerprint="legacy"))
+    db.add(models.AgentRun(agent_id=task.assigned_agent_id, task_id=task.id,
+                           status=enums.AgentRunStatus.FAILED, ended_at=datetime.now(timezone.utc),
+                           result=f"legacy result {SK}", error=f"legacy error {JWT}"))
+    db.commit()
+    provider = FakeProvider("claude", [_good(task.key)])
+    prompts = []
+    original = provider._run
+
+    def capture(prompt, schema, **kwargs):
+        prompts.append(prompt)
+        return original(prompt, schema, **kwargs)
+
+    provider._run = capture
+    result = worker.run_once(db, {"claude": provider}, SPECS)
+    assert result["verdict"] == "APPROVED" and len(prompts) == 1
+    assert "legacy note" in prompts[0] and "legacy result" in prompts[0] and "recent_runs" in prompts[0]
+    _no_leak(prompts[0])
+
+
 def test_provider_run_redacts_any_providers_error():
     raw = ProviderResult("claude", Health.AVAILABLE, error=f"reasoner said token={GH}")
     assert "***" in FakeProvider("claude", [raw]).run("p", {}, cwd="/tmp", timeout_s=5, max_turns=1).error
@@ -281,16 +407,29 @@ def test_provider_run_redacts_any_providers_error():
 
 def test_a_herdr_run_report_stores_redacted_checks_and_notes(env):
     with Session(env) as db:
-        db.add(models.Task(key="TASK-0102", title="herdr", success_criteria="s", status=enums.TaskStatus.IN_PROGRESS))
+        db.add(models.Task(key="TASK-0102", title="herdr", success_criteria="s", result=f"legacy {GH}",
+                           status=enums.TaskStatus.IN_PROGRESS))
         db.commit()
     state = {"state": "running", "created_at": "2026-11-04T10:00:00Z", "updated_at": "2026-11-04T10:05:00Z",
-             "workflow": {"name": f"wf {SK}"}, "checks": {"status": "failed", "summary": f"E {GH}"}}
-    r = TestClient(main.app, client=("127.0.0.1", 5000)).post("/tasks/TASK-0102/run-report", json={"herdr_state": state})
+             "workflow": {"name": f"wf {SK}"}, "goal": f"goal {GH}",
+             "checks": {"status": "failed", "summary": f"E {GH}"}}
+    client = TestClient(main.app, client=("127.0.0.1", 5000))
+    r = client.post("/tasks/TASK-0102/run-report", json={"herdr_state": state})
     assert r.status_code == 201, r.status_code
+    _no_leak(r.text)
+    duplicate = client.post("/tasks/TASK-0102/run-report", json={"herdr_state": state})
+    assert duplicate.status_code == 201 and duplicate.json()["ignored"] == "duplicate"
+    _no_leak(duplicate.text)
     with Session(env) as db:
         run = db.scalar(select(models.AgentRun).where(models.AgentRun.provider == main.HERDR_PROVIDER))
-        assert run.error and run.supervisor_notes
-        _no_leak(run.error + run.supervisor_notes)
+        task = db.get(models.Task, run.task_id)
+        audit = db.scalar(select(models.AuditLog).where(models.AuditLog.action == "task.run-report"))
+        event = db.scalar(select(models.Event).where(models.Event.task_id == task.id))
+        assert run.error and run.supervisor_notes and run.model and run.result and task.result
+        assert audit.reason and event.payload["title"] and r.json()["outcome"]["summary"]
+        _no_leak(json.dumps({"model": run.model, "error": run.error, "notes": run.supervisor_notes,
+                             "run_result": run.result, "task_result": task.result, "audit_reason": audit.reason,
+                             "before": audit.before, "after": audit.after, "event": event.payload}))
 
 
 # --------------------------------------------------------------------------- fail closed, and no false positives

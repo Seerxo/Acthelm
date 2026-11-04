@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from app.redact import redact
+from app.redact import MAX_SCAN_CHARS, redact
 
 # Any of these in the worker's environment means a run could bill per token.
 METERED_ENV = (
@@ -127,18 +127,18 @@ _RESET = re.compile(r"try again (?:at|in) ([^.)]+)", re.I)
 def quota_message(raw: str) -> str:
     """Subscription limits mean wait. Provider text that suggests buying usage is not
     stored or shown anywhere (Desk, Telegram, task history)."""
-    reset = _RESET.search(raw or "")
-    return "subscription usage limit reached; waiting for reset" + (
-        f" (provider says: try again {reset.group(0)[10:].strip()})" if reset else "")
+    reset = _RESET.search(redact(raw or ""))
+    return ("subscription usage limit reached; waiting for reset" + (
+        f" (provider says: try again {reset.group(0)[10:].strip()})" if reset else ""))[:MAX_ERROR_CHARS]
 
 
-MAX_ERROR_CHARS, MAX_ERROR_SCAN = 500, 8000
+MAX_ERROR_CHARS, MAX_ERROR_SCAN = 500, MAX_SCAN_CHARS
 
 
 def provider_error(raw: str, *, tail: bool = False) -> str:
     """CLI or model text bound for run.error, task history and the Desk: redacted first, then bounded, so the cut
-    never leaves part of a credential unmasked. The scan window keeps a hostile megabyte cheap."""
-    text = redact(raw[-MAX_ERROR_SCAN:] if tail else raw[:MAX_ERROR_SCAN])
+    never leaves part of a credential unmasked. Oversized text is withheld whole by redact()."""
+    text = redact(raw)
     return text[-MAX_ERROR_CHARS:] if tail else text[:MAX_ERROR_CHARS]
 
 
@@ -250,7 +250,7 @@ class ClaudeCodeProvider(Provider):
             raw = (err or out or f"exit {code}").strip()
             health = classify(raw[:MAX_ERROR_CHARS])
             return ProviderResult(self.name, health, exit_code=code,
-                                  error=quota_message(raw[:MAX_ERROR_CHARS]) if health == Health.QUOTA_EXHAUSTED
+                                  error=quota_message(raw) if health == Health.QUOTA_EXHAUSTED
                                   else provider_error(raw))
         usage = data.get("usage") or {}
         res = ProviderResult(
@@ -262,7 +262,7 @@ class ClaudeCodeProvider(Provider):
         if data.get("is_error") or code != 0:
             raw = str(data.get("result") or data.get("subtype") or f"exit {code}")
             res.health = classify(raw[:MAX_ERROR_CHARS])   # classified on the raw text, stored redacted
-            res.error = (quota_message(raw[:MAX_ERROR_CHARS]) if res.health == Health.QUOTA_EXHAUSTED
+            res.error = (quota_message(raw) if res.health == Health.QUOTA_EXHAUSTED
                          else provider_error(raw))
             if res.health == Health.BROKEN:
                 res.health = Health.AVAILABLE  # the provider works; this run failed
@@ -650,7 +650,7 @@ class CodexProvider(Provider):
             raw, tail = (res.error, False) if res.error else (err.strip() or f"exit {code}", True)
             bounded = raw[-MAX_ERROR_CHARS:] if tail else raw[:MAX_ERROR_CHARS]
             health = classify(bounded)   # classified on the raw text, stored redacted
-            res.error = quota_message(bounded) if health == Health.QUOTA_EXHAUSTED else provider_error(raw, tail=tail)
+            res.error = quota_message(raw) if health == Health.QUOTA_EXHAUSTED else provider_error(raw, tail=tail)
             res.health = Health.AVAILABLE if health == Health.BROKEN else health
             return res
         try:

@@ -129,13 +129,12 @@ def _match(routes, method: str, path: str) -> bool:
 SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
 
 
-def _cross_site(headers, desk_host: str) -> bool:
+def _cross_site(headers, expected_origin: str) -> bool:
     """A browser write sent from another site (CSRF). A request with neither header (curl, a console) is not
-    refused here; Access still authenticates it. Origin is compared with the configured Desk host, so a Host
-    header carrying :443 does not refuse a same-origin write."""
+    refused here; caller authentication still applies. Compare the full origin, including scheme and port."""
     site, origin = headers.get("sec-fetch-site"), headers.get("origin")
     return ((site is not None and site != "same-origin")
-            or (origin is not None and origin.lower().rstrip("/") != f"https://{desk_host}"))
+            or (origin is not None and origin.lower().rstrip("/") != expected_origin))
 
 
 def caller(client_host: str | None, authorization: str | None, environ=os.environ) -> str:
@@ -188,7 +187,10 @@ async def middleware(request, call_next):
     assertion = request.headers.get("cf-access-jwt-assertion")
     desk_host = _dns_name(os.environ.get("CF_ACCESS_DESK_HOST", ""))
     is_desk_host = bool(desk_host and host == desk_host)
-    if is_desk_host and method not in SAFE_METHODS and _cross_site(request.headers, desk_host):
+    expected_origin = (f"https://{desk_host}" if is_desk_host else
+                       f"{request.url.scheme}://{(header or '').lower()}".removesuffix(
+                           ":443" if request.url.scheme == "https" else ":80"))
+    if method not in SAFE_METHODS and _cross_site(request.headers, expected_origin):
         return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
     authorization = request.headers.get("authorization")
     # The separate API hostname may add a service assertion to existing bearer

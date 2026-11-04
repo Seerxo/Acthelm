@@ -26,7 +26,7 @@ from app import (api_auth, approval_identity, audit, keys, context_builder, cont
 from app.config import settings
 from app.db import get_db
 from app.notify import NotificationService, fingerprint, notifier
-from app.redact import redact
+from app.redact import redact, redact_data
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("company.api")
@@ -841,6 +841,7 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
     db.refresh(task, with_for_update=True)
     st = body.herdr_state
     outcome = runreport.interpret(st)
+    outcome.summary = redact(outcome.summary)
     who = (approval_identity.require_founder(request)
            if task.status in _FOUNDER_ONLY_TASK_STATES
            or outcome.task_status == enums.TaskStatus.REVIEW
@@ -886,13 +887,14 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
         run, also_open = (open_rows[0], open_rows[1:]) if open_rows else (None, [])
     if run is None:
         run = models.AgentRun(agent_id=agent.id if agent else None, task_id=task.id, provider=HERDR_PROVIDER)
+    workflow_name = (st.get("workflow") or {}).get("name")
     for k, v in dict(
         status=outcome.run_status,
         # model_class, not a model id: router.toml owns which model runs (§84).
-        model=(st.get("workflow") or {}).get("name"),
+        model=redact(workflow_name) if workflow_name is not None else None,
         supervisor_verdict=outcome.supervisor_verdict,
-        supervisor_notes=outcome.summary and redact(outcome.summary),
-        result=st.get("goal"),
+        supervisor_notes=outcome.summary,
+        result=redact(st["goal"]) if st.get("goal") is not None else None,
         error=(redact(str((st.get("checks") or {}).get("summary") or "")) or None
                if outcome.run_status == enums.AgentRunStatus.FAILED else None),
         tool_calls={
@@ -926,7 +928,7 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
                 else "re-coding a stopped CI repair is the founder's decision") \
             or worker.ready_refusal(db, task)
 
-    before = audit.snapshot(task)
+    before = redact_data(audit.snapshot(task))
     if not requeue_refusal:
         task.status = outcome.task_status
     task.result = outcome.summary
@@ -942,7 +944,7 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
         notebook.record(db, note=lesson,
                         agent_key=agent.key if agent else None, task_key=task.key)
 
-    after = audit.snapshot(task)
+    after = redact_data(audit.snapshot(task))
     if body.reported_by != who.id:
         after["client_claimed_reported_by"] = body.reported_by
     if requeue_refusal:
@@ -957,8 +959,8 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
         event_type=outcome.event_type, source="herdr/project-control-center",
         severity=outcome.severity, task=task.key,
         payload={"title": f"{task.key}: {outcome.summary}",
-                 "detail": f"workflow={run.model} branch={st.get('branch')}",
-                 "message": task.title},
+                 "detail": redact(f"workflow={run.model} branch={st.get('branch')}"),
+                 "message": redact(task.title)},
     ))
     delivered, _ = notifier.dispatch(db, event)
 
@@ -1316,7 +1318,7 @@ def compact_notes(body: schemas.CompactionRequest, db: Session = Depends(get_db)
 @app.get("/learnings")
 def list_learnings(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.execute(select(models.Learning).order_by(models.Learning.created_at.desc())).scalars()
-    return [{"id": x.id, "title": x.title, "lesson": x.lesson, "tags": x.tags,
+    return [{"id": x.id, "title": redact(x.title), "lesson": redact(x.lesson), "tags": x.tags,
              "status": x.status.value, "created_at": x.created_at.isoformat()} for x in rows]
 
 

@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import enums, models
+from app.redact import redact, redact_data
 from app.registry import AgentSpec
 
 
@@ -92,8 +93,8 @@ def build(db: Session, task: models.Task, spec: AgentSpec) -> dict:
 
     return {
         "task": {
-            "key": task.key, "title": task.title, "description": task.description,
-            "objective": task.objective, "success_criteria": task.success_criteria,
+            "key": task.key, "title": redact(task.title), "description": redact_data(task.description),
+            "objective": redact_data(task.objective), "success_criteria": redact(task.success_criteria),
             "status": task.status.value, "priority": task.priority.value,
             "risk_level": task.risk_level.value,
             "approval_required": task.approval_required,
@@ -114,18 +115,18 @@ def build(db: Session, task: models.Task, spec: AgentSpec) -> dict:
             for row in decisions
         ],
         "learnings": [
-            {"title": row.title, "lesson": row.lesson, "evidence": row.evidence,
-             "tags": row.tags}
+            redact_data({"title": row.title, "lesson": row.lesson, "evidence": row.evidence,
+                         "tags": row.tags})
             for row in learnings
         ],
         "agent_notes": [
-            {"note": row.note, "tags": row.tags, "references": row.reference_count,
+            {"note": redact(row.note), "tags": row.tags, "references": row.reference_count,
              "last_seen_at": _iso(row.last_seen_at)}
             for row in notes
         ],
         "recent_runs": [
-            {"task": task_key, "status": row.status.value, "result": row.result,
-             "error": row.error,
+            {"task": task_key, "status": row.status.value, "result": redact(row.result) if row.result is not None else None,
+             "error": redact(row.error) if row.error is not None else None,
              "supervisor_verdict": (row.supervisor_verdict.value
                                     if row.supervisor_verdict else None),
              "started_at": _iso(row.started_at), "ended_at": _iso(row.ended_at)}
