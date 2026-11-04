@@ -1087,7 +1087,7 @@ def run_experiment_scheduler() -> dict | None:
         return None
     if tick.outcomes:
         log.info("experiments: %s", tick.counts)
-    return {"counts": tick.counts, "truncated": tick.truncated}
+    return {"counts": tick.counts, "truncated": tick.truncated, "paused": tick.paused}
 
 
 def run(facts: dict) -> dict:
@@ -1122,7 +1122,9 @@ def run(facts: dict) -> dict:
                 notifier.recover_condition(db, source="watchdog", condition_key=condition)
         record_stage_c_readiness(db, facts)
         record_host_metrics(db, facts)
-        result["business_tasks"] = reconciler_heartbeat.run(db, business_reconciler.reconcile)
+        opened = reconciler_heartbeat.run(db, business_reconciler.reconcile)
+        result["business_tasks"] = opened
+        result["business_paused"] = getattr(opened, "paused", False) is True
         result["experiments"] = run_experiment_scheduler()
         result["detail"] = [
             {"event_type": f.event_type, "severity": f.severity.value, "title": f.title}

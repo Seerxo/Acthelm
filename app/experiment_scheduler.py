@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
-from app import enums, experiments, metrics_store, models
+from app import control, enums, experiments, metrics_store, models
 
 log = logging.getLogger("company.experiment_scheduler")
 
@@ -87,6 +87,7 @@ class TickResult:
     transitions: int = 0       # state changes made (closing a window and evaluating are one each)
     advanced: int = 0          # experiments that changed state; `limit` bounds this
     truncated: bool = False    # more work remained than `limit` / SCAN_CAP allowed this tick
+    paused: bool = False       # agents paused (or the pause state unreadable): nothing was read or changed
 
     @property
     def counts(self) -> dict:
@@ -97,7 +98,7 @@ class TickResult:
 
     def to_dict(self) -> dict:
         return {"now": self.now, "limit": self.limit, "dry_run": self.dry_run, "transitions": self.transitions,
-                "advanced": self.advanced,
+                "advanced": self.advanced, "paused": self.paused,
                 "truncated": self.truncated, "counts": self.counts, "outcomes": [o.to_dict() for o in self.outcomes]}
 
 
@@ -223,6 +224,11 @@ def tick(db: Session, now: datetime | None = None, limit: int = DEFAULT_LIMIT, *
     if not dry_run and now > _real_now() + CLOCK_SKEW:
         raise FutureClock(f"now {now.isoformat()} is ahead of the real clock by more than {CLOCK_SKEW}")
     result = TickResult(now=now.isoformat(), limit=limit, dry_run=dry_run)
+    # The kill switch stops every tick, dry runs included; an unreadable pause state counts as paused.
+    if control.paused_or_unreadable(db):
+        log.info("experiment scheduler skipped: agents are paused")
+        result.paused = True
+        return result
     ids, result.truncated = _candidates(db, now, _cursor(db))
     last = None
     outer = db.begin_nested() if dry_run else None

@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import audit, enums, goal_evidence, goals, keys, metrics_store, models
+from app import audit, control, enums, goal_evidence, goals, keys, metrics_store, models
 
 log = logging.getLogger("company.business_reconciler")
 
@@ -214,14 +214,19 @@ class Reconciled(list):
     """The keys of the tasks opened this run (still a plain list to every caller), plus per-goal evidence:
     how many ACTIVE goals were examined and which ones failed. "Examined without error" is all it says; it is
     never a claim that a goal is on track or achieved."""
-    def __init__(self, keys=(), goals_total: int = 0, failed_goal_ids: list[int] | None = None):
+    def __init__(self, keys=(), goals_total: int | None = 0, failed_goal_ids: list[int] | None = None,
+                 paused: bool = False):
         super().__init__(keys)
-        self.goals_total = goals_total
+        self.goals_total = goals_total   # None when no goal was examined (paused): never a claim of "all OK"
         self.failed_goal_ids = failed_goal_ids or []
+        self.paused = paused
 
 
 def reconcile(db: Session, now: datetime | None = None) -> Reconciled:
     """Keys of the tasks opened this run. One goal failing never stops the others; it is recorded, not hidden."""
+    if control.paused_or_unreadable(db):   # the kill switch stops goal planning too; unreadable = paused
+        log.info("business reconcile skipped: agents are paused")
+        return Reconciled(goals_total=None, paused=True)
     now = now or datetime.now(timezone.utc)
     opened = Reconciled()
     for goal in db.execute(select(models.Goal).where(

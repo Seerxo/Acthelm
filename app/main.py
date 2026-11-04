@@ -549,13 +549,15 @@ def get_goal(goal_id: int, db: Session = Depends(get_db)) -> dict:
 
 
 @app.post("/goals", status_code=201)
-def create_goal(body: schemas.GoalCreate, db: Session = Depends(get_db)) -> dict:
+def create_goal(body: schemas.GoalCreate, db: Session = Depends(get_db), request: Request = None) -> dict:
+    # Goals steer the business reconciler's planning: founder only. `body.created_by` is untrusted metadata.
+    who = approval_identity.require_founder(request)
     project = _by_key(db, models.Project, body.project)
     if body.project and project is None:
         raise HTTPException(404, f"project {body.project} not found")
     goal = models.Goal(title=body.title, description=body.description, metric=body.metric,
                        baseline=body.baseline, target=body.target, deadline=body.deadline,
-                       priority=body.priority, status=body.status, created_by=body.created_by,
+                       priority=body.priority, status=body.status, created_by=who.id,
                        project_id=project.id if project else None,
                        metric_selector=body.selector.model_dump(exclude_none=True) if body.selector else None)
     try:
@@ -564,15 +566,18 @@ def create_goal(body: schemas.GoalCreate, db: Session = Depends(get_db)) -> dict
         raise HTTPException(422, str(e))
     db.add(goal)
     db.flush()
-    audit.record(db, actor=body.created_by, action="goal.create", entity_type="goal",
-                 entity_key=str(goal.id), reason=body.reason, after=audit.snapshot(goal))
+    after = audit.snapshot(goal)
+    if body.created_by != who.id:
+        after["client_claimed_actor"] = body.created_by
+    audit.record(db, actor=who.id, action="goal.create", entity_type="goal",
+                 entity_key=str(goal.id), reason=body.reason, after=after)
     db.commit()
     return goals.view(db, goal)
 
 
 @app.patch("/goals/{goal_id}")
 def update_goal(goal_id: int, body: schemas.GoalUpdate, db: Session = Depends(get_db), request: Request = None) -> dict:
-    who = approval_identity.principal_of(request)  # audit identity; `body.actor` is untrusted metadata
+    who = approval_identity.require_founder(request)  # founder only; `body.actor` is untrusted metadata
     goal = _goal(db, goal_id)
     before = audit.snapshot(goal)
     changes = body.model_dump(exclude_unset=True, exclude={"actor", "reason", "selector"})

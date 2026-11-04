@@ -427,11 +427,70 @@ def test_goal_and_assignment_audit_the_verified_principal_not_the_claimed_actor(
         s.add_all([models.Goal(title="g", metric="m", target="1", status=enums.GoalStatus.PROPOSED),
                    models.Agent(key="dev", role="dev", enabled=True)])
         s.commit()
-    assert _c("127.0.0.1").patch("/goals/1", json={"title": "goal two", "actor": "founder"}).status_code == 200
+    assert _founder().patch("/goals/1", json={"title": "goal two", "actor": "founder"}, headers=ASSERT).status_code == 200
     assert _c("127.0.0.1").post("/tasks/TASK-0045/assign", json={"agent": "dev", "actor": "founder"}).status_code == 200
     with Session(engine) as s:
-        rows = list(s.scalars(select(models.AuditLog).where(models.AuditLog.action.in_(("goal.update", "task.assign")))))
-        assert {r.actor for r in rows} == {"operator:local"} and all(r.after["client_claimed_actor"] == "founder" for r in rows)
+        rows = {r.action: r for r in s.scalars(select(models.AuditLog).where(
+            models.AuditLog.action.in_(("goal.update", "task.assign"))))}
+        assert rows["goal.update"].actor == FID and rows["task.assign"].actor == "operator:local"
+        assert all(r.after["client_claimed_actor"] == "founder" for r in rows.values())
+
+
+# ---------------------------------------------------------------- goals steer the reconciler: founder only
+GOAL = {"title": "Reach 10k views", "metric": "Lifetime views", "target": "10000", "created_by": "founder"}
+
+
+def _goal_state(engine):
+    with Session(engine) as s:
+        return ([(g.id, g.title, g.created_by) for g in s.scalars(select(models.Goal).order_by(models.Goal.id))],
+                s.scalar(select(func.count()).select_from(models.AuditLog)))
+
+
+@pytest.mark.parametrize("mode", ["enforce", "log"])
+@pytest.mark.parametrize("label,headers,host", CALLERS)
+def test_only_the_verified_founder_can_create_or_edit_a_goal(env, monkeypatch, mode, label, headers, host):
+    # Break caught: an operator, the admin token or an agent on the host network steering business planning.
+    engine, _ = env
+    with Session(engine) as s:
+        s.add(models.Goal(title="g", metric="m", target="1", status=enums.GoalStatus.PROPOSED))
+        s.commit()
+    monkeypatch.setenv("API_AUTH_MODE", mode)
+    before = _goal_state(engine)
+    c = _c(host)
+    created = c.post("/goals", json=GOAL, headers=headers)
+    edited = c.patch("/goals/1", json={"title": "steered", "actor": "founder"}, headers=headers)
+    want = 401 if label == "anonymous" else 403
+    assert (created.status_code, edited.status_code) == (want, want), (label, mode)
+    assert _goal_state(engine) == before, (label, mode)   # a denial writes nothing
+
+
+def test_the_desk_token_holder_cannot_reach_goals_even_on_the_desk_host(env):
+    engine, _ = env
+    before = _goal_state(engine)
+    r = _founder().post("/goals", json=GOAL, headers=_bearer(DESK))   # no Access assertion
+    assert r.status_code == 401 and _goal_state(engine) == before
+
+
+def test_the_verified_founder_creates_and_edits_goals_as_itself(env):
+    engine, _ = env
+    r = _founder().post("/goals", json={**GOAL, "created_by": "ceo"}, headers=ASSERT)
+    assert r.status_code == 201, r.text
+    gid = r.json()["id"]
+    assert _founder().patch(f"/goals/{gid}", json={"title": "Reach 20k views"}, headers=ASSERT).status_code == 200
+    with Session(engine) as s:
+        goal = s.get(models.Goal, gid)
+        assert goal.created_by == FID and goal.title == "Reach 20k views"
+        made = s.scalar(select(models.AuditLog).where(models.AuditLog.action == "goal.create"))
+        assert made.actor == FID and made.after["client_claimed_actor"] == "ceo"
+        assert s.scalar(select(models.AuditLog).where(models.AuditLog.action == "goal.update")).actor == FID
+
+
+def test_goal_routes_are_enforce_always_and_founder_scoped():
+    from app import api_auth
+    for method, probe in (("POST", "/goals"), ("PATCH", "/goals/7")):
+        assert api_auth._match(api_auth.ENFORCE_ALWAYS, method, probe), probe
+        assert api_auth._match(api_auth.FOUNDER_SCOPE, method, probe), probe
+        assert not api_auth.allowed("desk", method, probe) and not api_auth.allowed("youtube", method, probe)
 
 
 # ---------------------------------------------------------------- experiment engine contract (routes belong to Agent 3)

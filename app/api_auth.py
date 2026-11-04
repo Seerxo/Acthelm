@@ -55,7 +55,9 @@ FOUNDER_SCOPE = [("POST", r"/control/agents"), ("POST", r"/tasks/[A-Za-z0-9_-]+/
                  ("POST", r"/learnings/[0-9]+/approve"), ("POST", r"/stage-c/authorization"),
                  ("POST", r"/stage-c/authorization/revoke"),
                  ("POST", r"/stage-c/standing"), ("POST", r"/stage-c/standing/revoke"), ("POST", r"/stage-c/acceptance"),
-                 ("POST", r"/notifications/[0-9]+/retry")]
+                 ("POST", r"/notifications/[0-9]+/retry"),
+                 # Goals steer the business reconciler; the handlers require the founder (no operator path).
+                 ("POST", r"/goals"), ("PATCH", r"/goals/[0-9]+")]
 SCOPES = {"desk": DESK, "youtube": YOUTUBE}
 TOKENS = {"admin": "COMPANY_API_TOKEN_ADMIN", "desk": "COMPANY_API_TOKEN_DESK",
           "youtube": "COMPANY_API_TOKEN_YOUTUBE"}
