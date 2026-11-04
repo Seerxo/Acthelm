@@ -260,6 +260,56 @@ def test_one_registry_answers_writers_units_and_freshness():
     assert metric_sources.internal_only("polar-api") and not metric_sources.internal_only("youtube-auto")
 
 
+REVENUE_SERIES = (("revenue", "today"), ("revenue", "mtd"), ("mrr", None), ("revenue", "all_time"))
+
+
+def _polar(db, readings, unit=None):
+    """readings: (metric, window, observed_at) rows reported by polar-api; no window means the default."""
+    metrics_store.record(db, schemas.MetricsIn(business_unit="seerxo", observations=[
+        schemas.MetricIn(subject="polar", metric=metric, value=10, unit=unit, source="polar-api",
+                         observed_at=at, **({"window": window} if window else {}))
+        for metric, window, at in readings]), now=NOW)
+
+
+def test_revenue_is_verified_when_every_series_is_fresh():
+    db = _db()
+    _polar(db, [(m, w, NOW - timedelta(hours=1)) for m, w in REVENUE_SERIES])
+    out = metrics_store.revenue(db, now=NOW)
+    assert out["freshness"] == "VERIFIED"
+    assert [s["freshness"] for s in out["series"].values()] == ["VERIFIED"] * 4
+
+
+@pytest.mark.parametrize("stale", range(len(REVENUE_SERIES)))
+def test_revenue_is_stale_when_any_one_series_is_stale(stale):
+    db = _db()
+    # Break caught: one fresh series masked a dead Polar sync on another.
+    _polar(db, [(m, w, NOW - timedelta(hours=4) if i == stale else NOW)
+                for i, (m, w) in enumerate(REVENUE_SERIES)])
+    out = metrics_store.revenue(db, now=NOW)
+    assert out["freshness"] == "STALE"
+    assert sorted(s["freshness"] for s in out["series"].values()) == ["STALE"] + ["VERIFIED"] * 3
+
+
+def test_revenue_ignores_unreported_series_when_judging_freshness():
+    db = _db()
+    _polar(db, [("mrr", None, NOW)])
+    out = metrics_store.revenue(db, now=NOW)
+    assert out["freshness"] == "VERIFIED" and out["mrr"] == 10.0
+    assert out["series"]["today"] is None and out["today"] is None
+
+
+def test_revenue_unit_comes_from_the_stored_reading():
+    db = _db()
+    _polar(db, [(m, w, NOW) for m, w in REVENUE_SERIES], unit="EUR")
+    assert metrics_store.revenue(db, now=NOW)["unit"] == "EUR"
+
+
+def test_revenue_unit_is_none_when_the_stored_reading_has_no_unit():
+    db = _db()
+    _polar(db, [("mrr", None, NOW)])
+    assert metrics_store.revenue(db, now=NOW)["unit"] is None
+
+
 def test_series_is_one_series_oldest_first_within_the_window():
     db = _db()
     metrics_store.record(db, _views(10, NOW - timedelta(days=2)), now=NOW)
