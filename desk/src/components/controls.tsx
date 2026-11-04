@@ -183,6 +183,23 @@ export function RevokeStageC() {
   )
 }
 
+/** Emergency stop for the standing Stage C authorization only (POST /stage-c/standing/revoke). Always offered while a
+ *  grant may be live, even on stale data. The API answers {revoked: bool}, so the toast only says the request was
+ *  accepted; `onDone` re-reads the Stage C state, which is the truth. No issue or renew control exists on the Desk. */
+export function RevokeStanding({ onDone }: { onDone: () => void }) {
+  const { act } = useDesk()
+  const [busy, setBusy] = useState(false)
+  return (
+    <Confirm title="Revoke the standing Stage C authorization?" action="Revoke standing authorization" destructive
+      description={<p>No new autonomous coding attempt can start under the standing grant. A run already in progress is not stopped by this; pause agents for that. Re-issuing is done on the host, not here.</p>}
+      onConfirm={() => { setBusy(true); void act("/stage-c/standing/revoke", { reason: "emergency revoke from Founder Desk" }, "Standing revoke sent")
+        .then(() => onDone()).finally(() => setBusy(false)) }}>
+      <Button variant="outline" disabled={busy} className="h-10 text-destructive hover:text-destructive">
+        {busy ? <Loader2 className="animate-spin" /> : <ShieldOff />}Revoke</Button>
+    </Confirm>
+  )
+}
+
 /** "Mark READY": hand a stopped or not-yet-released task to the worker (POST /tasks/{key}/status, verified founder
  *  only; lib/ready.ts decides when it is offered). The dialog names the task, its current status and what READY does;
  *  the API's refusal (an open run, or for code writes a missing Stage C condition) is shown as returned, never as done. */

@@ -46,10 +46,10 @@ function dataLoop(u: Pick<Unit, "metrics"> | undefined): State {
 const flag = (on: boolean | null | undefined) => on == null ? <Muted>Not reported</Muted>
   : <Status value={on ? "ENABLED" : "DISABLED"} label={on ? "On" : "Off"} tone={on ? "warning" : "neutral"} />
 
-function reconcilerPresentation(e: unknown, generatedAt: unknown): { last: string | null; state: ReactNode; tone: Tone; detail: string; cadence: string } {
+function reconcilerPresentation(e: unknown, generatedAt: unknown, paused: boolean): { last: string | null; state: ReactNode; tone: Tone; detail: string; cadence: string } {
   // One source of truth for label, tone, wording and time (src/lib/reconciler.ts): nothing here re-derives
   // a status or formats an unchecked timestamp.
-  const view = reconcilerView(e, serverNow(generatedAt))
+  const view = reconcilerView(e, serverNow(generatedAt), paused)
   return { last: view.last, cadence: view.cadence ?? "Not reported", detail: view.detail, tone: view.tone,
     state: <Status value={view.label} tone={view.tone} /> }
 }
@@ -60,7 +60,7 @@ export function AutomationPage() {
   const w = d.worker
   // The Desk's recent task list, not the invocation's own count (tasks_created): the two can differ.
   const reconciled = d.tasks.filter(t => t.origin?.by === "business-reconciler").map(t => t.created_at).sort().at(-1) ?? null
-  const reconciler = reconcilerPresentation(d.reconciler_execution, d.generated_at)
+  const reconciler = reconcilerPresentation(d.reconciler_execution, d.generated_at, d.control.agents_paused)
   const youtube = d.portfolio?.find(u => u.key === "youtube")
   const seerxo = d.portfolio?.find(u => u.key === "seerxo")
   const backup = d.health.backup
@@ -108,8 +108,10 @@ export function AutomationPage() {
     { name: "Automatic PRs", what: "Worker opens pull requests itself", state: flag(w?.autonomy && "auto_pr" in w.autonomy ? w.autonomy.auto_pr : null) },
     { name: "External wait release", what: "Release WAITING_EXTERNAL work on evidence", state: flag(w?.autonomy?.external_release) },
     // No runtime flag exists for this: it is a repository rule the Desk cannot see being enforced, so it says so.
-    { name: "Merge & deploy", what: "Founder only, by repository policy; enforcement is not verified by the Desk",
-      state: <Status value="POLICY" label="Founder, by policy" tone="warning" /> },
+    { name: "Merge", what: "Founder only, by repository policy; enforcement is not verified by the Desk",
+      state: <Status value="POLICY" label="Founder only" tone="warning" /> },
+    { name: "Release signing", what: "The release gateway auto-signs low-risk (currently docs-only) releases under the founder-signed policy; the founder signs every other release. Not verified by the Desk",
+      state: <Status value="POLICY" label="Gateway: low-risk only" tone="warning" /> },
     { name: "Runtime drift", what: "Deployed API / worker / schema vs source",
       state: <span className={cn("text-sm", r?.drift.length && "text-warning")}>{!r ? <Muted>Not reported</Muted> : r.drift.length ? r.drift.join(" · ") : <Status value="NONE" label="None" tone="success" />}</span> },
   ]

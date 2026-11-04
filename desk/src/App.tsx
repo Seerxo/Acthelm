@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import {
-  Activity, AlertOctagon, Bot, Brain, Briefcase, CheckSquare, ChevronRight, CornerDownLeft, FileText, Gauge, HeartPulse, House,
+  Activity, AlertOctagon, Bot, Brain, Briefcase, CheckSquare, ChevronRight, CornerDownLeft, FileText, Gauge, GitPullRequest, HeartPulse, House,
   KanbanSquare, Keyboard, Layers, ListPlus, Monitor, Moon, Plus, Repeat, RefreshCw, Search, Send, ShieldCheck, Sparkles, Sun, TrendingUp,
   Wallet, WifiOff,
 } from "lucide-react"
@@ -35,6 +35,7 @@ import { TasksPage } from "@/pages/tasks"
 import { FinancePage } from "@/pages/finance"
 import { GrowthPage } from "@/pages/growth"
 import { AutomationPage } from "@/pages/automation"
+import { StageCPage } from "@/pages/stage-c"
 import { AgentsPage } from "@/pages/agents"
 import { IncidentsPage } from "@/pages/control"
 import { ActivityPage, HealthPage } from "@/pages/system"
@@ -43,7 +44,7 @@ import { MemoryPage } from "@/pages/memory"
 const SECTION_ICON: Record<SectionKey, typeof Gauge> = { home: House, work: Layers, system: Gauge }
 const PAGE_ICON: Record<Page, typeof Gauge> = {
   overview: House, approvals: CheckSquare, projects: Briefcase, project: Briefcase, growth: TrendingUp, finance: Wallet,
-  tasks: KanbanSquare, agents: Bot, automation: Repeat, incidents: AlertOctagon, activity: Activity, health: HeartPulse, memory: Brain,
+  tasks: KanbanSquare, agents: Bot, automation: Repeat, "stage-c": GitPullRequest, incidents: AlertOctagon, activity: Activity, health: HeartPulse, memory: Brain,
 }
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const MOD = isMac ? "⌘" : "Ctrl"
@@ -424,6 +425,7 @@ function Main() {
     case "growth": return <GrowthPage />
     case "tasks": return <TasksPage />
     case "automation": return <AutomationPage />
+    case "stage-c": return <StageCPage />
     case "agents": return <AgentsPage />
     case "incidents": return <IncidentsPage />
     case "activity": return <ActivityPage />
