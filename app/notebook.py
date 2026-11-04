@@ -21,6 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import enums, models
+from app.redact import _redact_secrets
 
 # §53A defaults, overridable per agent through registry.yaml memory_policy.
 DEFAULT_RETENTION_DAYS = 30
@@ -56,6 +57,7 @@ def record(db: Session, *, note: str, agent_key: str | None = None,
     Merging is what makes the reference count meaningful: a lesson learned twice by two
     different runs is worth promoting; the same lesson written twice is not news.
     """
+    note = _redact_secrets(note)   # model-written lessons reach the Desk and later prompts
     fp = fingerprint(note)
     agent = task = None
     if agent_key:

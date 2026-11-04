@@ -4,9 +4,11 @@ Internal only (§109): this app binds inside the Docker network and is never pub
 to a host port. Public access, when it is ever wanted, goes through Cloudflare Access
 plus a tunnel — not through an opened port.
 """
+import base64
 import hashlib
 import json
 import os
+import re
 import stat
 import logging
 from datetime import datetime, timedelta, timezone
@@ -24,6 +26,7 @@ from app import (api_auth, approval_identity, audit, keys, context_builder, cont
 from app.config import settings
 from app.db import get_db
 from app.notify import NotificationService, fingerprint, notifier
+from app.redact import _redact_secrets
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("company.api")
@@ -44,6 +47,33 @@ app = FastAPI(
     version="0.1.0",
 )
 app.middleware("http")(api_auth.middleware)
+
+_DESK = Path(__file__).resolve().parent / "static" / "desk.html"
+
+
+def _desk_csp() -> str:
+    """The Desk's policy: only its own inline scripts, by hash of the text served (read_text, as desk() reads it),
+    so a rebuild needs no hand-edited hash. Fonts are inline data: URLs; style-src needs 'unsafe-inline' (chart and
+    toast components inject <style>)."""
+    scripts = re.findall(r"<script\b(?![^>]*\bsrc=)[^>]*>(.*?)</script>", _DESK.read_text(), re.S | re.I)
+    hashes = " ".join(f"'sha256-{base64.b64encode(hashlib.sha256(js.encode()).digest()).decode()}'" for js in scripts)
+    return (f"default-src 'none'; script-src {hashes}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "font-src data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; "
+            "base-uri 'none'; form-action 'self'")
+
+
+DESK_CSP = _desk_csp()
+_SECURITY_HEADERS = {"x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY"}
+
+
+@app.middleware("http")   # registered last, so outermost: api_auth's 400/401/403 get these headers too
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in {**_SECURITY_HEADERS, "cache-control": "no-store"}.items():
+        response.headers.setdefault(name, value)   # a route's own Cache-Control (PWA assets, SSE) stays
+    if get_route_path(request.scope) in ("/", "/ui"):
+        response.headers["content-security-policy"] = DESK_CSP
+    return response
 
 
 # --------------------------------------------------------------------------- helpers
@@ -93,7 +123,6 @@ def _record_event(db: Session, payload: schemas.EventIn) -> models.Event:
 
 # --------------------------------------------------------------------------- desk UI
 
-_DESK = Path(__file__).resolve().parent / "static" / "desk.html"
 _PWA_ASSETS = {
     "manifest.webmanifest": "application/manifest+json",
     "sw.js": "text/javascript",
@@ -862,10 +891,10 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
         # model_class, not a model id: router.toml owns which model runs (§84).
         model=(st.get("workflow") or {}).get("name"),
         supervisor_verdict=outcome.supervisor_verdict,
-        supervisor_notes=outcome.summary,
+        supervisor_notes=outcome.summary and _redact_secrets(outcome.summary),
         result=st.get("goal"),
-        error=((st.get("checks") or {}).get("summary") if outcome.run_status ==
-               enums.AgentRunStatus.FAILED else None),
+        error=(_redact_secrets(str((st.get("checks") or {}).get("summary") or "")) or None
+               if outcome.run_status == enums.AgentRunStatus.FAILED else None),
         tool_calls={
             "herdr_state": st.get("state"),
             "branch": st.get("branch"),
@@ -1257,7 +1286,7 @@ def list_notes(agent: str | None = None, include_archived: bool = False,
         stmt.order_by(models.AgentNote.reference_count.desc(),
                       models.AgentNote.last_seen_at.desc()).limit(limit)
     ).scalars().all()
-    return [{"id": n.id, "note": n.note, "refs": n.reference_count, "tags": n.tags,
+    return [{"id": n.id, "note": _redact_secrets(n.note), "refs": n.reference_count, "tags": n.tags,
              "last_seen_at": n.last_seen_at.isoformat(),
              "promoted": n.promoted_learning_id is not None,
              "archived": n.archived_at.isoformat() if n.archived_at else None}

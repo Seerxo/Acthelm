@@ -32,6 +32,7 @@ from app import (audit, context_builder, control, dispatch, enums, keys, livenes
 from app.notify import fingerprint, notifier
 from app.providers import (FALLBACK_HEALTH, RUNNABLE_HEALTH, Health, Provider,
                           ProviderResult, default_providers)
+from app.redact import _redact_secrets
 
 log = logging.getLogger("company.worker")
 
@@ -870,7 +871,7 @@ def supervise(task: models.Task, raw: dict | None) -> tuple[enums.SupervisorVerd
 
 def _set_failure(db: Session, task: models.Task, error: str) -> tuple:
     task.retry_count += 1
-    task.error = error[:2000]
+    task.error = _redact_secrets(error)[:2000]   # Stage C outcomes reach here too, not only _finish_result
     if task.retry_count < task.max_attempts:
         task.status = enums.TaskStatus.READY
         return "TASK_FAILED", enums.Severity.MEDIUM, f"{task.key} attempt {task.retry_count} failed"
@@ -1110,6 +1111,8 @@ def _finish_result(db: Session, task: models.Task, run: models.AgentRun, agent: 
     task = _locked_task(db, task.id)
     if not holds_attempt(db, task, run):
         return _superseded(db, task, run, verdict.value)
+    # Provider error or model text: redacted once, before it becomes run/agent/task error, notes or audit reason.
+    notes = _redact_secrets(notes)
     ctx = task.context if isinstance(task.context, dict) else {}
     run.ended_at = _now()
     run.tool_calls = {key: value for key, value in (run.tool_calls or {}).items() if key != "result_checkpoint"}
