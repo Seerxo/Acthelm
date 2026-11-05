@@ -186,8 +186,9 @@ export const acceptanceView = (valid: boolean | null): View =>
 export const workerReadyView = (ready: boolean | null): View =>
   ready === true ? v("READY") : ready === false ? v("BLOCKED", "Not ready") : v("NOT_VERIFIED")
 export const driftView = (rt: Pick<StageCState["runtime"], "api_sha" | "worker_sha" | "sha_agree">): View =>
-  !rt.api_sha || !rt.worker_sha || rt.sha_agree === null ? v("UNKNOWN")
-    : rt.sha_agree && rt.api_sha === rt.worker_sha ? v("READY", "No drift") : v("BLOCKED", "Drift: API and worker differ")
+  !rt.api_sha || !rt.worker_sha ? v("UNKNOWN")
+    : rt.api_sha !== rt.worker_sha ? v("BLOCKED", "Drift: API and worker differ")
+    : rt.sha_agree === false ? v("BLOCKED", "SHA disagreement reported") : v("NOT_VERIFIED", "API = worker; reasoner not verified")
 export const heartbeatView = (h: StageCState["runtime"]["worker_heartbeat"]): View =>
   h === "HEALTHY" ? v("ACTIVE", "Healthy") : h === "PAUSED" ? v("BLOCKED", "Paused") : h === "DEGRADED" ? v("FAILED", "Degraded")
     : h === "STALE" ? v("UNKNOWN", "Stale heartbeat") : h === "NO_DATA" ? v("UNKNOWN", "No heartbeat") : v("UNKNOWN")
@@ -204,6 +205,11 @@ export function grantView(g: Grant | null | undefined): View {
 /** Hide the emergency action only when absence or revocation is explicit and consistent. */
 export const isRevoked = (s: Standing | null | undefined) => !!s && s.status === "REVOKED" && s.revoked === true
 export const canRevokeStanding = (s: Standing | null | undefined) => s !== null && !isRevoked(s)
+export function standingRevokeMessage(result: unknown): string {
+  const revoked = obj(result).revoked
+  if (typeof revoked !== "boolean") throw new Error("Invalid standing revoke response")
+  return revoked ? "Standing authorization revoked" : "No live standing grant — nothing was revoked"
+}
 
 export type CiKind = "passed" | "failed" | "running" | "outdated" | "observed" | "none" | "unknown"
 /** CI is success only when it ran on the PR's published head. Any disagreement reads "CI on outdated SHA". */
@@ -212,8 +218,8 @@ export function ciView(t: Pick<Task, "pr" | "ci">): { kind: CiKind; label: strin
   const out = (kind: CiKind, label: string, tone: Tone) => ({ kind, label, tone, sha: ci?.sha ?? null })
   if (!t.pr) return out("none", "No PR yet", "neutral")
   if (!ci || ci.state === null) return out("none", "No CI result recorded", "neutral")
-  if (ci.state === "STALE" || (ci.sha !== null && head !== null && ci.sha !== head)) return out("outdated", "CI on outdated SHA", "warning")
   if (ci.state === "MERGED_OBSERVED") return out("observed", "Observed after merge", "neutral")
+  if (ci.state === "STALE" || (ci.sha !== null && head !== null && ci.sha !== head)) return out("outdated", "CI on outdated SHA", "warning")
   if (ci.state === "FAILURE") return out("failed", "CI failed", "danger")
   if (ci.state === "PENDING") return out("running", "CI running", "info")
   if (ci.state === "SUCCESS") return ci.sha && head && ci.sha === head ? out("passed", "CI passed on PR head", "success")
@@ -237,7 +243,7 @@ export const privacyGateLabel = (code: string): string | null =>
   code === "PRIVACY_GATE_BLOCKED" ? "Privacy check blocked publication"
     : code === "PRIVACY_GATE_ERROR" ? "Privacy verification could not complete" : null
 
-export type StepState = "completed" | "in_progress" | "failed" | "pending" | "unknown" | "not_verified"
+export type StepState = "completed" | "in_progress" | "failed" | "pending" | "unknown" | "not_verified" | "observed"
 /** History records entry, not completion. A later entry and the relevant evidence must both confirm completion.
  *  Use the last visit to each stage so an earlier attempt cannot complete a repair still in progress. */
 export function steps(t: Task): { key: string; label: string; state: StepState }[] {
@@ -254,7 +260,8 @@ export function steps(t: Task): { key: string; label: string; state: StepState }
   return PIPELINE.map(([key, label], j) => {
     let state: StepState = "unknown"
     const at = stages.lastIndexOf(key)
-    if (t.status !== "UNKNOWN" && intact && current >= -1 && t.stage !== "ABANDONED") {
+    if (t.ci?.state === "MERGED_OBSERVED" && j >= 5) state = "observed"
+    else if (t.status !== "UNKNOWN" && intact && current >= -1 && t.stage !== "ABANDONED") {
       if (j > current) state = "pending"
       else if (j === current && (t.status === "FAILED" || t.status === "BLOCKED")) state = "failed"
       else if (at >= 0) {
@@ -316,6 +323,7 @@ export function readFreshness(s: Pick<StageCState, "generated_at">, fetchedAt: n
 }
 
 export type LoadError = "signed_out" | "forbidden" | "unavailable" | "error"
+export const offerRevokeOnFailure = (kind: LoadError) => kind === "error" || kind === "unavailable"
 /** How a failed read is handled: a sign-out goes to the shell's session handling; 403 is a scope refusal (a Desk token
  *  on a founder-only route), not a sign-out; 404 means the deployed API does not serve this read yet. */
 export function loadError(e: unknown): LoadError {

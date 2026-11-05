@@ -52,7 +52,7 @@ export function reconcilerFresh(raw: { freshness?: unknown; last_attempt_at?: un
 export function reconcilerView(raw: unknown, now: number = Date.now(), paused = false): ReconcilerView {
   const unknown = (detail: string, cadence: string | null = null): ReconcilerView =>
     ({ label: "UNKNOWN", tone: "neutral", detail, last: null, cadence })
-  if (paused || (isObj(raw) && raw.outcome === "PAUSED"))
+  if (paused)
     return { label: "PAUSED", tone: "warning", detail: "Business reconciler / scheduler is paused", last: isObj(raw) ? time(raw.last_attempt_at, now) : null,
       cadence: null }
   if (!isObj(raw)) return unknown("No execution evidence from this API (older API or unreadable response)")

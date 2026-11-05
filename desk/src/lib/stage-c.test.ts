@@ -10,8 +10,8 @@ import { systemChecks } from "./operating.ts"
 import { toneOf } from "./format.ts"
 import type { DeskState } from "./api.ts"
 import {
-  canRevokeStanding, ciView, grantView, isRevoked, lastReadyPr, loadError, na, nextAction, parseStageC, prHref, readFreshness, reviewView,
-  steps, testView, workerReadyView, preflightView, privacyGateLabel, acceptanceView, driftView, blockerLabel, PIPELINE, TASK_STATUS, CLOCK_SKEW_MS, STALE_MS,
+  canRevokeStanding, ciView, grantView, isRevoked, lastReadyPr, loadError, na, nextAction, offerRevokeOnFailure, parseStageC, prHref, readFreshness, reviewView,
+  steps, standingRevokeMessage, testView, workerReadyView, preflightView, privacyGateLabel, acceptanceView, driftView, blockerLabel, PIPELINE, TASK_STATUS, CLOCK_SKEW_MS, STALE_MS,
 } from "./stage-c.ts"
 
 const SHA = "c".repeat(40), HEAD = "1".repeat(40), OLD = "2".repeat(40), FP = "a".repeat(64), FP2 = "b".repeat(64)
@@ -29,14 +29,15 @@ const taskRaw = (over: Record<string, unknown> = {}) => ({
 const raw = (over: Record<string, unknown> = {}) => ({
   version: 1, generated_at: NOW, state: "READY", blockers: ["task_needs_founder"],
   next_action: "review_task", last_ready_pr: { task_key: "TASK-0101", number: 61, head_sha: HEAD, stage: "READY_TO_MERGE" },
-  runtime: { api_sha: SHA, worker_sha: SHA, sha_agree: true, worker_heartbeat: "HEALTHY", write_enabled: true, worker_ready: true,
+  runtime: { api_sha: SHA, worker_sha: SHA, reasoner_sha: null, sha_agree: null, worker_heartbeat: "HEALTHY", write_enabled: true, worker_ready: true,
     agents_paused: false, acceptance: { source_sha: SHA, accepted_at: NOW, valid: true },
-    preflight: { status: "PASS", checked_at: NOW, source_sha: SHA }, host_facts: "NOT_VERIFIED" },
+    preflight: { status: "PASS", checked_at: NOW, source_sha: SHA },
+    host_facts: { host_checks: "NOT_VERIFIED", reasoner_sha: "NOT_VERIFIED", api_sha: "RECORDED", worker_sha: "RECORDED" } },
   authorizations: { one_task: null, standing: { source_sha: SHA, paths: ["tests/test_metrics.py"], expires_at: NOW, max_per_day: 2,
     used_today: 0, remaining_today: 2, revoked: false, issuer: "founder", status: "ACTIVE" } },
   tasks: [taskRaw()],
   metrics: { tasks: { started: 1, reached_ready_to_merge: 1, stopped: 0, in_progress: 0, abandoned: 0 }, attempts: { total: 1, failed: 0 },
-    model_calls: { total: 2, coder: null, reviewer: null }, minutes: 10, tokens: null, usd_recorded: 0, usd_note: "excludes_subscription_cost",
+    model_calls: { total: 2 }, minutes: 10, tokens: null, usd_recorded: 0, usd_note: "excludes_subscription_cost",
     quota_stops: 0, truncated: false },
   ...over,
 })
@@ -53,7 +54,21 @@ test("a complete ready-to-merge task: every step up to merge done, approved, CI 
   assert.equal(prHref(t.pr!.number), "https://github.com/Seerxo/Acthelm/pull/61")
   assert.equal(lastReadyPr(s)?.task_key, "TASK-0101")
   assert.equal(preflightView(s.runtime.preflight).badge, "READY")
-  assert.equal(driftView(s.runtime).label, "No drift")
+  assert.deepEqual(driftView(s.runtime), { badge: "NOT_VERIFIED", label: "API = worker; reasoner not verified" })
+})
+
+test("matching API and worker commits do not verify the reasoner; known drift and missing commits stay distinct", () => {
+  for (const [api_sha, worker_sha, sha_agree, badge, label] of [
+    [SHA, SHA, null, "NOT_VERIFIED", "API = worker; reasoner not verified"],
+    [SHA, OLD, false, "BLOCKED", "Drift: API and worker differ"],
+    [SHA, OLD, null, "BLOCKED", "Drift: API and worker differ"],
+    [SHA, SHA, false, "BLOCKED", "SHA disagreement reported"],
+    [null, SHA, null, "UNKNOWN", "Unknown"],
+    [SHA, null, null, "UNKNOWN", "Unknown"],
+  ] as const) {
+    const rt = parseStageC(raw({ runtime: { ...raw().runtime, api_sha, worker_sha, sha_agree } })).runtime
+    assert.deepEqual(driftView(rt), { badge, label })
+  }
 })
 
 test("a running task is in progress at its stage; later steps pending, nothing claimed done after it", () => {
@@ -233,6 +248,18 @@ test("401 and the Access sign-in page go to the shell's sign-out handling; 403 a
   assert.equal(loadError(new TypeError("Failed to fetch")), "error")
 })
 
+test("a failed initial state read offers emergency Revoke only for an error or unavailable endpoint", () => {
+  for (const [kind, offered] of [["error", true], ["unavailable", true], ["signed_out", false], ["forbidden", false]] as const)
+    assert.equal(offerRevokeOnFailure(kind), offered, kind)
+})
+
+test("the standing revoke toast reports whether a live grant was actually revoked", () => {
+  assert.equal(standingRevokeMessage({ revoked: true }), "Standing authorization revoked")
+  assert.equal(standingRevokeMessage({ revoked: false }), "No live standing grant — nothing was revoked")
+  for (const malformed of [undefined, null, {}, { revoked: null }, { revoked: "false" }, { revoked: 1 }])
+    assert.throws(() => standingRevokeMessage(malformed), /Invalid standing revoke response/)
+})
+
 test("pipeline completion requires recorded history, task status and evidence, not just READY_TO_MERGE", () => {
   const parse = (over: Record<string, unknown>) => parseStageC(raw({ tasks: [taskRaw(over)] })).tasks![0]
   const bare = parseStageC({ tasks: [{ stage: "READY_TO_MERGE" }] }).tasks![0]
@@ -312,11 +339,15 @@ test("guidance uses the backend next_action allowlist without inferring or reord
   }
 })
 
-test("MERGED_OBSERVED is neutral observation and cannot complete CI or ready-to-merge", () => {
-  const t = parseStageC(raw({ tasks: [taskRaw({ stage: "MERGED", status: "DONE", ci: { state: "MERGED_OBSERVED", sha: HEAD } })] })).tasks![0]
-  assert.equal(t.ci!.state, "MERGED_OBSERVED")
-  assert.deepEqual(ciView(t), { kind: "observed", label: "Observed after merge", tone: "neutral", sha: HEAD })
-  assert.ok(steps(t).slice(5).every(s => s.state === "not_verified"))
+test("MERGED_OBSERVED renders CI, ready-to-merge and merged as observed, never verified completion", () => {
+  for (const sha of [HEAD, OLD, null]) {
+    for (const history of [taskRaw({ stage: "MERGED" }).history, [{ stage: "MERGED", at: NOW }], null]) {
+      const t = parseStageC(raw({ tasks: [taskRaw({ stage: "MERGED", status: "DONE", history, ci: { state: "MERGED_OBSERVED", sha } })] })).tasks![0]
+      assert.equal(t.ci!.state, "MERGED_OBSERVED")
+      assert.deepEqual(ciView(t), { kind: "observed", label: "Observed after merge", tone: "neutral", sha })
+      assert.deepEqual(steps(t).slice(5).map(s => [s.key, s.state]), [["CI", "observed"], ["READY_TO_MERGE", "observed"], ["MERGED", "observed"]])
+    }
+  }
 })
 
 test("fresh retrieval of an old generated_at is stale; future clock skew has a bounded allowance", () => {
@@ -342,13 +373,12 @@ test("business reconciler / scheduler pause overrides a completed heartbeat on A
     assert.equal(view.label, "PAUSED")
     assert.notEqual(view.tone, "success")
   }
-  assert.equal(reconcilerView({ ...completed, outcome: "PAUSED" }, at).label, "PAUSED")
-  for (const [agents_paused, outcome] of [[true, "COMPLETED"], [false, "PAUSED"]] as const) {
+  for (const [agents_paused, value] of [[true, "PAUSED"], [false, "Running"]] as const) {
     const state = { control: { agents_paused }, generated_at: NOW, incidents: [], health: { resources: {}, services: [] },
-      reconciler_execution: { ...completed, outcome } } as unknown as DeskState
+      reconciler_execution: completed } as unknown as DeskState
     const check = systemChecks(state, at).find(c => c.key === "reconciler")!
-    assert.equal(check.value, "PAUSED")
-    assert.notEqual(check.tone, "success")
+    assert.equal(check.value, value)
+    assert.equal(check.tone, agents_paused ? "warning" : "success")
   }
 })
 

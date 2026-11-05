@@ -8,7 +8,7 @@ import { ago, humanize, when } from "@/lib/format"
 import { freshLabel } from "@/lib/freshness"
 import {
   acceptanceView, BADGE_TONE, blockerLabel, canRevokeStanding, ciView, driftView, grantView, heartbeatView, isRevoked, lastReadyPr, loadError, na,
-  nextAction, parseStageC, preflightView, privacyGateLabel, prHref, readFreshness, reviewView, short, steps, testView, workerReadyView,
+  nextAction, offerRevokeOnFailure, parseStageC, preflightView, privacyGateLabel, prHref, readFreshness, reviewView, short, steps, testView, workerReadyView,
   type LoadError, type StageCState, type StepState, type Task, type View,
 } from "@/lib/stage-c"
 import { cn } from "@/lib/utils"
@@ -28,7 +28,7 @@ const Note = ({ children }: { children: ReactNode }) =>
 
 const STEP: Record<StepState, [string, "success" | "info" | "danger" | "neutral" | "warning"]> = {
   completed: ["Completed", "success"], in_progress: ["In progress", "info"], failed: ["Failed", "danger"], pending: ["Pending", "neutral"], unknown: ["Unknown", "warning"],
-  not_verified: ["Not verified", "warning"],
+  not_verified: ["Not verified", "warning"], observed: ["Observed", "neutral"],
 }
 
 export function StageCPage() {
@@ -39,6 +39,7 @@ export function StageCPage() {
   const [failure, setFailure] = useState<{ kind: LoadError; message: string } | null>(null)
   const [loading, setLoading] = useState(false)
   const request = useRef(0)
+  const signedOutReloaded = useRef(false)
 
   const read = useCallback(async () => {
     const id = ++request.current
@@ -47,12 +48,17 @@ export function StageCPage() {
       const raw = await api<unknown>("/stage-c/state")
       if (id !== request.current) return
       setState(parseStageC(raw)); setFetchedAt(Date.now()); setFailure(null)
+      signedOutReloaded.current = false
     } catch (e) {
       if (id !== request.current) return
       const kind = loadError(e)
       setFailure({ kind, message: (e as Error).message })
       // A sign-out: drop what is shown and let the shell's own read meet the 401 and end the session (state.tsx).
-      if (kind === "signed_out") { setState(null); void reload() }
+      if (kind === "signed_out") {
+        setState(null)
+        // The shell may answer successfully and trigger another read; reload only once until this episode ends.
+        if (!signedOutReloaded.current) { signedOutReloaded.current = true; void reload() }
+      } else signedOutReloaded.current = false
     } finally { if (id === request.current) setLoading(false) }
   }, [reload])
 
@@ -69,7 +75,7 @@ export function StageCPage() {
   const header = <PageHeader title="Stage C" description="The autonomous coding loop, as the backend reports it. Missing evidence reads unknown, never done."
     meta={state && <span className={cn("num", marker && "text-warning")} role="status">
       {marker ? `${humanize(marker)} · ` : ""}{fetchedAt ? `read ${ago(fetchedAt)} ago` : ""}</span>}>
-    <Button variant="outline" className="h-10" onClick={() => void read()} disabled={loading} aria-label="Refresh Stage C state">
+    <Button variant="outline" className="h-11" onClick={() => void read()} disabled={loading} aria-label="Refresh Stage C state">
       <RefreshCw className={cn(loading && "animate-spin")} />Refresh</Button>
   </PageHeader>
 
@@ -78,7 +84,10 @@ export function StageCPage() {
     {!failure ? <div className="grid gap-3" aria-busy="true" aria-label="Loading Stage C state"><Skeleton className="h-28" /><Skeleton className="h-48" /></div>
       : <div role="alert"><EmptyState title={failure.kind === "forbidden" ? "Founder sign-in required"
           : failure.kind === "unavailable" ? "Not available on this API" : failure.kind === "signed_out" ? "Signed out" : "Stage C state unavailable"}
-          action={<Button variant="outline" onClick={() => void read()}><RefreshCw />Try again</Button>}>
+          action={<div className="flex flex-wrap justify-center gap-2">
+            <Button variant="outline" className="h-11" onClick={() => void read()}><RefreshCw />Try again</Button>
+            {offerRevokeOnFailure(failure.kind) && <RevokeStanding onDone={() => void read()} />}
+          </div>}>
           {failure.kind === "forbidden" ? "This read is founder only; a Desk token cannot open it."
             : failure.kind === "unavailable" ? "The deployed API does not serve /stage-c/state yet."
             : `${failure.message}. Nothing is shown until the API answers; no value is guessed.`}</EmptyState></div>}
@@ -108,6 +117,19 @@ function Overview({ s }: { s: StageCState }) {
       action={<Badge v={{ badge: s.state, label: humanize(s.state) }} pill />}>
       <div className="grid gap-4 lg:grid-cols-2">
         <Facts items={[
+          ["Next founder action", next ? <span key="n" className="font-medium">{next}</span> : <Muted key="n">No action reported</Muted>],
+          ["Blockers", s.blockers === null ? <Badge key="b" v={{ badge: "UNKNOWN", label: "Not reported" }} />
+            : s.blockers.length ? <ul key="b" className="grid gap-0.5">{s.blockers.map((b, i) => <li key={`${b}-${i}`}>{blockerLabel(b)}</li>)}</ul>
+            : <Muted key="b">None reported</Muted>],
+          ["One-task grant", <span key="o" className="flex flex-wrap items-center gap-2">{grant(s.authorizations.one_task)}
+            {s.authorizations.one_task?.task_key && <TaskKey k={s.authorizations.one_task.task_key} />}</span>],
+          ["Standing grant", grant(s.authorizations.standing)],
+          ["Running work", running === null ? <Badge key="rw" v={{ badge: "UNKNOWN", label: "Not reported" }} />
+            : running.length ? <span key="rw" className="flex flex-wrap gap-2">{running.map((t, i) => <TaskKey key={t.key ?? i} k={t.key ?? "unknown key"} />)}</span>
+            : <Muted key="rw">None</Muted>],
+          ["Last ready / merged PR", last ? <PrLink key="l" number={last.number} /> : <Muted key="l">Not reported</Muted>],
+        ]} />
+        <Facts items={[
           ["State", <Badge key="s" v={{ badge: s.state, label: humanize(s.state) }} pill />],
           ["Operating mode", mode],
           ["Worker heartbeat", <Badge key="h" v={heartbeatView(rt.worker_heartbeat)} />],
@@ -121,19 +143,6 @@ function Overview({ s }: { s: StageCState }) {
             {rt.preflight.checked_at && <Muted>checked {ago(rt.preflight.checked_at)} ago</Muted>}<Sha s={rt.preflight.source_sha} /></span>],
           ["Host facts", <Badge key="hf" v={{ badge: "NOT_VERIFIED", label: "Not verified by the API" }} />],
         ]} />
-        <Facts items={[
-          ["One-task grant", <span key="o" className="flex flex-wrap items-center gap-2">{grant(s.authorizations.one_task)}
-            {s.authorizations.one_task?.task_key && <TaskKey k={s.authorizations.one_task.task_key} />}</span>],
-          ["Standing grant", grant(s.authorizations.standing)],
-          ["Running work", running === null ? <Badge key="rw" v={{ badge: "UNKNOWN", label: "Not reported" }} />
-            : running.length ? <span key="rw" className="flex flex-wrap gap-2">{running.map((t, i) => <TaskKey key={t.key ?? i} k={t.key ?? "unknown key"} />)}</span>
-            : <Muted key="rw">None</Muted>],
-          ["Blockers", s.blockers === null ? <Badge key="b" v={{ badge: "UNKNOWN", label: "Not reported" }} />
-            : s.blockers.length ? <ul key="b" className="grid gap-0.5">{s.blockers.map((b, i) => <li key={`${b}-${i}`}>{blockerLabel(b)}</li>)}</ul>
-            : <Muted key="b">None reported</Muted>],
-          ["Last ready / merged PR", last ? <PrLink key="l" number={last.number} /> : <Muted key="l">Not reported</Muted>],
-          ["Next founder action", next ? <span key="n" className="font-medium">{next}</span> : <Muted key="n">No action reported</Muted>],
-        ]} />
       </div>
     </Section>
   )
@@ -142,7 +151,7 @@ function Overview({ s }: { s: StageCState }) {
 function PrLink({ number }: { number: number | null }) {
   const href = prHref(number)
   if (!href) return <Muted>No PR number recorded</Muted>
-  return <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 font-medium underline-offset-2 hover:underline focus-visible:underline">
+  return <a href={href} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center gap-1 px-2 font-medium underline-offset-2 hover:underline focus-visible:underline">
     PR #{number}<ExternalLink className="size-3" aria-hidden /><span className="sr-only">(opens GitHub)</span></a>
 }
 
