@@ -4,6 +4,7 @@
 import { useState } from "react"
 import { AlertTriangle, Check, Loader2, Pause, Play, RotateCw, ShieldCheck, ShieldOff, X } from "lucide-react"
 import type { Approval } from "@/lib/api"
+import { standingRevokeMessage } from "@/lib/stage-c"
 import { cn } from "@/lib/utils"
 import { useData, useDesk } from "@/state"
 import { Facts, Status } from "@/components/desk"
@@ -179,6 +180,23 @@ export function RevokeStageC() {
       description={<p>Withdraws the one-task and the standing Stage C authorizations, so no new autonomous coding attempt can start under them.</p>}
       onConfirm={() => void revoke()}>
       <Button variant="outline" disabled={busy} className="h-9 text-destructive hover:text-destructive">{busy ? <Loader2 className="animate-spin" /> : <ShieldOff />}Revoke Stage C authority</Button>
+    </Confirm>
+  )
+}
+
+/** Emergency stop for the standing Stage C authorization only (POST /stage-c/standing/revoke). Always offered while a
+ *  grant may be live, even on stale data. The toast uses the API's {revoked: bool}; `onDone` re-reads the Stage C
+ *  state. No issue or renew control exists on the Desk. */
+export function RevokeStanding({ onDone }: { onDone: () => void }) {
+  const { act } = useDesk()
+  const [busy, setBusy] = useState(false)
+  return (
+    <Confirm title="Revoke the standing Stage C authorization?" action="Revoke standing authorization" destructive
+      description={<p>No new autonomous coding attempt can start under the standing grant. A run already in progress is not stopped by this; pause agents for that. Re-issuing is done on the host, not here.</p>}
+      onConfirm={() => { setBusy(true); void act("/stage-c/standing/revoke", { reason: "emergency revoke from Founder Desk" }, standingRevokeMessage)
+        .then(ok => { if (ok) onDone() }).finally(() => setBusy(false)) }}>
+      <Button variant="outline" disabled={busy} className="h-11 text-destructive hover:text-destructive">
+        {busy ? <Loader2 className="animate-spin" /> : <ShieldOff />}Revoke</Button>
     </Confirm>
   )
 }

@@ -5,7 +5,7 @@
 // resolve to their new home (ALIASES, nav.test.ts).
 
 export const PAGES = ["overview", "approvals", "tasks", "agents", "projects", "project", "finance", "growth",
-  "health", "incidents", "automation", "activity", "memory"] as const
+  "health", "incidents", "automation", "stage-c", "activity", "memory"] as const
 export type Page = (typeof PAGES)[number]
 
 /** Routes from earlier Desk versions (bookmarks, notification links) and where they live now. */
@@ -22,13 +22,13 @@ export interface NavSection { key: SectionKey; label: string; home: Page; tabs: 
 
 export const SECTIONS: NavSection[] = [
   { key: "home", label: "Home", home: "overview", tabs: ["overview", "approvals", "projects", "finance", "growth"], shortcut: "h" },
-  { key: "work", label: "Work", home: "tasks", tabs: ["tasks", "agents", "automation", "activity"], shortcut: "w" },
+  { key: "work", label: "Work", home: "tasks", tabs: ["tasks", "agents", "automation", "stage-c", "activity"], shortcut: "w" },
   { key: "system", label: "System", home: "health", tabs: ["health", "incidents", "memory"], shortcut: "s" },
 ]
 
 export const PAGE_LABEL: Record<Page, string> = {
   overview: "Overview", approvals: "Approvals", tasks: "Tasks", agents: "Agents", projects: "Portfolio", project: "Project",
-  finance: "Finance", growth: "Growth", health: "Status", incidents: "Incidents", automation: "Automation",
+  finance: "Finance", growth: "Growth", health: "Status", incidents: "Incidents", automation: "Automation", "stage-c": "Stage C",
   activity: "Activity", memory: "Memory",
 }
 

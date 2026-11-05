@@ -40,8 +40,8 @@ interface Ctx {
   go: (page: Page, key?: string) => void
   detail: Detail
   open: (d: Detail) => void
-  /** POST and refresh; errors surface as a toast and return false. */
-  act: (path: string, body: unknown, done: string) => Promise<boolean>
+  /** POST and refresh; the success toast may use the response body. Errors surface as a toast and return false. */
+  act: (path: string, body: unknown, done: string | ((result: unknown) => string)) => Promise<boolean>
   /** POST /desk/command: on 201 the command is accepted and a task recorded, nothing more. */
   command: (body: CommandBody) => Promise<SentCommand | null>
   sent: SentCommand[]
@@ -212,11 +212,11 @@ export function DeskProvider({ children }: { children: ReactNode }) {
     location.hash = `/${page}${key ? `/${encodeURIComponent(key)}` : ""}`
   }, [])
 
-  const act = useCallback(async (path: string, body: unknown, done: string) => {
+  const act = useCallback(async (path: string, body: unknown, done: string | ((result: unknown) => string)) => {
     if (!navigator.onLine) { toast.error("Reconnect before making changes."); return false }
     try {
-      await api(path, body)
-      toast.success(done)
+      const result = await api<unknown>(path, body)
+      toast.success(typeof done === "function" ? done(result) : done)
       kick()
       return true
     } catch (e) {
