@@ -53,8 +53,9 @@ _DESK = Path(__file__).resolve().parent / "static" / "desk.html"
 
 
 class _InlineScripts(HTMLParser):
-    """Inline <script> bodies as the browser sees them: an HTML parser, not a regex, so end tags such as
-    `</script >` and attribute quoting cannot make the hashed text differ from what the browser runs."""
+    """Inline <script> bodies, found with an HTML parser rather than a regex, so end tags such as `</script >`
+    and attribute quoting match the browser. ponytail: html.parser does not model the script-data escape states
+    (`<!--<script>` inside a script); the Desk build never emits `<!--` in a script, which a test pins."""
 
     def __init__(self):
         super().__init__(convert_charrefs=False)
@@ -63,7 +64,7 @@ class _InlineScripts(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         if tag == "script":
-            self._body = None if dict(attrs).get("src") else ""
+            self._body = None if "src" in dict(attrs) else ""   # any src, even empty, is not an inline script
 
     def handle_data(self, data):
         if self._body is not None:
