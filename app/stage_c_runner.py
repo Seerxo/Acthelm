@@ -20,6 +20,7 @@ execution plane gets a directory and nothing else:
 Everything the coder leaves behind is untrusted data: coder_diff decides what crosses back.
 Checks pass only on an explicit `{"passed": True}`; anything else is a failure, never success.
 """
+import ast
 import base64
 import bisect
 import json
@@ -34,6 +35,7 @@ import subprocess
 import tempfile
 import time
 import tokenize
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -621,13 +623,12 @@ def _outgoing_credentials(diff: bytes) -> list[str]:
 PRIVACY_BLOCKED, PRIVACY_ERROR = "PRIVACY_GATE_BLOCKED", "PRIVACY_GATE_ERROR"
 PRIVACY_CATEGORIES = {"private_task_text", "credential", "binary", "undecodable", "oversize", "symlink",
                       "submodule", "mode_only", "mode_change", "unreadable", "merge_commit"}
-# ponytail: overlap = 8 consecutive \w-words (casefolded, punctuation and whitespace ignored) or 64 characters of
-# casefolded, whitespace-collapsed text shared with the private task text. Ceiling: a reworded, reordered, translated
-# or encoded copy, or a private fragment shorter than both (a lone name or email), passes. Upgrade path: per-field
-# entity lists (names, emails, ids) supplied by the founder, matched exactly.
+# ponytail: overlap = 8 normalized words or 64 normalized characters shared with founder text.
+# Ceiling: homoglyphs, encodings, junk-word insertion, fragments under the threshold, translation and rewording
+# can pass. Upgrade path: founder-supplied entity lists (names, emails, ids), matched exactly.
 PRIVACY_SHINGLE_WORDS, PRIVACY_SUBSTRING_CHARS = 8, 64
 MAX_PRIVACY_COMMITS = 20
-_WORD = re.compile(r"\w+")
+_WORD = re.compile(r"[^\W_]+")
 
 
 class PrivacyGateError(Exception):
@@ -642,24 +643,19 @@ def _git_bytes(repo: Path, *args: str, protocol: str = "") -> bytes:
 
 
 def _private_texts(task: models.Task) -> list[str]:
-    """All task prose and context strings, including nested values and context paths as given."""
+    """Founder-authored fields and context; improvement is generated operational evidence."""
     texts = []
-    for value in (task.title, task.description, task.objective, task.success_criteria):
+    for value in (task.description, task.objective, task.success_criteria):
         if value is not None and not isinstance(value, str):
             raise PrivacyGateError("task text is unreadable")
         texts.append(value or "")
     if task.context is not None and not isinstance(task.context, dict):
         raise PrivacyGateError("task context is unreadable")
-    # The approved diff fingerprint is intentionally public in _public_text, unlike context prose.
-    public_fingerprint = ((task.context or {}).get("improvement") or {}).get("approval", {}).get("fingerprint")
-    if not isinstance(public_fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", public_fingerprint):
-        public_fingerprint = None
-    stack = [task.context or {}]
+    stack = [{k: v for k, v in (task.context or {}).items() if k != "improvement"}]
     while stack:
         value = stack.pop()
         if isinstance(value, str):
-            if value != public_fingerprint:
-                texts.append(value)
+            texts.append(value)
         elif isinstance(value, dict):
             texts += [k for k in value if isinstance(k, str)]
             stack += value.values()
@@ -669,6 +665,9 @@ def _private_texts(task: models.Task) -> list[str]:
 
 
 def _normalized(text: str) -> str:
+    text = "".join(c for c in unicodedata.normalize("NFKC", text) if unicodedata.category(c) != "Cf")
+    text = re.sub(r"([A-Z])([A-Z][a-z])", r"\1 \2", text)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text).replace("_", " ")
     return " ".join(text.casefold().split())
 
 
@@ -715,25 +714,24 @@ def _commit_files(repo: Path, commit: str) -> tuple[dict[str, list[tuple[int, st
 
 
 class _Public:
-    """Text of the public base commit, loaded once and only when a candidate overlap needs an exemption check."""
+    """Contiguous base code, excluding comments and literals; loaded only for an exemption check."""
 
     def __init__(self, repo: Path, base: str):
         self.repo, self.base, self._identifiers = repo, base, None
 
     def _load(self):
         listing = _git_bytes(self.repo, "ls-tree", "-r", "-z", self.base)
-        blobs, paths, blob_paths = [], [], []
+        blobs, blob_paths = [], []
         for entry in listing.split(b"\0"):
             if entry:
                 meta, path = entry.split(b"\t", 1)
-                paths.append(path.decode("utf-8", "replace"))
                 if meta.split()[1] == b"blob":
                     blobs.append(meta.split()[2])
                     blob_paths.append(path.decode("utf-8"))
         out = subprocess.run(["git", "--no-pager", "-C", str(self.repo), "cat-file", "--batch"],
                              input=b"\n".join(blobs) + b"\n", env=coder_diff._env(), capture_output=True,
                              timeout=120, check=True).stdout
-        identifiers, position = set(), 0
+        identifiers, code_texts, code_words, position = set(), [], [], 0
         for path in blob_paths:
             header_end = out.index(b"\n", position)
             size = int(out[position:header_end].split()[2])
@@ -747,54 +745,90 @@ class _Public:
                 continue   # binary base assets grant no text exemptions
             if path.endswith(".py"):
                 try:
-                    names = {t.string.casefold() for t in tokenize.generate_tokens(io.StringIO(text).readline)
-                             if t.type == tokenize.NAME}
+                    tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+                    code = tokenize.untokenize([t for t in tokens if t.type not in
+                                               (tokenize.COMMENT, tokenize.STRING, tokenize.FSTRING_START,
+                                                tokenize.FSTRING_MIDDLE, tokenize.FSTRING_END)])
                 except (tokenize.TokenError, IndentationError, SyntaxError):
-                    names = set()
-                identifiers |= names
-            else:
-                identifiers |= {w.casefold() for w in _WORD.findall(text)
-                                if "_" in w or re.search(r"[a-z][A-Z]", w)}
-        self._identifiers = identifiers | {w for p in paths for w in _WORD.findall(p.casefold())}
+                    continue   # unparsed code grants no exemptions
+                norm = _normalized(code)
+                code_texts.append(norm)
+                code_words.append(" " + " ".join(_WORD.findall(norm)) + " ")
+                identifiers |= {t.string.casefold() for t in tokens if t.type == tokenize.NAME}
+        # File boundaries cannot manufacture a contiguous public sequence. Other file types grant no exemptions.
+        self._code_text = "\0".join(code_texts)
+        self._code_words = "\0".join(code_words)
+        self._identifiers = identifiers   # diagnostic only; membership never grants an exemption
 
     def exempt_window(self, window: str) -> bool:
-        """Only public identifiers/paths; public prose is never an exemption for private prose."""
+        """The exact normalized character window must occur in base code."""
         if self._identifiers is None:
             self._load()
-        words = _WORD.findall(window)
-        return bool(words) and all(w in self._identifiers for w in words)
+        return window in self._code_text
 
     def exempt_shingles(self, shingles: set[tuple]) -> set[tuple]:
-        """Only shingles made entirely of identifiers/paths already present at base."""
+        """The complete word sequence must occur contiguously in base code."""
         if self._identifiers is None:
             self._load()
-        return {s for s in shingles if all(w in self._identifiers for w in s)}
+        return {s for s in shingles if " " + " ".join(s) + " " in self._code_words}
 
 
 def _private_index(texts: list[str]) -> tuple[set[tuple], set[str]]:
     n, size = PRIVACY_SHINGLE_WORDS, PRIVACY_SUBSTRING_CHARS
     shingles, windows = set(), set()
     for text in texts:
-        words = _WORD.findall(text.casefold())
-        shingles |= {tuple(words[i:i + n]) for i in range(len(words) - n + 1)}
         norm = _normalized(text)
+        words = _WORD.findall(norm)
+        shingles |= {tuple(words[i:i + n]) for i in range(len(words) - n + 1)}
         windows |= {norm[i:i + size] for i in range(len(norm) - size + 1)}
     return shingles, windows
 
 
+def _prose_lines(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Join comment/literal contents without intervening code obscuring their word sequence."""
+    prose = []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO("\n".join(text for _, text in lines)).readline):
+            if token.type == tokenize.COMMENT:
+                text = token.string[1:]
+            elif token.type == tokenize.FSTRING_MIDDLE:
+                text = token.string
+            elif token.type == tokenize.STRING:
+                try:
+                    text = ast.literal_eval(token.string)
+                except (ValueError, SyntaxError):
+                    continue
+                if not isinstance(text, str):
+                    continue
+            else:
+                continue
+            prose.append((lines[token.start[0] - 1][0], text))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass   # keep extracted prose; the complete raw text is always scanned too
+    return prose
+
+
 def _overlaps(label: str, lines: list[tuple[int, str]], private: tuple[set[tuple], set[str]],
               public: _Public) -> list[dict]:
-    """Findings where `lines` share an 8-word shingle or a 64-character run with the private text, minus content
-    consisting only of identifiers/paths already public at the base commit. Credentials have no exemption."""
+    """Scan raw text and joined prose; exemptions require contiguous base code. Credentials have no exemption."""
+    findings = _stream_overlaps(label, lines, private, public)
+    findings += _stream_overlaps(label, _prose_lines(lines), private, public)
+    return [dict(category=c, path=p, line=n) for c, p, n in
+            dict.fromkeys((f["category"], f["path"], f["line"]) for f in findings)]
+
+
+def _stream_overlaps(label: str, lines: list[tuple[int, str]], private: tuple[set[tuple], set[str]],
+                     public: _Public) -> list[dict]:
     n, size = PRIVACY_SHINGLE_WORDS, PRIVACY_SUBSTRING_CHARS
     private_shingles, private_windows = private
     # File lines read as one text: a note wrapped over comment lines still forms a shingle.
     words, word_lines, pieces, offsets, position = [], [], [], [], 0
     for line_no, text in lines:
-        for w in _WORD.findall(text.casefold()):
+        norm = _normalized(text)
+        for w in _WORD.findall(norm):
             words.append(w)
             word_lines.append(line_no)
-        if norm := _normalized(text):
+        if norm:
             pieces.append(norm)
             offsets.append((position, line_no))
             position += len(norm) + 1
@@ -814,21 +848,13 @@ def _overlaps(label: str, lines: list[tuple[int, str]], private: tuple[set[tuple
     joined = " ".join(pieces)
     starts = [o for o, _ in offsets]
     seen = {f["line"] for f in findings if f["category"] == "private_task_text"}
-    tokens = list(_WORD.finditer(joined)) if private_windows else []
-    token_starts, token_ends = [m.start() for m in tokens], [m.end() for m in tokens]
-    exempt_windows = {}
     for i in range(len(joined) - size + 1 if private_windows else 0):
         window = joined[i:i + size]
         if window in private_windows:
             line = offsets[max(0, bisect.bisect_right(starts, i) - 1)][1]
             if line in seen:
                 continue
-            # A window may cut its edge words: the exemption must check the complete words, not discard them.
-            bounds = (bisect.bisect_right(token_ends, i), bisect.bisect_left(token_starts, i + size))
-            if bounds not in exempt_windows:
-                complete = " ".join(m.group() for m in tokens[bounds[0]:bounds[1]])
-                exempt_windows[bounds] = public.exempt_window(complete)
-            if not exempt_windows[bounds]:
+            if not public.exempt_window(window):
                 seen.add(line)
                 findings.append({"category": "private_task_text", "path": label, "line": line})
     return findings
@@ -857,18 +883,7 @@ def _privacy_gate(worktree: Path, base: str, sha: str, task: models.Task, public
             raise PrivacyGateError("unreadable")
         if _git_bytes(worktree, "rev-parse", "--is-shallow-repository").strip() != b"false":
             raise PrivacyGateError("unreadable")
-        texts = _private_texts(task)
-        context_paths = ((task.context or {}).get("stage_c") or {}).get("context", [])
-        if not isinstance(context_paths, list) or len(context_paths) > MAX_CONTEXT_FILES:
-            raise PrivacyGateError("unreadable")
-        for path in context_paths:
-            if not coder_source._safe_path(path):
-                raise PrivacyGateError("unreadable")
-            source = f"{base}:{path}"
-            if int(_git_bytes(worktree, "cat-file", "-s", source)) > coder_diff.MAX_TOTAL_BYTES:
-                raise PrivacyGateError("unreadable")
-            texts.append(_git_bytes(worktree, "cat-file", "blob", source).decode("utf-8"))
-        private = _private_index(texts)
+        private = _private_index(_private_texts(task))
         public = _Public(worktree, base)
         exclude = [f"^{base}"]
         if remote is not None:
@@ -1076,6 +1091,10 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
         except Exception:
             moved = True
         if moved:
+            try:   # restore the same retry state as a blocked scan
+                _git(worktree, "reset", "-q", "--soft", job.base)
+            except Exception:
+                pass
             return _stop(db, PRIVACY_ERROR, "the scanned commit changed before the push; not published")
         try:
             # The lease is checked atomically by the remote. First publish: an empty expected
@@ -1083,7 +1102,7 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
             # an existing branch is rejected). Repair: the expected value is the commit this task
             # published last, so a branch anyone else pushed to is rejected, never overwritten.
             lease = f"--force-with-lease=refs/heads/{branch}:{remote_expected}"
-            _git(worktree, "push", "--no-verify", "--porcelain", lease,
+            _git(worktree, "-c", "push.followTags=false", "push", "--no-verify", "--porcelain", lease,
                  remote, f"{commit}:refs/heads/{branch}", protocol=protocol)
             remote_head = _git(worktree, "ls-remote", remote, f"refs/heads/{branch}",
                                protocol=protocol).split("\t")[0]
