@@ -114,12 +114,12 @@ def test_the_reasoner_image_carries_only_stdlib_modules_it_copies():
     probe = ("import sys, app.reasoner; "
              "bad = sorted(m for m in sys.modules if m.split('.')[0] in "
              "{'httpx','sqlalchemy','fastapi','pydantic','yaml','psycopg'} or "
-             "(m.startswith('app.') and m not in ('app.reasoner','app.providers','app.liveness'))); print(bad)")
+             "(m.startswith('app.') and m not in ('app.reasoner','app.providers','app.liveness','app.redact'))); print(bad)")
     out = subprocess.run([sys.executable, "-c", probe], cwd=root, capture_output=True, text=True)
     assert out.stdout.strip() == "[]", out.stdout + out.stderr
     docker = (root / "Dockerfile").read_text()
     stage = docker[docker.index("AS reasoner"):docker.index("AS egress")]
-    assert "COPY app/__init__.py app/liveness.py app/providers.py app/reasoner.py ./app/" in stage
+    assert "COPY app/__init__.py app/liveness.py app/providers.py app/reasoner.py app/redact.py ./app/" in stage
     assert "pip install" not in stage and " gh" not in stage and " git" not in stage
     worker = docker[docker.index("AS worker"):docker.index("AS coder")]
     # Break caught: a model CLI back in the container that holds DATABASE_URL and GH_TOKEN.

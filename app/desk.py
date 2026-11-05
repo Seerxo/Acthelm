@@ -15,6 +15,7 @@ from pathlib import Path
 
 from app import business_reconciler, enums, goals, metrics_store, models, reconciler_heartbeat, watchdog, worker
 from app.notify import NotificationService
+from app.redact import MAX_SCAN_CHARS, redact
 
 COST_POLICY = Path(__file__).resolve().parent.parent / "agents" / "cost_policy.yaml"
 ROOT = Path(__file__).resolve().parent.parent
@@ -44,16 +45,61 @@ def _iso(value):
     return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).isoformat()
 
 
+MAX_SCAN = MAX_SCAN_CHARS
+
+
+def _clean(text, limit: int | None = None) -> str | None:
+    """Stored provider/model text, redacted again on the way out: rows written before write-time redaction are not.
+    Redacted first, then bounded."""
+    return None if text is None else redact(str(text))[:limit]
+
+
 def _run(row: models.AgentRun, task_key: str | None = None) -> dict:
+    # No raw model summary (`result`): the Desk never shows it.
     return {
         "id": row.id, "task": task_key, "status": row.status.value,
-        "provider": row.provider, "model_class": row.model,
+        "provider": row.provider, "model_class": _clean(row.model),
         "started_at": _iso(row.started_at), "ended_at": _iso(row.ended_at),
-        "cost_usd": float(row.estimated_cost_usd or 0), "result": row.result,
-        "error": row.error,
+        "cost_usd": float(row.estimated_cost_usd or 0),
+        "error": _clean(row.error),
         "supervisor_verdict": row.supervisor_verdict.value if row.supervisor_verdict else None,
-        "supervisor_notes": row.supervisor_notes,
+        "supervisor_notes": _clean(row.supervisor_notes),
     }
+
+
+_EVIDENCE_SHOWN = ("pr", "pr_number", "commit", "ci_state", "failed_check", "verdict")   # desk/src/lib/pipeline.ts
+
+
+def _scalar(value):
+    return _clean(value, 300) if isinstance(value, str) else value if isinstance(value, (int, float, bool)) else None
+
+
+def _context_view(context) -> dict | None:
+    """What the Desk reads from task.context (lib/ready.ts, lib/pipeline.ts), nothing else: no previous diff,
+    failures, findings, approval or verify policy."""
+    if not isinstance(context, dict):
+        return None
+    view = {k: _scalar(context[k]) for k in ("write", "autonomous", "source") if k in context}
+    imp = context.get("improvement")
+    if isinstance(imp, dict):
+        history = imp.get("history") if isinstance(imp.get("history"), list) else []
+        view["improvement"] = {"stage": _scalar(imp.get("stage")), "history": [
+            {"stage": _scalar(h.get("stage")), "at": _scalar(h.get("at")),
+             "evidence": {k: _scalar(ev[k]) for k in _EVIDENCE_SHOWN if k in ev}}
+            for h in history if isinstance(h, dict)
+            for ev in [h.get("evidence") if isinstance(h.get("evidence"), dict) else {}]]}
+    return view or None
+
+
+def _artifacts_view(artifacts) -> dict | None:
+    """The deliverable (`actions`, lib/deliverable.ts) and delivery identifiers; never raw model evidence."""
+    if not isinstance(artifacts, dict):
+        return None
+    view = {k: _scalar(artifacts[k]) for k in ("pr", "commit", "branch", "run_id") if k in artifacts}
+    if isinstance(artifacts.get("actions"), list):
+        view["actions"] = [_clean(a, worker.MAX_ACTION_CHARS) for a in artifacts["actions"][:worker.MAX_ACTIONS]
+                           if isinstance(a, str)]
+    return view or None
 
 
 def origin(task: models.Task) -> dict:
@@ -82,7 +128,7 @@ def _task_summary(task: models.Task, agents: dict[int, models.Agent],
     project = projects.get(task.project_id)
     unit = units.get(task.business_unit_id)
     return {
-        "key": task.key, "title": task.title, "status": task.status.value,
+        "key": task.key, "title": _clean(task.title), "status": task.status.value,
         "priority": task.priority.value, "risk": task.risk_level.value,
         "agent": agent.key if agent else None,
         "project": project.key if project else None,
@@ -142,11 +188,11 @@ def _agent_summary(agent: models.Agent, spec: AgentSpec, tasks: list[models.Task
         "team": spec.team, "reports_to": spec.reports_to,
         "business_units": spec.business_units,
         "enabled": agent.enabled, "status": status,
-        "current_task": ({"key": current.key, "title": current.title,
+        "current_task": ({"key": current.key, "title": _clean(current.title),
                           "status": current.status.value} if current else None),
         "last_run": _iso(runs[0].started_at) if runs else None,
         "last_success": _iso(agent.last_success_at or last_success),
-        "last_error": agent.last_error or next((r.error for r in runs if r.error), None),
+        "last_error": _clean(agent.last_error or next((r.error for r in runs if r.error), None), 300),
         "cost_today_usd": round(cost, 4), "model_class": spec.model_class,
     }
 
@@ -205,8 +251,8 @@ def needs_you(approvals, incidents, open_tasks, w: dict, backup, paused: bool,
     items = []
 
     def add(kind, level, title, why, affected, since, evidence, action, page, key=None):
-        items.append({"kind": kind, "rank": _RANK[kind], "level": level, "title": title,
-                      "why": why, "affected": affected, "since": _iso(since) if isinstance(since, datetime) else since,
+        items.append({"kind": kind, "rank": _RANK[kind], "level": level, "title": _clean(title),
+                      "why": _clean(why), "affected": affected, "since": _iso(since) if isinstance(since, datetime) else since,
                       "evidence": evidence, "action": action, "target": {"page": page, "key": key}})
 
     for i in incidents:
@@ -329,7 +375,7 @@ def current_priority(goals, open_tasks, agents_by_id, progress_of=None) -> dict 
     task = next((t for t in open_tasks if t.priority in (enums.Priority.P0, enums.Priority.P1)), None)
     if task:
         agent = agents_by_id.get(task.assigned_agent_id)
-        return {"kind": "task", "key": task.key, "title": task.title, "why": task.objective,
+        return {"kind": "task", "key": task.key, "title": _clean(task.title), "why": _clean(task.objective),
                 "success": task.success_criteria, "owner": agent.key if agent else None,
                 "status": task.status.value, "priority": task.priority.value}
     return None
@@ -351,12 +397,13 @@ def improvements(tasks: list) -> list[dict]:
         ev = {}
         for step in imp.get("history", []):
             ev.update(step.get("evidence") or {})
-        out.append({"task": t.key, "title": t.title, "stage": imp["stage"],
+        out.append({"task": t.key, "title": _clean(t.title), "stage": _scalar(imp["stage"]),
                     "updated_at": imp["history"][-1]["at"] if imp.get("history") else None,
-                    **{k: ev.get(k) for k in ("repository", "branch", "pr_number", "pr_state",
-                                              "ci_state", "failed_check", "repairs",
-                                              "review_verdict", "risk", "expected_effect",
-                                              "verified_at")}})
+                    **{k: _scalar(ev.get(k))
+                       for k in ("repository", "branch", "pr_number", "pr_state",
+                                 "ci_state", "failed_check", "repairs",
+                                 "review_verdict", "risk", "expected_effect",
+                                 "verified_at")}})
     return sorted(out, key=lambda i: i["updated_at"] or "", reverse=True)
 
 
@@ -496,7 +543,7 @@ def build_state(db: Session, specs: dict[str, AgentSpec], paused: bool) -> dict:
             "type": source_event.event_type,
             "severity": (latest or {}).get("severity", source_event.severity.value),
             "title": (latest or {}).get("title") or source_payload.get("title") or source_event.event_type,
-            "detail": (latest or {}).get("detail") or source_payload.get("detail"),
+            "detail": _clean((latest or {}).get("detail") or source_payload.get("detail"), 300),
             "observed_at": (latest or {}).get("observed_at") or source_payload.get("last_seen_at"),
             "episode": condition_state.episode,
             "delivery_status": condition_state.delivery_status,
@@ -623,12 +670,12 @@ def build_state(db: Session, specs: dict[str, AgentSpec], paused: bool) -> dict:
              "created_at": _iso(a.created_at)} for a in approvals
         ],
         "incidents": [
-            {"key": i.key, "title": i.title, "description": i.description,
+            {"key": i.key, "title": i.title, "description": _clean(i.description),
              "business_unit": unit_of(service_id=i.service_id, project_id=i.project_id),
              "service": service_by_id[i.service_id].name if i.service_id in service_by_id else None,
              "severity": i.severity.value, "status": i.status.value,
              "detected_by": i.detected_by, "started_at": _iso(i.started_at),
-             "root_cause": i.root_cause, "founder_notified": i.id in delivered_incidents}
+             "root_cause": _clean(i.root_cause), "founder_notified": i.id in delivered_incidents}
             for i in incidents
         ],
         "health": {
@@ -660,8 +707,8 @@ def build_state(db: Session, specs: dict[str, AgentSpec], paused: bool) -> dict:
             {"id": e.id, "type": e.event_type, "source": e.source,
              "severity": e.severity.value, "at": _iso(e.occurred_at),
              "notified": e.notified, "notify_reason": e.notify_reason,
-             "title": (e.payload or {}).get("title") or e.event_type,
-             "detail": (e.payload or {}).get("detail") or (e.payload or {}).get("message"),
+             "title": _clean((e.payload or {}).get("title")) or e.event_type,
+             "detail": _clean((e.payload or {}).get("detail") or (e.payload or {}).get("message"), 300),
              "latest_observation": _latest_watchdog_observation(e, condition_observations),
              "task": task_by_id[e.task_id].key if e.task_id in task_by_id else None,
              "business_unit": unit_of(unit_id=e.business_unit_id, service_id=e.service_id,
@@ -726,23 +773,20 @@ def agent_detail(db: Session, agent: models.Agent, spec: AgentSpec, paused: bool
     return {
         **summary,
         "unattended_tasks": unattended,
-        "identity": {
+        "identity": {   # what detail.tsx shows; ownership, forbidden tools and context policy stay server-side
             "description": spec.description, "capabilities": spec.capabilities,
-            "owns": spec.owns, "skills": spec.skills,
-            "allowed_tools": spec.allowed_tools, "forbidden_tools": spec.forbidden_tools,
-            "business_units": spec.business_units, "projects": spec.projects,
-            "prompt_version": spec.prompt_version,
+            "skills": spec.skills, "allowed_tools": spec.allowed_tools,
         },
         "schedule": spec.schedule, "triggers": spec.triggers,
-        "memory_policy": spec.memory_policy, "context_policy": spec.context_policy,
-        "recent_tasks": [{"key": t.key, "title": t.title, "status": t.status.value,
+        "memory_policy": spec.memory_policy,
+        "recent_tasks": [{"key": t.key, "title": _clean(t.title), "status": t.status.value,
                           "priority": t.priority.value} for t in tasks],
         "recent_runs": [_run(row, key) for row, key in run_rows],
-        "recent_learnings": [{"title": x.title, "lesson": x.lesson, "status": x.status.value,
+        "recent_learnings": [{"title": _clean(x.title), "lesson": _clean(x.lesson), "status": x.status.value,
                               "created_at": _iso(x.created_at)} for x in learnings],
-        "notebook": [{"note": n.note, "refs": n.reference_count,
+        "notebook": [{"note": _clean(n.note), "refs": n.reference_count,
                       "last_seen_at": _iso(n.last_seen_at)} for n in notes],
-        "errors": [r.error for r in runs if r.error][:10],
+        "errors": [_clean(r.error) for r in runs if r.error][:10],
     }
 
 
@@ -765,23 +809,23 @@ def task_detail(db: Session, task: models.Task) -> dict:
         .order_by(models.AuditLog.id).limit(1)).scalar_one_or_none()
     goal = db.get(models.Goal, task.goal_id) if task.goal_id else None
     return {
-        "key": task.key, "title": task.title, "description": task.description,
-        "objective": task.objective, "status": task.status.value,
+        "key": task.key, "title": _clean(task.title), "description": _clean(task.description),
+        "objective": _clean(task.objective), "status": task.status.value,
         "priority": task.priority.value, "risk": task.risk_level.value,
         "assigned_agent": agent.key if agent else None,
         "project": project.key if project else None,
         "business_unit": unit.key if unit else None,
-        "success_criteria": task.success_criteria, "context": task.context,
-        "origin": {**origin(task), "reason": created},
+        "success_criteria": task.success_criteria, "context": _context_view(task.context),
+        "origin": {**origin(task), "reason": _clean(created)},
         "goal": {"id": goal.id, "title": goal.title, "status": goal.status.value} if goal else None,
         "approval_required": task.approval_required,
         # Attempts used and allowed: the worker stops retrying at the limit (the Desk says so before Mark READY).
         "retry_count": task.retry_count, "max_attempts": task.max_attempts,
         "dependencies": [{"key": d.key, "status": d.status.value} for d in dependencies],
         "runs": [_run(r, task.key) for r in run_rows],
-        "artifacts": task.artifacts, "result": task.result, "error": task.error,
+        "artifacts": _artifacts_view(task.artifacts), "result": _clean(task.result), "error": _clean(task.error),
         "supervisor": ({"verdict": verdict.supervisor_verdict.value,
-                        "notes": verdict.supervisor_notes} if verdict else None),
+                        "notes": _clean(verdict.supervisor_notes)} if verdict else None),
         "created_at": _iso(task.created_at), "started_at": _iso(task.started_at),
         "completed_at": _iso(task.completed_at),
     }

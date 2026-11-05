@@ -471,7 +471,8 @@ def test_agent_and_task_details_are_bounded_to_persistent_state():
         assert a["recent_learnings"][0]["title"] == "Checkout learning"
         assert t["dependencies"] == [{"key": "TASK-0041", "status": "DONE"}]
         assert t["runs"][0]["status"] == "STARTED"
-        assert t["artifacts"] == {"report": "r.md"}
+        # Only the projections the Desk reads (app/desk.py _context_view, _artifacts_view): raw keys stay server-side.
+        assert t["artifacts"] is None and t["context"] is None
         # Break caught: reconciler/router work looks the same as the founder's own.
         assert t["origin"]["by"] == task.created_by and t["goal"] is None
 

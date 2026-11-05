@@ -96,4 +96,4 @@ def response(request: Request) -> StreamingResponse | JSONResponse:
             _open -= 1
 
     return StreamingResponse(body(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"})
+                             headers={"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"})

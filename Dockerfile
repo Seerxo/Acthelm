@@ -72,7 +72,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm ca-c
     && useradd --create-home --uid 10001 worker \
     && install -d -o worker -g worker -m 0700 /home/worker/.claude /home/worker/.codex
 WORKDIR /app
-COPY app/__init__.py app/liveness.py app/providers.py app/reasoner.py ./app/
+COPY app/__init__.py app/liveness.py app/providers.py app/reasoner.py app/redact.py ./app/
 USER worker
 ENV HOME=/home/worker PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 CMD ["python", "-m", "app.reasoner"]
