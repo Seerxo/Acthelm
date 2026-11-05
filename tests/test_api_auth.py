@@ -146,6 +146,48 @@ def test_the_host_gateway_is_trusted_only_when_configured():
     assert api_auth.caller("10.0.6.1", None, {**TOK, "API_HOST_IPS": ""}) == "anonymous"
 
 
+@pytest.mark.parametrize("base_url", ["http://localhost:8099", "http://127.0.0.1:8099", "http://api.example.invalid"])
+@pytest.mark.parametrize("mode", ["log", "enforce"])
+def test_browser_origin_checks_apply_on_every_host_but_machine_posts_still_work(monkeypatch, base_url, mode):
+    from fastapi import FastAPI, Request
+
+    monkeypatch.setenv("API_HOST_IPS", "10.0.6.1")
+    monkeypatch.setenv("API_AUTH_MODE", mode)
+    monkeypatch.setenv("CF_ACCESS_DESK_HOST", "desk.example.invalid")
+    calls = []
+    app = FastAPI()
+    app.middleware("http")(api_auth.middleware)
+
+    @app.post("/registry/sync")
+    def handler(request: Request):
+        calls.append(request.state.caller)
+        return {"caller": request.state.caller}
+
+    client = TestClient(app, base_url=base_url, client=("10.0.6.1", 5000))
+    for headers in ({"Origin": "https://evil.example"}, {"Sec-Fetch-Site": "cross-site"},
+                    {"Origin": "null"}, {"Sec-Fetch-Site": "same-site"},
+                    {"Origin": base_url + ".evil.example", "Sec-Fetch-Site": "same-origin"}):
+        response = client.post("/registry/sync", headers=headers)
+        assert response.status_code == 403 and response.json()["detail"] == "cross-site request refused"
+    assert not calls
+    assert client.post("/registry/sync").status_code == 200  # headerless curl remains trusted
+    for headers in ({"Origin": base_url}, {"Sec-Fetch-Site": "same-origin"},
+                    {"Origin": base_url, "Sec-Fetch-Site": "same-origin"}):
+        expected = 403 if base_url == "http://api.example.invalid" else 200
+        assert client.post("/registry/sync", headers=headers).status_code == expected
+    assert calls == (["host"] if base_url == "http://api.example.invalid" else ["host"] * 4)
+
+
+@pytest.mark.parametrize("headers", [{"Origin": "http://evil:8099"}, {"Sec-Fetch-Site": "same-origin"},
+                                    {"Origin": "http://evil:8099", "Sec-Fetch-Site": "same-origin"}])
+@pytest.mark.parametrize("mode", ["log", "enforce"])
+def test_dns_rebinding_cannot_inherit_the_tunnel_peer_authority(monkeypatch, headers, mode):
+    monkeypatch.setenv("API_HOST_IPS", "172.18.0.5")
+    client = _client(monkeypatch, mode)
+    response = client.post("/registry/sync", headers={"Host": "evil:8099", **headers})
+    assert response.status_code == 403 and response.json()["detail"] == "cross-site request refused"
+
+
 def _metric(unit, source):
     return {"business_unit": unit, "observations": [{
         "subject": "seerxo", "metric": "signups", "value": 100000, "source": source,

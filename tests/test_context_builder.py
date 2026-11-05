@@ -2,11 +2,39 @@
 import copy
 import importlib
 import importlib.util
+import json
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app import enums, models, registry
+
+
+def test_context_redacts_legacy_task_fields_and_every_learning_field():
+    from app import context_builder
+
+    canary = "gh" + "p_" + "Q9w8E7r6T5y4U3i2O1p0" * 2
+    engine = create_engine("sqlite://")
+    models.Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        agent = models.Agent(key="research", role="Research", enabled=True)
+        project = models.Project(key="p", name="Project")
+        db.add_all([agent, project])
+        db.flush()
+        task = models.Task(key="TASK-1000", title=f"Title {canary}", description=f"Description {canary}",
+                           objective=f"Objective {canary}", success_criteria=f"Criteria {canary}",
+                           assigned_agent_id=agent.id, project_id=project.id)
+        db.add_all([task, models.Learning(title=f"Learning {canary}", lesson=f"Lesson {canary}",
+                                         evidence=f"Evidence {canary}", tags=canary, project_id=project.id,
+                                         status=enums.LearningStatus.APPROVED)])
+        db.commit()
+        packet = context_builder.build(db, task, registry.load()["research"])
+        for field, prefix in (("title", "Title"), ("description", "Description"),
+                              ("objective", "Objective"), ("success_criteria", "Criteria")):
+            assert packet["task"][field] == f"{prefix} ***"
+        assert packet["learnings"] == [{"title": "Learning ***", "lesson": "Lesson ***",
+                                         "evidence": "Evidence ***", "tags": "***"}]
+        assert canary not in json.dumps(packet) and canary[4:] not in json.dumps(packet)
 
 
 def test_context_packet_excludes_unrelated_state_and_caps_required_files():

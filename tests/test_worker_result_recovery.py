@@ -1,5 +1,6 @@
 """A completed read-only provider result survives a worker crash before finalization."""
 from datetime import timedelta
+import json
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -7,6 +8,54 @@ from sqlalchemy.orm import Session
 
 from app import control, enums, models, worker
 from tests.test_worker import SPECS, FakeProvider, _good, _task
+
+
+def test_legacy_raw_checkpoint_is_redacted_before_the_recovery_commit(saved_result, monkeypatch):
+    canary = "gh" + "p_" + "Q9w8E7r6T5y4U3i2O1p0" * 2
+    engine, _, run_id, _ = saved_result()
+    finish = worker._finish_result
+    observed = []
+
+    def checked_finish(db, task, run, agent, verdict, notes, parsed):
+        # Inspect committed storage through another session, before _finish_result removes the checkpoint.
+        with Session(engine) as reader:
+            saved = reader.get(models.AgentRun, run.id).tool_calls
+            assert saved["result_checkpoint"]["output"]["actions"] == ["Legacy ***"]
+            assert saved["new_task_candidates"][0]["title"] == "Research ***"
+            assert saved["result_checkpoint"]["notes"] == "success criteria evidence present"
+            assert saved["result_hash"] == worker._hash(saved["result_checkpoint"]["output"])
+            assert canary not in json.dumps(saved) and canary[4:] not in json.dumps(saved)
+        assert parsed.summary == "Summary ***"
+        observed.append(True)
+        return finish(db, task, run, agent, verdict, notes, parsed)
+
+    with Session(engine) as db:
+        run = db.get(models.AgentRun, run_id)
+        task = db.get(models.Task, run.task_id)
+        raw = _good(task.key, summary=f"Summary {canary}", actions=[f"Legacy {canary}"])
+        saved = {k: v for k, v in run.tool_calls["result_checkpoint"].items() if k not in ("verdict", "notes")}
+        saved.update(version=1, output=raw)
+        run.tool_calls = {**run.tool_calls, "result_checkpoint": saved, "result_hash": worker._hash(raw),
+                          "new_task_candidates": [{"title": f"Research {canary}", "reason": canary}]}
+        db.commit()
+        monkeypatch.setattr(worker, "_finish_result", checked_finish)
+        assert worker._resume_result(db, run_id, SPECS)["verdict"] == "APPROVED"
+        assert observed == [True]
+
+
+def test_blocked_recovery_redacts_both_legacy_audit_snapshots(saved_result):
+    canary = "gh" + "p_" + "Q9w8E7r6T5y4U3i2O1p0" * 2
+    engine, task_id, run_id, _ = saved_result()
+    with Session(engine) as db:
+        task = db.get(models.Task, task_id)
+        task.title = f"Legacy {canary}"  # invalidates the saved contract
+        task.artifacts = {"nested": [{canary: canary}]}
+        db.commit()
+        assert worker._resume_result(db, run_id, SPECS)["verdict"] == "RESULT_BLOCKED"
+        entry = db.scalar(select(models.AuditLog).where(models.AuditLog.action == "task.result-recovery.blocked"))
+        assert entry.before["title"] == entry.after["title"] == "Legacy ***"
+        assert entry.before["artifacts"] == entry.after["artifacts"] == {"nested": [{"***": "***"}]}
+        assert canary not in json.dumps({"before": entry.before, "after": entry.after})
 
 
 def test_restart_finishes_the_saved_result_without_another_model_call(saved_result):
@@ -205,6 +254,17 @@ def test_malformed_saved_results_fail_closed(saved_result, bad):
         task = db.get(models.Task, task_id)
         assert task.status == enums.TaskStatus.BLOCKED and task.retry_count == 0
         assert task.result is None
+
+
+@pytest.mark.parametrize("changes", [{"verdict": None}, {"verdict": []}, {"verdict": "UNKNOWN"}, {"notes": None}])
+def test_malformed_saved_verdicts_fail_closed(saved_result, changes):
+    engine, task_id, run_id, _ = saved_result()
+    with Session(engine) as db:
+        run = db.get(models.AgentRun, run_id)
+        run.tool_calls = {**run.tool_calls, "result_checkpoint": {**run.tool_calls["result_checkpoint"], **changes}}
+        db.commit()
+        assert worker._resume_result(db, run_id, SPECS)["verdict"] == "RESULT_BLOCKED"
+        assert db.get(models.Task, task_id).status == enums.TaskStatus.BLOCKED
 
 
 def test_repeated_finalization_crashes_are_bounded_and_keep_the_answer(saved_result, monkeypatch):

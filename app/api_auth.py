@@ -126,6 +126,17 @@ def _match(routes, method: str, path: str) -> bool:
     return any(m == method and re.fullmatch(p, path) for m, p in routes)
 
 
+SAFE_METHODS = ("GET", "HEAD", "OPTIONS")
+
+
+def _cross_site(headers, expected_origin: str) -> bool:
+    """A browser write sent from another site (CSRF). A request with neither header (curl, a console) is not
+    refused here; caller authentication still applies. Compare the full origin, including scheme and port."""
+    site, origin = headers.get("sec-fetch-site"), headers.get("origin")
+    return ((site is not None and site != "same-origin")
+            or (origin is not None and origin.lower().rstrip("/") != expected_origin))
+
+
 def caller(client_host: str | None, authorization: str | None, environ=os.environ) -> str:
     """'local', a token's name, or 'anonymous'. A wrong token is anonymous, not an error."""
     if client_host in LOOPBACK:
@@ -176,6 +187,15 @@ async def middleware(request, call_next):
     assertion = request.headers.get("cf-access-jwt-assertion")
     desk_host = _dns_name(os.environ.get("CF_ACCESS_DESK_HOST", ""))
     is_desk_host = bool(desk_host and host == desk_host)
+    expected_origin = (f"https://{desk_host}" if is_desk_host else
+                       f"{request.url.scheme}://{(header or '').lower()}".removesuffix(
+                           ":443" if request.url.scheme == "https" else ":80"))
+    if method not in SAFE_METHODS:
+        browser = any(h in request.headers for h in ("origin", "sec-fetch-site"))
+        # The published tunnel port is fixed in docker-compose.yml; matching Origin alone permits DNS rebinding.
+        trusted_host = is_desk_host or (header or "").lower() in {"localhost:8099", "127.0.0.1:8099"}
+        if (browser and not trusted_host) or _cross_site(request.headers, expected_origin):
+            return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
     authorization = request.headers.get("authorization")
     # The separate API hostname may add a service assertion to existing bearer
     # callers. They keep their own scopes; none can bypass founder verification on

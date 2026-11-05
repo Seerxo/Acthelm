@@ -32,6 +32,7 @@ from app import (audit, context_builder, control, dispatch, enums, keys, livenes
 from app.notify import fingerprint, notifier
 from app.providers import (FALLBACK_HEALTH, RUNNABLE_HEALTH, Health, Provider,
                           ProviderResult, default_providers)
+from app.redact import PLACEHOLDERS, redact, redact_data
 
 log = logging.getLogger("company.worker")
 
@@ -857,7 +858,7 @@ def supervise(task: models.Task, raw: dict | None) -> tuple[enums.SupervisorVerd
         return enums.SupervisorVerdict.REVISION_REQUIRED, f"missing required evidence: {missing}", result
     need = (ctx.get("verify") or {}).get("min_actions")
     if isinstance(need, int) and not isinstance(need, bool) and need > 0:
-        items = [a for a in result.actions if isinstance(a, str) and a.strip()]
+        items = [clean for a in result.actions if (clean := redact(a).strip()) and clean not in PLACEHOLDERS]
         if len(items) < need:   # a promised deliverable that is not there is not "evidence present"
             return enums.SupervisorVerdict.REVISION_REQUIRED, f"deliverable missing: needs {need} action item(s), got {len(items)}", result
     one_of = (ctx.get("verify") or {}).get("one_of") or []
@@ -870,7 +871,7 @@ def supervise(task: models.Task, raw: dict | None) -> tuple[enums.SupervisorVerd
 
 def _set_failure(db: Session, task: models.Task, error: str) -> tuple:
     task.retry_count += 1
-    task.error = error[:2000]
+    task.error = redact(error)[:2000]   # Stage C outcomes reach here too, not only _finish_result
     if task.retry_count < task.max_attempts:
         task.status = enums.TaskStatus.READY
         return "TASK_FAILED", enums.Severity.MEDIUM, f"{task.key} attempt {task.retry_count} failed"
@@ -979,7 +980,8 @@ def execute(db: Session, task: models.Task, spec: registry.AgentSpec,
     verdict, notes, parsed = (supervise(task, result.output) if result and result.ok
                               else (enums.SupervisorVerdict.FAILED,
                                     (result.error if result else None) or "no provider ran", None))
-    run.model = result.model if result else None
+    output = redact_data(result.output) if result and result.ok else None
+    run.model = redact(result.model) if result and result.model is not None else None
     run.input_tokens = result.input_tokens if result else None
     run.output_tokens = result.output_tokens if result else None
     run.estimated_cost_usd = 0  # subscription access; list price kept in tool_calls
@@ -995,13 +997,15 @@ def execute(db: Session, task: models.Task, spec: registry.AgentSpec,
                       "company_os_git_sha": os.environ.get("COMPANY_OS_GIT_SHA"),
                       "image": os.environ.get("WORKER_IMAGE"),
                       "context_hash": _hash(prompt),
-                      "result_hash": _hash(result.output) if result and result.output else None,
-                      "new_task_candidates": [c.model_dump() for c in parsed.new_task_candidates]
+                      "result_hash": _hash(output) if output else None,
+                      "new_task_candidates": redact_data([c.model_dump() for c in parsed.new_task_candidates])
                       if parsed else []}
     if result and result.ok and parsed is not None:
         # Commit the answer before routing proposals/notes/events: a crash there must not buy another model run.
         run.tool_calls = {**run.tool_calls, "result_checkpoint": {
-            "version": 1, "task_hash": task_hash, "output": result.output,
+            # Evidence is verified in memory; recovery must not re-verify its redacted copy.
+            "version": 2, "task_hash": task_hash, "output": output,
+            "verdict": verdict.value, "notes": redact(notes),
             "finalizations": 0, "claim": None, "claim_until": None}}
         db.commit()
     run.tool_calls = {**run.tool_calls, "provider_cli_version": used.version() if used else None}
@@ -1051,7 +1055,10 @@ def _resume_result(db: Session, run_id: int, specs: dict) -> dict | None:
         return _superseded(db, task, run, "saved result")
     reason, spec = _admission_gate(db, task, specs, allowed_statuses=(enums.TaskStatus.IN_PROGRESS,))
     newest = db.scalar(select(func.max(models.AgentRun.id)).where(models.AgentRun.task_id == task.id))
-    valid = (isinstance(saved, dict) and type(saved.get("version")) is int and saved["version"] == 1
+    valid = (isinstance(saved, dict) and type(saved.get("version")) is int and saved["version"] in (1, 2)
+             and (saved["version"] == 1 or (isinstance(saved.get("verdict"), str)
+                                          and saved["verdict"] in {v.value for v in enums.SupervisorVerdict}
+                                          and isinstance(saved.get("notes"), str)))
              and isinstance(saved.get("output"), dict)
              and type(saved.get("finalizations")) is int and saved["finalizations"] >= 0
              and saved.get("task_hash") == _result_task_hash(task)
@@ -1059,7 +1066,7 @@ def _resume_result(db: Session, run_id: int, specs: dict) -> dict | None:
              and run.agent_id == task.assigned_agent_id and newest == run.id
              and spec is not None and _hash(dataclasses.asdict(spec)) == run.tool_calls.get("agent_definition_hash"))
     if reason or not valid or saved["finalizations"] >= MAX_RESULT_FINALIZATIONS:
-        before = audit.snapshot(task)
+        before = redact_data(audit.snapshot(task))
         why = reason or ("saved result no longer matches its task/policy" if not valid
                          else "saved result finalization attempts exhausted")
         owns = holds_attempt(db, task, run)  # before the run is failed: the check reads the run's status
@@ -1067,14 +1074,21 @@ def _resume_result(db: Session, run_id: int, specs: dict) -> dict | None:
         if owns:
             task.status, task.error = enums.TaskStatus.BLOCKED, f"Result recovery needs operator review: {why}"
         audit.record(db, actor="company-worker", action="task.result-recovery.blocked", entity_type="task",
-                     entity_key=task.key, reason=why, before=before, after=audit.snapshot(task), task_id=task.id)
+                     entity_key=task.key, reason=why, before=before, after=redact_data(audit.snapshot(task)), task_id=task.id)
         db.commit()
         return {"task": task.key, "provider": run.provider, "verdict": "RESULT_BLOCKED",
                 "task_status": task.status.value, "run_id": run.id, "notes": why}
     token = uuid.uuid4().hex
-    saved = {**saved, "finalizations": saved["finalizations"] + 1, "claim": token,
+    if saved["version"] == 1:
+        verdict, notes, _ = supervise(task, saved["output"])
+    else:
+        verdict, notes = enums.SupervisorVerdict(saved["verdict"]), saved["notes"]
+    saved = {**saved, "version": 2, "output": redact_data(saved["output"]),
+             "verdict": verdict.value, "notes": redact(notes),
+             "finalizations": saved["finalizations"] + 1, "claim": token,
              "claim_until": (_now() + RESULT_CLAIM_TTL).isoformat()}
-    run.tool_calls = {**run.tool_calls, "result_checkpoint": saved}
+    run.tool_calls = {**run.tool_calls, "result_checkpoint": saved, "result_hash": _hash(saved["output"]),
+                      "new_task_candidates": redact_data(run.tool_calls.get("new_task_candidates", []))}
     db.commit()  # Retain the attempt and lease even if the process dies during finalization.
     # A competing worker may briefly inspect the lease after commit; its lock must not strand the owner.
     task, run = _result_rows(db, run_id, wait=True)
@@ -1089,7 +1103,11 @@ def _resume_result(db: Session, run_id: int, specs: dict) -> dict | None:
             or reason or control.agents_paused(db)):
         db.rollback()
         return None
-    verdict, notes, parsed = supervise(task, current["output"])
+    verdict, notes = enums.SupervisorVerdict(current["verdict"]), current["notes"]
+    try:
+        parsed = AgentRunResult.model_validate(current["output"])
+    except ValidationError:
+        verdict, notes, parsed = enums.SupervisorVerdict.FAILED, "malformed saved result", None
     return _finish_result(db, task, run, db.get(models.Agent, run.agent_id), verdict, notes, parsed)
 
 
@@ -1110,26 +1128,31 @@ def _finish_result(db: Session, task: models.Task, run: models.AgentRun, agent: 
     task = _locked_task(db, task.id)
     if not holds_attempt(db, task, run):
         return _superseded(db, task, run, verdict.value)
+    # Provider error or model text: redacted once, before it becomes run/agent/task error, notes or audit reason.
+    notes = redact(notes)
     ctx = task.context if isinstance(task.context, dict) else {}
     run.ended_at = _now()
     run.tool_calls = {key: value for key, value in (run.tool_calls or {}).items() if key != "result_checkpoint"}
-    run.result = parsed.summary if parsed else None
+    summary = redact(parsed.summary) if parsed else None   # model text: run/task result and event title
+    run.result = summary
     run.supervisor_verdict = verdict
     run.supervisor_notes = notes
-    before = audit.snapshot(task)
+    before = redact_data(audit.snapshot(task))
     auto_closed = False
 
     if verdict == enums.SupervisorVerdict.APPROVED:
         run.status = enums.AgentRunStatus.SUCCEEDED
         task.status = enums.TaskStatus.REVIEW  # never DONE: the founder closes tasks (§45)
-        task.result = parsed.summary
-        task.artifacts = {"evidence": parsed.evidence, "artifacts": parsed.artifacts,
-                          "actions": [a[:MAX_ACTION_CHARS] for a in parsed.actions[:MAX_ACTIONS]],
-                          "run_id": run.id}
+        task.result = summary
+        task.artifacts = redact_data({"evidence": parsed.evidence, "artifacts": parsed.artifacts,
+                                      "actions": parsed.actions[:MAX_ACTIONS], "run_id": run.id})
+        task.artifacts["actions"] = [a[:MAX_ACTION_CHARS] for a in task.artifacts["actions"]]
         agent.last_success_at = run.ended_at
         for lesson in parsed.learning_candidates:
             notebook.record(db, note=lesson, agent_key=agent.key, task_key=task.key, commit=False)
-        materialized = task_materializer.materialize(db, task, run, parsed.new_task_candidates)
+        candidates = [c.model_copy(update={"title": redact(c.title), "reason": redact(c.reason)})
+                      for c in parsed.new_task_candidates]
+        materialized = task_materializer.materialize(db, task, run, candidates)
         run.tool_calls = {**run.tool_calls, "materialized": materialized}
         # Only a linked, owned read-only child proves this internal planning task is finished.
         auto_closed = (os.environ.get("AUTO_CLOSE_GOAL_NO_WORK", "false").lower() == "true"
@@ -1143,7 +1166,7 @@ def _finish_result(db: Session, task: models.Task, run: models.AgentRun, agent: 
             task.artifacts = {**task.artifacts, "auto_close": {"policy": "GOAL_NO_WORK",
                                                                 "task_keys": materialized["auto_ready"]}}
         event = ("TASK_COMPLETED", enums.Severity.INFO,
-                 f"{task.key} {'auto-closed' if auto_closed else 'ready for review'}: {parsed.summary[:120]}")
+                 f"{task.key} {'auto-closed' if auto_closed else 'ready for review'}: {summary[:120]}")
     elif verdict == enums.SupervisorVerdict.ESCALATE:
         run.status = enums.AgentRunStatus.ESCALATED
         task.status = enums.TaskStatus.BLOCKED
@@ -1158,7 +1181,7 @@ def _finish_result(db: Session, task: models.Task, run: models.AgentRun, agent: 
     audit.record(db, actor="company-worker", action="task.autonomous-run", entity_type="task",
                  entity_key=task.key, reason=(f"{verdict.value}: {notes}; auto-closed GOAL_NO_WORK"
                                               if auto_closed else f"{verdict.value}: {notes}")[:500],
-                 before=before, after=audit.snapshot(task), task_id=task.id)
+                 before=before, after=redact_data(audit.snapshot(task)), task_id=task.id)
     # Event delivery may fail or terminate the process; state, children, memory and audit commit together first.
     _event(db, *event, task=task, detail=notes if verdict not in (
         enums.SupervisorVerdict.APPROVED, enums.SupervisorVerdict.ESCALATE) else "")
