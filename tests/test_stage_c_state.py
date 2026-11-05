@@ -145,6 +145,33 @@ def test_tasks_are_bounded_to_twenty(env, monkeypatch):
     assert len(out["tasks"]) == 20 and out["metrics"]["tasks"]["started"] == 25
 
 
+def test_metrics_do_not_load_full_tasks_outside_the_list(env, monkeypatch):
+    from sqlalchemy import event
+
+    heartbeat(monkeypatch)
+    with db(env) as s:
+        t = task(s, history=[h("READY_TO_MERGE"), h("IMPLEMENTING")])
+        t.context = {**t.context, "notes": "unused context " * 10000}
+        s.commit()
+        for i in range(24):
+            task(s, key=f"TASK-{1000 + i}", status=enums.TaskStatus.READY)
+
+    loaded = []
+
+    def loaded_task(instance, context):
+        loaded.append(instance.key)
+
+    event.listen(models.Task, "load", loaded_task)
+    try:
+        out = get(env)
+    finally:
+        event.remove(models.Task, "load", loaded_task)
+    assert len(loaded) == len(out["tasks"]) == 20
+    assert "TASK-0101" not in loaded
+    assert out["metrics"]["tasks"] == {"started": 25, "reached_ready_to_merge": 1, "stopped": 0,
+                                        "in_progress": 24, "abandoned": 0}
+
+
 # ---------------------------------------------------------------------------------------------- states
 def test_ready_to_merge_with_an_active_grant_is_ready_and_names_the_founder(env, monkeypatch):
     heartbeat(monkeypatch)
@@ -300,6 +327,38 @@ def test_a_standing_grant_for_another_deploy_is_a_sha_mismatch(env, monkeypatch)
     assert out["authorizations"]["standing"]["status"] == "SHA_MISMATCH" and out["state"] == "BLOCKED"
 
 
+@pytest.mark.parametrize("status", ["EXPIRED", "INVALID", "SHA_MISMATCH"])
+def test_non_active_standing_grants_have_no_remaining_capacity(env, monkeypatch, status):
+    heartbeat(monkeypatch)
+    with db(env) as s:
+        control.issue_standing(s, [PATH], OLD if status == "SHA_MISMATCH" else SHA, founder=FID,
+                               max_per_day=3, days=1,
+                               now=NOW - timedelta(days=3) if status == "EXPIRED" else NOW)
+        if status == "INVALID":
+            s.get(models.ControlState, control.STANDING_AUTHORIZATION).updated_by = "forged"
+            s.commit()
+    st = get(env)["authorizations"]["standing"]
+    assert st["status"] == status and st["used_today"] == 0 and st["remaining_today"] == 0
+
+
+def test_a_forged_standing_grant_for_another_sha_stays_invalid(env, monkeypatch):
+    heartbeat(monkeypatch)
+    with db(env) as s:
+        control.issue_standing(s, [PATH], OLD, founder=FID)
+        s.get(models.ControlState, control.STANDING_AUTHORIZATION).updated_by = "forged"
+        s.commit()
+    assert get(env)["authorizations"]["standing"]["status"] == "INVALID"
+
+
+def test_a_standing_grant_without_an_api_sha_stays_invalid(env, monkeypatch):
+    heartbeat(monkeypatch)
+    monkeypatch.delenv("COMPANY_OS_GIT_SHA")
+    with db(env) as s:
+        control.issue_standing(s, [PATH], SHA, founder=FID)
+    st = get(env)["authorizations"]["standing"]
+    assert st["status"] == "INVALID" and st["remaining_today"] == 0
+
+
 @pytest.mark.parametrize("label,kw,state,blocker", [
     ("no heartbeat", {"status": "NO_DATA", "sha": None, "flag": None, "stage": None}, "UNKNOWN", "worker_sha_unknown"),
     ("stale", {"status": "STALE"}, "UNKNOWN", "worker_not_healthy"),
@@ -323,6 +382,49 @@ def test_no_watchdog_preflight_is_not_verified_and_no_acceptance_is_null_not_fal
     assert out["runtime"]["preflight"] == {"status": "NOT_VERIFIED", "checked_at": None, "source_sha": None}
     assert out["runtime"]["acceptance"] == {"source_sha": None, "accepted_at": None, "valid": None}
     assert out["state"] == "BLOCKED" and "host_not_accepted" in out["blockers"]
+
+
+def test_an_extreme_readiness_timestamp_is_stale(env, monkeypatch):
+    heartbeat(monkeypatch)
+    with db(env) as s:
+        green(s)
+        row = s.get(models.ControlState, stage_c_worker.RUNTIME_READINESS_KEY)
+        row.value = {**row.value, "checked_at": "0001-01-01T00:00:00+23:00"}
+        s.commit()
+    assert get(env)["runtime"]["preflight"] == {"status": "STALE", "checked_at": None, "source_sha": SHA}
+
+
+@pytest.mark.parametrize("source", ["readiness", "heartbeat"])
+def test_runtime_reader_exceptions_are_unverified(env, monkeypatch, source):
+    heartbeat(monkeypatch)
+    with db(env) as s:
+        green(s)
+
+    def unreadable(*args):
+        raise OverflowError("unreadable timestamp")
+
+    if source == "readiness":
+        monkeypatch.setattr(stage_c_worker, "runtime_ready", unreadable)
+    else:
+        monkeypatch.setattr(main.worker, "worker_state", unreadable)
+    out = get(env)
+    if source == "readiness":
+        assert out["runtime"]["preflight"]["status"] == "STALE" and "preflight_stale" in out["blockers"]
+    else:
+        assert out["state"] == "UNKNOWN" and out["runtime"]["worker_heartbeat"] is None
+
+
+@pytest.mark.parametrize("key,expected", [
+    ("A" * 25 + "-123456", "A" * 25 + "-123456"), ("A" * 26 + "-123456", None), ("TASK-１２３", None)])
+def test_task_keys_are_bounded_ascii_identifiers_in_every_view(env, monkeypatch, key, expected):
+    heartbeat(monkeypatch)
+    with db(env) as s:
+        hist, _ = published()
+        task(s, key=key, history=hist)
+        control.authorize_pilot(s, key, SHA, founder=FID)
+    out = get(env)
+    assert out["tasks"][0]["key"] == out["last_ready_pr"]["task_key"] == expected
+    assert out["authorizations"]["one_task"]["task_key"] == expected
 
 
 # ---------------------------------------------------------------------------------------------- evidence

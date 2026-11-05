@@ -20,7 +20,7 @@ from app import approval_identity, control, enums, models, stage_c, stage_c_ci, 
 
 VERSION = 1
 MAX_TASKS = 20
-# shortcut: metrics sample MAX_RUNS Stage C runs; use SQL aggregates if this ceiling becomes routine.
+# shortcut: metrics transfer histories for tasks behind at most 5000 runs; use SQL aggregates if this scan is routine.
 MAX_RUNS = 5000
 USD_NOTE = "excludes_subscription_cost"
 
@@ -52,6 +52,7 @@ GRANT_STATUS = {None: "ACTIVE", "stage_c_authorization_consumed": "CONSUMED", "s
 
 _SHA = re.compile(r"[a-f0-9]{40}")
 _FP = re.compile(r"[a-f0-9]{64}")
+_TASK_KEY = re.compile(r"[A-Z]+-[0-9]{1,6}")
 
 
 def _sha(v):
@@ -60,6 +61,10 @@ def _sha(v):
 
 def _fp(v):
     return v if isinstance(v, str) and _FP.fullmatch(v) else None
+
+
+def _task_key(v):
+    return v if isinstance(v, str) and len(v) <= 32 and _TASK_KEY.fullmatch(v) else None
 
 
 def _int(v):
@@ -100,7 +105,10 @@ def _revoked(db, key: str, issue_action: str, revoke_action: str) -> dict | None
 
 # --------------------------------------------------------------------------- runtime
 def _runtime(db, api_sha, now):
-    view = worker.worker_state(db)
+    try:
+        view = worker.worker_state(db)
+    except Exception:
+        view = {}
     view = view if isinstance(view, dict) else {}
     rt = view.get("runtime") if isinstance(view.get("runtime"), dict) else {}
     autonomy = view.get("autonomy") if isinstance(view.get("autonomy"), dict) else {}
@@ -117,12 +125,16 @@ def _runtime(db, api_sha, now):
     r_value = readiness.value if readiness is not None and isinstance(readiness.value, dict) else {}
     if readiness is None:
         preflight = "NOT_VERIFIED"
-    elif stage_c_worker.runtime_ready(db, now):
-        preflight = "PASS"
-    elif r_value.get("ready") is False and readiness.updated_by == "watchdog":
-        preflight = "FAIL"
     else:
-        preflight = "STALE"  # too old, another SHA, or not written by the watchdog
+        try:
+            if stage_c_worker.runtime_ready(db, now):
+                preflight = "PASS"
+            elif r_value.get("ready") is False and readiness.updated_by == "watchdog":
+                preflight = "FAIL"
+            else:
+                preflight = "STALE"  # too old, another SHA, or not written by the watchdog
+        except Exception:
+            preflight = "STALE"
     return {
         "api_sha": api_sha, "worker_sha": worker_sha,
         # Agreement across all three processes cannot be proven without the reasoner's SHA.
@@ -155,7 +167,7 @@ def _one_task(db, api_sha, now):
         denial = control._authorization_denial(db, row, key, api_sha or "", now)
         status = GRANT_STATUS.get(denial, "INVALID")
     key = value.get("task_key")
-    return {"task_key": key if isinstance(key, str) and stage_c.TASK_KEY.fullmatch(key) else None,
+    return {"task_key": _task_key(key),
             "source_sha": _sha(value.get("source_sha")), "expires_at": _ts(value.get("expires_at")),
             "revoked": status == "REVOKED", "issuer": _role(value.get("issued_by")), "status": status}
 
@@ -174,7 +186,9 @@ def _standing(db, api_sha, now):
         denial = (control._standing_denial(db, row, paths, api_sha or "", now)
                   if all(isinstance(p, str) for p in paths) else "stage_c_standing_invalid")
         status = GRANT_STATUS.get(denial, "INVALID")
-        if status == "INVALID" and _sha(value.get("source_sha")) and value.get("source_sha") != api_sha:
+        if (status == "INVALID" and api_sha and _sha(value.get("source_sha"))
+                and value["source_sha"] != api_sha and all(isinstance(p, str) for p in paths)
+                and control._standing_denial(db, row, paths, value["source_sha"], now) is None):
             status = "SHA_MISMATCH"  # a deploy voids the grant; the founder issues a new one
     paths = value.get("paths") if isinstance(value.get("paths"), list) else []
     cap = value.get("max_per_day")
@@ -185,7 +199,7 @@ def _standing(db, api_sha, now):
     return {"source_sha": _sha(value.get("source_sha")),
             "paths": sorted({p for p in paths[:20] if isinstance(p, str) and p in stage_c_worker.SAFE_FILES}),
             "expires_at": _ts(value.get("expires_at")), "max_per_day": cap, "used_today": used_today,
-            "remaining_today": 0 if status == "REVOKED"   # a revoked grant allows no run
+            "remaining_today": 0 if status != "ACTIVE"
             else max(cap - used_today, 0) if cap is not None and used_today is not None else None,
             "revoked": status == "REVOKED", "issuer": _role(value.get("issued_by")), "status": status}
 
@@ -251,7 +265,7 @@ def _task(db, task, runs):
     outcome = (last.tool_calls or {}).get("outcome") if last is not None and isinstance(last.tool_calls, dict) else None
     started = task.started_at or (runs[-1].started_at if runs else None)
     return {
-        "key": task.key if isinstance(task.key, str) and stage_c.TASK_KEY.fullmatch(task.key) else None,
+        "key": _task_key(task.key),
         "status": task.status.value if task.status else None, "stage": stage,
         "attempts": len(runs), "retry_count": _int(task.retry_count), "repairs": repairs,
         "started_at": _ts(started), "updated_at": _ts(task.updated_at),
@@ -269,13 +283,13 @@ def _task(db, task, runs):
 
 def _last_ready_pr(db):
     """The newest task at READY_TO_MERGE or MERGED among all Stage C tasks, not only the 20 listed."""
-    task = db.scalars(select(models.Task).where(
+    task = db.execute(select(models.Task.key, models.Task.context).where(
         models.Task.context["improvement"]["stage"].as_string().in_(("READY_TO_MERGE", "MERGED")))
         .order_by(models.Task.updated_at.desc(), models.Task.id.desc()).limit(1)).first()
     if task is not None:
         imp, hist, _ = _history(task)
         opened = next((h["evidence"] for h in reversed(hist) if h["stage"] == "PR_OPEN"), {})
-        key = task.key if isinstance(task.key, str) and stage_c.TASK_KEY.fullmatch(task.key) else None
+        key = _task_key(task.key)
         return {"task_key": key, "number": stage_c_worker.published_pr_number(task),
                 "head_sha": _sha(opened.get("commit")), "stage": imp["stage"]}
     return None
@@ -283,9 +297,10 @@ def _last_ready_pr(db):
 
 # --------------------------------------------------------------------------- metrics
 def _metrics(tasks, runs, truncated):
-    stages = {t.id: _history(t)[0].get("stage") for t in tasks}
-    reached = {t.id for t in tasks if stages[t.id] in REACHED or any(
-        h["stage"] == "READY_TO_MERGE" for h in _history(t)[1])}
+    stages = {t.id: t.stage for t in tasks}
+    reached = {t.id for t in tasks if t.stage in REACHED or any(
+        isinstance(h, dict) and h.get("stage") == "READY_TO_MERGE"
+        for h in (t.history if isinstance(t.history, list) else []))}
     stopped = {t.id for t in tasks if t.status in STOPPED}
     done = reached | stopped
     tokens = [r.input_tokens + r.output_tokens for r in runs
@@ -393,9 +408,13 @@ def build(db, now: datetime | None = None) -> dict:
     by_task: dict[int, list] = {}
     for r in runs:
         by_task.setdefault(r.task_id, []).append(r)
-    all_tasks = list(db.scalars(select(models.Task).where(models.Task.id.in_(by_task))
-                                .order_by(models.Task.updated_at.desc(), models.Task.id.desc())))
-    tasks = [_task(db, t, by_task[t.id]) for t in all_tasks[:MAX_TASKS]]
+    all_tasks = list(db.execute(select(models.Task.id, models.Task.status,
+                                models.Task.context["improvement"]["stage"].as_string().label("stage"),
+                                models.Task.context["improvement"]["history"].label("history"))
+                               .where(models.Task.id.in_(by_task))))
+    listed_tasks = db.scalars(select(models.Task).where(models.Task.id.in_(by_task))
+                             .order_by(models.Task.updated_at.desc(), models.Task.id.desc()).limit(MAX_TASKS))
+    tasks = [_task(db, t, by_task[t.id]) for t in listed_tasks]
     state, blockers = _derive(runtime, one_task, standing, tasks)
     return {"version": VERSION, "generated_at": now.isoformat(), "state": state, "blockers": blockers,
             "next_action": _next_action(blockers), "last_ready_pr": _last_ready_pr(db), "runtime": runtime,
