@@ -170,9 +170,22 @@ def test_browser_origin_checks_apply_on_every_host_but_machine_posts_still_work(
         response = client.post("/registry/sync", headers=headers)
         assert response.status_code == 403 and response.json()["detail"] == "cross-site request refused"
     assert not calls
-    for headers in ({}, {"Origin": base_url, "Sec-Fetch-Site": "same-origin"}):
-        assert client.post("/registry/sync", headers=headers).status_code == 200
-    assert calls == ["host", "host"]
+    assert client.post("/registry/sync").status_code == 200  # headerless curl remains trusted
+    for headers in ({"Origin": base_url}, {"Sec-Fetch-Site": "same-origin"},
+                    {"Origin": base_url, "Sec-Fetch-Site": "same-origin"}):
+        expected = 403 if base_url == "http://api.example.invalid" else 200
+        assert client.post("/registry/sync", headers=headers).status_code == expected
+    assert calls == (["host"] if base_url == "http://api.example.invalid" else ["host"] * 4)
+
+
+@pytest.mark.parametrize("headers", [{"Origin": "http://evil:8099"}, {"Sec-Fetch-Site": "same-origin"},
+                                    {"Origin": "http://evil:8099", "Sec-Fetch-Site": "same-origin"}])
+@pytest.mark.parametrize("mode", ["log", "enforce"])
+def test_dns_rebinding_cannot_inherit_the_tunnel_peer_authority(monkeypatch, headers, mode):
+    monkeypatch.setenv("API_HOST_IPS", "172.18.0.5")
+    client = _client(monkeypatch, mode)
+    response = client.post("/registry/sync", headers={"Host": "evil:8099", **headers})
+    assert response.status_code == 403 and response.json()["detail"] == "cross-site request refused"
 
 
 def _metric(unit, source):

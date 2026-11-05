@@ -405,7 +405,7 @@ def company_brief(db: Session = Depends(get_db)) -> str:
     if st["priorities"]:
         L.append("Priorities")
         for t in st["priorities"]:
-            L.append(f"  {t['priority']} {t['key']} [{t['status']}] {t['title']}")
+            L.append(f"  {t['priority']} {t['key']} [{t['status']}] {redact(t['title'])}")
         L.append("")
     else:
         L += ["Priorities", "  no open P0/P1 tasks", ""]
@@ -751,7 +751,7 @@ def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = D
         if not (body.evidence or body.result):
             raise HTTPException(422, "DONE requires evidence or a result (§35, §130)")
 
-    before = audit.snapshot(task)
+    before = redact_data(audit.snapshot(task))
     previous = task.status
     task.status = body.status
     if body.result:
@@ -765,7 +765,7 @@ def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = D
     if body.status == enums.TaskStatus.FAILED:
         task.retry_count += 1
 
-    after = audit.snapshot(task)
+    after = redact_data(audit.snapshot(task))
     if body.actor != who.id:
         after["client_claimed_actor"] = body.actor
     audit.record(db, actor=who.id, action="task.status", entity_type="task",
@@ -801,9 +801,9 @@ def assign_task(key: str, body: schemas.TaskAssign, db: Session = Depends(get_db
     db.refresh(task, with_for_update=True)
     if task.status == enums.TaskStatus.IN_PROGRESS:
         raise HTTPException(409, f"{task.key} is IN_PROGRESS: an attempt owns it; block or cancel it first")
-    before = audit.snapshot(task)
+    before = redact_data(audit.snapshot(task))
     task.assigned_agent_id = agent.id
-    after = audit.snapshot(task)
+    after = redact_data(audit.snapshot(task))
     if body.actor != who.id:
         after["client_claimed_actor"] = body.actor
     audit.record(db, actor=who.id, action="task.assign", entity_type="task",

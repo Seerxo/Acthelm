@@ -153,6 +153,8 @@ def _redact(text: str) -> str:
 
 
 UNAVAILABLE = "[unavailable]"
+TOO_LARGE = "[withheld: too large to scan]"
+PLACEHOLDERS = frozenset((UNAVAILABLE, TOO_LARGE, _WITHHELD, "***"))
 MAX_SCAN_CHARS = 8000
 
 
@@ -162,7 +164,7 @@ def redact(text: str) -> str:
     try:
         # A cut fragment can hide a URL delimiter or JWT header. Scan whole or withhold whole.
         if len(text) > MAX_SCAN_CHARS:
-            return UNAVAILABLE
+            return TOO_LARGE
         return _redact_secrets(text)
     except Exception:  # noqa: BLE001 - any failure, including a non-string, must not let the text through
         logging.getLogger("company.redact").error("redaction_failed")   # fixed name: no text, no exception detail

@@ -32,7 +32,7 @@ from app import (audit, context_builder, control, dispatch, enums, keys, livenes
 from app.notify import fingerprint, notifier
 from app.providers import (FALLBACK_HEALTH, RUNNABLE_HEALTH, Health, Provider,
                           ProviderResult, default_providers)
-from app.redact import redact, redact_data
+from app.redact import PLACEHOLDERS, redact, redact_data
 
 log = logging.getLogger("company.worker")
 
@@ -858,7 +858,7 @@ def supervise(task: models.Task, raw: dict | None) -> tuple[enums.SupervisorVerd
         return enums.SupervisorVerdict.REVISION_REQUIRED, f"missing required evidence: {missing}", result
     need = (ctx.get("verify") or {}).get("min_actions")
     if isinstance(need, int) and not isinstance(need, bool) and need > 0:
-        items = [a for a in result.actions if isinstance(a, str) and a.strip()]
+        items = [clean for a in result.actions if (clean := redact(a).strip()) and clean not in PLACEHOLDERS]
         if len(items) < need:   # a promised deliverable that is not there is not "evidence present"
             return enums.SupervisorVerdict.REVISION_REQUIRED, f"deliverable missing: needs {need} action item(s), got {len(items)}", result
     one_of = (ctx.get("verify") or {}).get("one_of") or []
@@ -977,10 +977,10 @@ def execute(db: Session, task: models.Task, spec: registry.AgentSpec,
         return {"task": task.key, "provider": None, "verdict": "NO_CAPACITY",
                 "task_status": task.status.value, "run_id": run.id, "notes": run.error}
 
-    output = redact_data(result.output) if result and result.ok else None
-    verdict, notes, parsed = (supervise(task, output) if result and result.ok
+    verdict, notes, parsed = (supervise(task, result.output) if result and result.ok
                               else (enums.SupervisorVerdict.FAILED,
                                     (result.error if result else None) or "no provider ran", None))
+    output = redact_data(result.output) if result and result.ok else None
     run.model = redact(result.model) if result and result.model is not None else None
     run.input_tokens = result.input_tokens if result else None
     run.output_tokens = result.output_tokens if result else None
@@ -998,12 +998,14 @@ def execute(db: Session, task: models.Task, spec: registry.AgentSpec,
                       "image": os.environ.get("WORKER_IMAGE"),
                       "context_hash": _hash(prompt),
                       "result_hash": _hash(output) if output else None,
-                      "new_task_candidates": [c.model_dump() for c in parsed.new_task_candidates]
+                      "new_task_candidates": redact_data([c.model_dump() for c in parsed.new_task_candidates])
                       if parsed else []}
     if result and result.ok and parsed is not None:
         # Commit the answer before routing proposals/notes/events: a crash there must not buy another model run.
         run.tool_calls = {**run.tool_calls, "result_checkpoint": {
-            "version": 1, "task_hash": task_hash, "output": output,
+            # Evidence is verified in memory; recovery must not re-verify its redacted copy.
+            "version": 2, "task_hash": task_hash, "output": output,
+            "verdict": verdict.value, "notes": redact(notes),
             "finalizations": 0, "claim": None, "claim_until": None}}
         db.commit()
     run.tool_calls = {**run.tool_calls, "provider_cli_version": used.version() if used else None}
@@ -1053,7 +1055,10 @@ def _resume_result(db: Session, run_id: int, specs: dict) -> dict | None:
         return _superseded(db, task, run, "saved result")
     reason, spec = _admission_gate(db, task, specs, allowed_statuses=(enums.TaskStatus.IN_PROGRESS,))
     newest = db.scalar(select(func.max(models.AgentRun.id)).where(models.AgentRun.task_id == task.id))
-    valid = (isinstance(saved, dict) and type(saved.get("version")) is int and saved["version"] == 1
+    valid = (isinstance(saved, dict) and type(saved.get("version")) is int and saved["version"] in (1, 2)
+             and (saved["version"] == 1 or (isinstance(saved.get("verdict"), str)
+                                          and saved["verdict"] in {v.value for v in enums.SupervisorVerdict}
+                                          and isinstance(saved.get("notes"), str)))
              and isinstance(saved.get("output"), dict)
              and type(saved.get("finalizations")) is int and saved["finalizations"] >= 0
              and saved.get("task_hash") == _result_task_hash(task)
@@ -1061,7 +1066,7 @@ def _resume_result(db: Session, run_id: int, specs: dict) -> dict | None:
              and run.agent_id == task.assigned_agent_id and newest == run.id
              and spec is not None and _hash(dataclasses.asdict(spec)) == run.tool_calls.get("agent_definition_hash"))
     if reason or not valid or saved["finalizations"] >= MAX_RESULT_FINALIZATIONS:
-        before = audit.snapshot(task)
+        before = redact_data(audit.snapshot(task))
         why = reason or ("saved result no longer matches its task/policy" if not valid
                          else "saved result finalization attempts exhausted")
         owns = holds_attempt(db, task, run)  # before the run is failed: the check reads the run's status
@@ -1069,12 +1074,17 @@ def _resume_result(db: Session, run_id: int, specs: dict) -> dict | None:
         if owns:
             task.status, task.error = enums.TaskStatus.BLOCKED, f"Result recovery needs operator review: {why}"
         audit.record(db, actor="company-worker", action="task.result-recovery.blocked", entity_type="task",
-                     entity_key=task.key, reason=why, before=before, after=audit.snapshot(task), task_id=task.id)
+                     entity_key=task.key, reason=why, before=before, after=redact_data(audit.snapshot(task)), task_id=task.id)
         db.commit()
         return {"task": task.key, "provider": run.provider, "verdict": "RESULT_BLOCKED",
                 "task_status": task.status.value, "run_id": run.id, "notes": why}
     token = uuid.uuid4().hex
-    saved = {**saved, "output": redact_data(saved["output"]),
+    if saved["version"] == 1:
+        verdict, notes, _ = supervise(task, saved["output"])
+    else:
+        verdict, notes = enums.SupervisorVerdict(saved["verdict"]), saved["notes"]
+    saved = {**saved, "version": 2, "output": redact_data(saved["output"]),
+             "verdict": verdict.value, "notes": redact(notes),
              "finalizations": saved["finalizations"] + 1, "claim": token,
              "claim_until": (_now() + RESULT_CLAIM_TTL).isoformat()}
     run.tool_calls = {**run.tool_calls, "result_checkpoint": saved, "result_hash": _hash(saved["output"]),
@@ -1093,7 +1103,11 @@ def _resume_result(db: Session, run_id: int, specs: dict) -> dict | None:
             or reason or control.agents_paused(db)):
         db.rollback()
         return None
-    verdict, notes, parsed = supervise(task, current["output"])
+    verdict, notes = enums.SupervisorVerdict(current["verdict"]), current["notes"]
+    try:
+        parsed = AgentRunResult.model_validate(current["output"])
+    except ValidationError:
+        verdict, notes, parsed = enums.SupervisorVerdict.FAILED, "malformed saved result", None
     return _finish_result(db, task, run, db.get(models.Agent, run.agent_id), verdict, notes, parsed)
 
 

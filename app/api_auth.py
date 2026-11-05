@@ -190,8 +190,12 @@ async def middleware(request, call_next):
     expected_origin = (f"https://{desk_host}" if is_desk_host else
                        f"{request.url.scheme}://{(header or '').lower()}".removesuffix(
                            ":443" if request.url.scheme == "https" else ":80"))
-    if method not in SAFE_METHODS and _cross_site(request.headers, expected_origin):
-        return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
+    if method not in SAFE_METHODS:
+        browser = any(h in request.headers for h in ("origin", "sec-fetch-site"))
+        # The published tunnel port is fixed in docker-compose.yml; matching Origin alone permits DNS rebinding.
+        trusted_host = is_desk_host or (header or "").lower() in {"localhost:8099", "127.0.0.1:8099"}
+        if (browser and not trusted_host) or _cross_site(request.headers, expected_origin):
+            return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
     authorization = request.headers.get("authorization")
     # The separate API hostname may add a service assertion to existing bearer
     # callers. They keep their own scopes; none can bypass founder verification on

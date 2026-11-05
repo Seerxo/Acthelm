@@ -165,9 +165,9 @@ def test_the_scan_boundary_withholds_whole_text_and_never_exposes_a_jwt_tail(mon
     scanned = []
     monkeypatch.setattr(redact, "_redact_secrets", lambda text: scanned.append(text) or text)
     for text in (url, jwt):
-        assert desk._clean(text) == redact.UNAVAILABLE
-        assert providers.provider_error(text) == redact.UNAVAILABLE
-        assert providers.provider_error(text, tail=True) == redact.UNAVAILABLE
+        assert desk._clean(text) == redact.TOO_LARGE == "[withheld: too large to scan]"
+        assert providers.provider_error(text) == redact.TOO_LARGE
+        assert providers.provider_error(text, tail=True) == redact.TOO_LARGE
     assert not scanned   # no head or tail was passed to the scanner
 
 
@@ -334,7 +334,7 @@ def test_approved_actions_are_redacted_before_storage_truncation(sent, boundary)
     assert result["verdict"] == "APPROVED"
     stored = task.artifacts["actions"][0]
     assert len(stored) <= worker.MAX_ACTION_CHARS and PASSWORD[:8] not in stored
-    assert ("***" in stored) if boundary == worker.MAX_ACTION_CHARS else (stored == redact.UNAVAILABLE)
+    assert ("***" in stored) if boundary == worker.MAX_ACTION_CHARS else (stored == redact.TOO_LARGE)
 
 
 def test_approved_output_is_redacted_in_artifacts_child_tasks_checkpoints_and_nested_audits(sent, monkeypatch):
@@ -403,6 +403,81 @@ def test_provider_run_redacts_any_providers_error():
     raw = ProviderResult("claude", Health.AVAILABLE, error=f"reasoner said token={GH}")
     assert "***" in FakeProvider("claude", [raw]).run("p", {}, cwd="/tmp", timeout_s=5, max_turns=1).error
     _no_leak(raw.error)
+
+
+@pytest.mark.parametrize("word", ["token", "bearer", "authorization"])
+def test_raw_verification_survives_redacted_checkpoint_recovery(sent, monkeypatch, word):
+    db = _db()
+    key = worker.create_selftest(db)
+    task = db.scalar(select(models.Task).where(models.Task.key == key))
+    token = task.context["verify"]["must_contain"][0]
+    assert len(token) == len("selftest-YYYY-MM-DD")
+    task.context = {**task.context, "verify": {**task.context["verify"], "one_of": [token, "not-verified"]}}
+    db.commit()
+    raw = _good(key, evidence=[f"Verification {word}: {token}; task {key}; canary {GH}"],
+                actions=[f"checked {GH}"], learning_candidates=[f"learned {GH}"],
+                new_task_candidates=[{"title": f"Research {GH}", "reason": f"Investigate {SK}", "kind": "research"}])
+    assert worker.supervise(task, raw)[0] == enums.SupervisorVerdict.APPROVED
+    resume = worker._resume_result
+    with monkeypatch.context() as stopped:
+        stopped.setattr(worker, "_resume_result", lambda *a, **kw: None)
+        outcome = worker.run_once(db, {"claude": FakeProvider("claude", [raw])}, SPECS)
+    assert outcome["verdict"] == "RESULT_SAVED"
+    run = db.get(models.AgentRun, outcome["run_id"])
+    checkpoint = run.tool_calls["result_checkpoint"]
+    assert checkpoint["verdict"] == "APPROVED"
+    assert token not in json.dumps(checkpoint)
+    assert run.tool_calls["result_hash"] == worker._hash(checkpoint["output"])
+    assert run.tool_calls["result_hash"] != worker._hash(raw)
+    _no_leak(json.dumps(run.tool_calls))
+
+    def no_supervision(*args):
+        pytest.fail("recovery re-supervised redacted evidence")
+
+    monkeypatch.setattr(worker, "supervise", no_supervision)
+    # A new session has no raw provider output in memory.
+    with Session(db.get_bind()) as restarted:
+        assert resume(restarted, run.id, SPECS)["verdict"] == "APPROVED"
+        for model in (models.AgentRun, models.AuditLog, models.Event, models.AgentNote):
+            for row in restarted.scalars(select(model)):
+                _no_leak(json.dumps(worker.audit.snapshot(row), default=str))
+        parent = restarted.get(models.Task, task.id)
+        _no_leak(json.dumps({"result": parent.result, "artifacts": parent.artifacts}))
+        child = restarted.scalar(select(models.Task).where(models.Task.created_by == "task-materializer"))
+        assert child is not None
+        _no_leak(json.dumps(worker.audit.snapshot(child), default=str))
+    _no_leak(json.dumps(sent))
+
+
+def test_company_brief_redacts_legacy_task_titles(env):
+    response = _desk().get("/company/brief", headers=ASSERT)
+    assert response.status_code == 200 and "TASK-0101" in response.text
+    assert "leaky ***" in response.text
+    _no_leak(response.text)
+
+
+@pytest.mark.parametrize("route,body,action", [
+    ("status", {"status": "BLOCKED", "actor": "founder", "reason": "hold"}, "task.status"),
+    ("assign", {"agent": "research", "actor": "founder"}, "task.assign"),
+])
+def test_task_mutations_redact_legacy_values_in_both_audit_snapshots(env, route, body, action):
+    response = _desk().post(f"/tasks/TASK-0101/{route}", headers=ASSERT, json=body)
+    assert response.status_code == 200, response.text
+    with Session(env) as db:
+        entry = db.scalar(select(models.AuditLog).where(models.AuditLog.action == action))
+        assert entry.before["title"] == entry.after["title"] == "leaky ***"
+        _no_leak(json.dumps({"before": entry.before, "after": entry.after}))
+
+
+@pytest.mark.parametrize("source", ["event", "stderr"])
+def test_codex_error_is_redacted_before_its_head_or_tail_is_truncated(source):
+    raw = "failure " + _boundary_url(providers.MAX_ERROR_CHARS)
+    provider = providers.CodexProvider(environ={})
+    out = json.dumps({"type": "error", "message": raw}) if source == "event" else ""
+    result = provider._result(1, out, raw if source == "stderr" else "", 5)
+    assert result.error and "***" in result.error and len(result.error) <= providers.MAX_ERROR_CHARS
+    assert PASSWORD[:8] not in result.error
+    _no_leak(result.error)
 
 
 def test_a_herdr_run_report_stores_redacted_checks_and_notes(env):
