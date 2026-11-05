@@ -33,7 +33,7 @@ def _setup(monkeypatch, tmp_path, text, hooks=None):
     _checks(monkeypatch, PASSED)
     pushes, git = [], stage_c_runner._git
     def spy(repo, *args, **kwargs):
-        if args[0] == "push":
+        if "push" in args:
             pushes.append(args)
         return git(repo, *args, **kwargs)
     monkeypatch.setattr(stage_c_runner, "_git", spy)
@@ -110,7 +110,7 @@ def test_legitimate_test_naming_the_objective_function_is_published(monkeypatch,
     subprocess.run(["git", "-C", str(mirror), "add", "."], check=True)
     subprocess.run(["git", "-C", str(mirror), *IDENT, "commit", "-qm", "helper"], check=True)
     db = _db()
-    task = write_task(db, objective=f"Add a test that calls {SIGNATURE} and checks that a zero target returns zero")
+    task = write_task(db, objective=f"Exercise {SIGNATURE}")
     out = worker.run_once(db, _providers(), SPECS)
     assert out["verdict"] == "PR_OPEN", out
     assert len(pushes) == 1 and len(hooks["opened"]) == 1
@@ -199,6 +199,11 @@ def test_commit_changed_after_the_scan_is_not_pushed(monkeypatch, tmp_path, move
     assert pushes == [] and hooks["opened"] == []
     if move != "remote":
         assert _remote_branches(remote) == ""
+    worktree = tmp_path / "jobs" / task.key / "worktrees" / task.key
+    base = next(h["evidence"]["base"] for h in task.context["improvement"]["history"]
+                if h["stage"] == "IMPLEMENTING")
+    assert _git(worktree, "rev-parse", "HEAD") == base
+    assert _git(worktree, "diff", "--cached", "--stat")
     _assert_not_leaked(db, task, out, OPS_NOTE, RECORD)
 
 
@@ -288,10 +293,10 @@ def test_pr_text_is_scanned(repo):
     assert stage_c_runner._privacy_gate(path, base, head, TASK, {"<pr title>": "TASK-0100: Stage C change"})[0] == []
 
 
-@pytest.mark.parametrize("field", ["title", "description", "objective", "success_criteria", "context"])
+@pytest.mark.parametrize("field", ["description", "objective", "success_criteria", "context"])
 def test_all_private_task_fields_are_indexed(repo, field):
     path, base = repo
-    value = {field: OPS_NOTE} if field != "context" else {field: {"improvement": {"private_note": OPS_NOTE}}}
+    value = {field: OPS_NOTE} if field != "context" else {field: {"private_note": OPS_NOTE}}
     task = SimpleNamespace(**{**vars(TASK), **value})
     head = _commit(path, {"note.py": f"# {OPS_NOTE}\n"})
     findings, _ = stage_c_runner._privacy_gate(path, base, head, task, {})
@@ -331,6 +336,9 @@ def test_context_files_given_text_is_compared_without_exempting_its_prose(repo):
     task = SimpleNamespace(**{**vars(TASK), "description": "", "context": {
         "stage_c": {"context": ["app/context.py"]}}})
     head = _commit(path, {"note.py": f"# {OPS_NOTE}\n"})
+    assert stage_c_runner._privacy_gate(path, base, head, task, {})[0] == []
+    # The base file is public, but a founder supplying the same prose still makes it private task text.
+    task.context["notes"] = OPS_NOTE
     assert stage_c_runner._privacy_gate(path, base, head, task, {})[0] == [
         {"category": "private_task_text", "path": "note.py", "line": 1}]
 
@@ -339,9 +347,91 @@ def test_plain_python_names_in_the_objective_are_allowed(repo):
     path, _ = repo
     signature = "calculate(rate, amount, duration, principal, divisor, precision, result)"
     base = _commit(path, {"helper.py": f"def {signature}:\n    return 0\n"})
-    task = SimpleNamespace(**{**vars(TASK), "objective": "Test " + signature})
+    task = SimpleNamespace(**{**vars(TASK), "objective": "Exercise " + signature})
     head = _commit(path, {"test_helper.py": f"def test_calculate():\n    assert {signature} == 0\n"})
     assert stage_c_runner._privacy_gate(path, base, head, task, {})[0] == []
+
+
+@pytest.mark.parametrize("sentence", [
+    "Founder approved refund for pilot user after release gateway outage on production host",
+    "secret release key is stored on backup host in root home directory with old password",
+    "pilot user email is admin at company domain and password reset token expires tomorrow",
+    "Founder note: customer account status is blocked until the payment provider confirms the refund for the pilot task",
+])
+def test_individual_base_names_never_exempt_private_sentences(repo, sentence):
+    path, _ = repo
+    words = stage_c_runner._WORD.findall(sentence.casefold())
+    # Every word is a NAME in valid code, but their sequence occurs only in comments and a literal.
+    code = "\n".join(f"class Holder{i}:\n    {word} = 0" for i, word in enumerate(words)
+                     if word not in ("for", "is", "in", "and", "with", "not"))
+    code += "\nif False and None is not None:\n    pass\nfor item in []:\n    pass\nwith open(__file__):\n    pass\n"
+    base = _commit(path, {"names.py": f'{code}\n# {sentence}\nnote = "{sentence}"\nf_note = f"{sentence}"\n'})
+    public = stage_c_runner._Public(path, base)
+    public._load()
+    assert set(words) <= public._identifiers
+    task = SimpleNamespace(**{**vars(TASK), "description": sentence})
+    head = _commit(path, {"note.py": f"# {sentence}\n"})
+    findings, _ = stage_c_runner._privacy_gate(path, base, head, task, {})
+    assert findings == [{"category": "private_task_text", "path": "note.py", "line": 1}]
+    assert sentence not in json.dumps(findings)
+
+
+def test_existing_base_function_signature_verbatim_is_allowed(repo):
+    path, _ = repo
+    signature = f"def {SIGNATURE}:"
+    base = _commit(path, {"helper.py": signature + "\n    return 0\n"})
+    task = SimpleNamespace(**{**vars(TASK), "objective": signature})
+    head = _commit(path, {"copy.py": signature + "\n    return 1\n"})
+    assert stage_c_runner._privacy_gate(path, base, head, task, {})[0] == []
+
+
+@pytest.mark.parametrize("transform", [
+    lambda text: "\u200b".join(text),
+    lambda text: text.replace("e", "e\u00ad"),
+    lambda text: "".join(chr(ord(c) + 0xFEE0) if "a" <= c <= "z" else c for c in text),
+    lambda text: text.replace(" ", "_"),
+    lambda text: "".join(word.capitalize() for word in text.split()),
+    lambda text: "\n".join(f'x{i} = "{word}"' for i, word in enumerate(text.split())),
+    lambda text: "\n".join(f'x{i} = f"{word}"' for i, word in enumerate(text.split())),
+], ids=["zero-width", "soft-hyphen", "fullwidth", "underscores", "camel-case", "one-word-per-literal",
+        "one-word-per-f-literal"])
+def test_normalized_and_split_literal_private_text_is_blocked(repo, transform):
+    path, base = repo
+    note = "the founder needs a manual refund before the customer invoice is closed"
+    task = SimpleNamespace(**{**vars(TASK), "description": note})
+    head = _commit(path, {"note.py": transform(note) + "\n"})
+    findings, _ = stage_c_runner._privacy_gate(path, base, head, task, {})
+    assert findings and {f["category"] for f in findings} == {"private_task_text"}
+    assert note not in json.dumps(findings)
+
+
+def test_normalization_is_applied_to_private_text_too(repo):
+    path, base = repo
+    task = SimpleNamespace(**{**vars(TASK), "description": "\u200b".join(OPS_NOTE)})
+    head = _commit(path, {"note.py": "# " + OPS_NOTE + "\n"})
+    assert stage_c_runner._privacy_gate(path, base, head, task, {})[0]
+
+
+@pytest.mark.parametrize("generated", [
+    {"title": OPS_NOTE},
+    {"context": {"improvement": {"approval": {"findings": [OPS_NOTE]}}}},
+    {"context": {"improvement": {"history": [{"evidence": {"failures": [OPS_NOTE]}}]}}},
+])
+def test_generated_fields_are_not_private_task_text(repo, generated):
+    path, base = repo
+    task = SimpleNamespace(**{**vars(TASK), "description": "", "context": {}, **generated})
+    head = _commit(path, {"note.py": "# " + OPS_NOTE + "\n"})
+    assert stage_c_runner._privacy_gate(path, base, head, task, {})[0] == []
+
+
+def test_exact_character_windows_cannot_use_per_word_exemptions(repo):
+    path, _ = repo
+    value = "syntheticcustomerreference quarterlyrenewalreference internalrecordreference"
+    base = _commit(path, {"names.py": "\n".join(f"{word} = 0" for word in value.split())})
+    task = SimpleNamespace(**{**vars(TASK), "description": value})
+    head = _commit(path, {"note.py": "# " + value[:64] + "\n"})
+    assert stage_c_runner._privacy_gate(path, base, head, task, {})[0] == [
+        {"category": "private_task_text", "path": "note.py", "line": 1}]
 
 
 def test_submodule_is_blocked_even_when_local_git_config_hides_it(repo):
@@ -443,6 +533,13 @@ def test_malformed_scanner_result_is_an_error(repo, monkeypatch, result):
 
 def test_publish_creates_one_commit_directly_on_base_and_pushes_its_sha(monkeypatch, tmp_path):
     remote, hooks, pushes = _setup(monkeypatch, tmp_path, "def test_metric():\n    assert 1 == 1\n")
+    git = stage_c_runner._git
+    def tag_before_push(repo, *args, **kwargs):
+        if "push" in args:
+            _git(repo, "config", "push.followTags", "true")
+            _git(repo, "tag", "-a", "private-review-tag", "-m", "local only")
+        return git(repo, *args, **kwargs)
+    monkeypatch.setattr(stage_c_runner, "_git", tag_before_push)
     db = _db()
     task = write_task(db)
     out = worker.run_once(db, _providers(), SPECS)
@@ -454,6 +551,32 @@ def test_publish_creates_one_commit_directly_on_base_and_pushes_its_sha(monkeypa
     assert _git(worktree, "rev-list", "--parents", "-1", sha).split() == [sha, base]
     assert _git(worktree, "rev-list", "--count", f"{base}..{sha}") == "1"
     assert len(pushes) == 1 and pushes[0][-1] == f"{sha}:refs/heads/task/{task.key}"
+    assert pushes[0][:4] == ("-c", "push.followTags=false", "push", "--no-verify")
+    assert _git(worktree, "tag", "--list") == "private-review-tag"
+    assert _git(remote, "for-each-ref", "refs/tags") == ""
+
+
+def test_repair_findings_quoting_new_code_do_not_make_it_private(monkeypatch, tmp_path):
+    from app import stage_c_ci
+    from tests.test_stage_c_worker import Reviewer, _published_then_repair
+    code = "def test_metric():\n    assert sum([1, 2, 3, 4, 5, 6, 7, 8]) == 36\n"
+    class QuotingReviewer(Reviewer):
+        def _run(self, prompt, schema, **kwargs):
+            result = super()._run(prompt, schema, **kwargs)
+            if schema == stage_c_runner.REVIEW_SCHEMA:
+                result.output = {**result.output, "findings": [code]}
+            return result
+    remote, hooks, pushes = _setup(monkeypatch, tmp_path, "def test_metric():\n    assert 1 == 1\n")
+    db = _db()
+    task = write_task(db)
+    previous = _published_then_repair(db, task, _providers(), monkeypatch)
+    monkeypatch.setattr(stage_c_ci, "gh_facts", lambda *a, **k: {"state": "open", "merged": False})
+    _coder(monkeypatch, code)
+    out = worker.run_once(db, _providers(QuotingReviewer), SPECS)
+    assert out["verdict"] == "PR_OPEN", out
+    assert task.context["improvement"]["approval"]["findings"] == [code]
+    assert len(pushes) == 2 and len(hooks["opened"]) == 1
+    assert _git(remote, "rev-parse", f"refs/heads/task/{task.key}") != previous
 
 
 def test_republish_repair_is_gated_before_replacing_the_remote(monkeypatch, tmp_path):
