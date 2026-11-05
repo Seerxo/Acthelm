@@ -12,6 +12,7 @@ import re
 import stat
 import logging
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -51,11 +52,37 @@ app.middleware("http")(api_auth.middleware)
 _DESK = Path(__file__).resolve().parent / "static" / "desk.html"
 
 
+class _InlineScripts(HTMLParser):
+    """Inline <script> bodies as the browser sees them: an HTML parser, not a regex, so end tags such as
+    `</script >` and attribute quoting cannot make the hashed text differ from what the browser runs."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.scripts: list[str] = []
+        self._body: str | None = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "script":
+            self._body = None if dict(attrs).get("src") else ""
+
+    def handle_data(self, data):
+        if self._body is not None:
+            self._body += data
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self._body is not None:
+            self.scripts.append(self._body)
+            self._body = None
+
+
 def _desk_csp() -> str:
     """The Desk's policy: only its own inline scripts, by hash of the text served (read_text, as desk() reads it),
     so a rebuild needs no hand-edited hash. Fonts are inline data: URLs; style-src needs 'unsafe-inline' (chart and
     toast components inject <style>)."""
-    scripts = re.findall(r"<script\b(?![^>]*\bsrc=)[^>]*>(.*?)</script>", _DESK.read_text(), re.S | re.I)
+    page = _InlineScripts()
+    page.feed(_DESK.read_text())
+    page.close()
+    scripts = page.scripts
     hashes = " ".join(f"'sha256-{base64.b64encode(hashlib.sha256(js.encode()).digest()).decode()}'" for js in scripts)
     return (f"default-src 'none'; script-src {hashes}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
             "font-src data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; "

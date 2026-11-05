@@ -239,6 +239,14 @@ def test_desk_csp_allows_exactly_its_inline_scripts_and_no_inline_handlers():
     assert "default-src 'none'" in csp and "frame-ancestors 'none'" in csp
 
 
+def test_csp_hashes_follow_html_parsing_not_a_tag_regex():
+    page = main._InlineScripts()
+    page.feed('<script>a()</script ><script src="x.js"></script><SCRIPT type="module">b()</SCRIPT\n>'
+              '<script>c("</scr" + "ipt>")</script>')
+    page.close()
+    assert page.scripts == ["a()", "b()", 'c("</scr" + "ipt>")']
+
+
 def test_every_response_carries_security_headers_even_an_auth_refusal(env):
     client = _desk()
     for r in (client.get("/desk/state"), client.get("/desk/state", headers=ASSERT), client.get("/", headers=ASSERT),
