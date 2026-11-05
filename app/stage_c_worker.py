@@ -421,6 +421,8 @@ def execute(db, task, spec, usable):
     run.estimated_cost_usd = 0
     run.tool_calls = {"stage_c": True, "model_calls": calls, "outcome": outcome,
                       "company_os_git_sha": os.environ.get("COMPANY_OS_GIT_SHA")}
+    if out.get("privacy"):   # categories, paths and line numbers only; never the matched text
+        run.tool_calls["privacy"] = out["privacy"]
     capacity = providers.classify(out.get("detail", ""))
     capacity_failure = outcome in ("CODER_FAILED", "REVIEW_FAILED") and capacity in {
         providers.Health.AUTH_REQUIRED, providers.Health.QUOTA_EXHAUSTED, providers.Health.RATE_LIMITED}
@@ -497,7 +499,8 @@ def execute(db, task, spec, usable):
             task.retry_count += 1   # the attempt was spent; the block keeps the next one from repeating it
             task.status = enums.TaskStatus.BLOCKED
             task.error = "CHECKS_REPEATED: the same tests failed in consecutive attempts; see the task's failures"
-        elif owns_attempt and outcome in ("RUNTIME_ERROR", "PR_FAILED", "PUSH_FAILED", "DRIFT", "LEASE_LOST"):
+        elif owns_attempt and outcome in ("RUNTIME_ERROR", "PR_FAILED", "PUSH_FAILED", "DRIFT", "LEASE_LOST",
+                                          stage_c_runner.PRIVACY_BLOCKED, stage_c_runner.PRIVACY_ERROR):
             task.status, task.error = enums.TaskStatus.BLOCKED, outcome
             task.artifacts = {**(task.artifacts or {}), **{k: out[k] for k in ("branch", "commit") if k in out}}
             if outcome == "PR_FAILED" and stage_c_runner.approved_review(db, task):
