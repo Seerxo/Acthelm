@@ -442,10 +442,10 @@ PYTEST_SUMMARY = re.compile(r"=* ?(?:\d+ [a-z]{1,20}(?: [a-z]{1,20})?(?:, )?){1,
 WITHHELD = "[withheld: credential-shaped content]"
 OVERFLOWED = "[withheld: check output exceeded the stdout bound; it could not be scanned whole]"
 PRIVATE_KEY = re.compile(r"PRIVATE KEY(?: BLOCK)?-----|PuTTY-User-Key-File-\d|Private-Lines: \d")   # a PEM/PGP key's body spans lines: withhold all of it
-# The same JWT test as app/stage_c_runner._has_jose_header (this root script imports nothing from the app): a whole
+# The same JWT test as app/redact._has_jose_header (this root script imports nothing from the app): a whole
 # base64url segment, anchored and possessive (linear), that decodes to a JSON object with "alg" (RFC 7515).
 JOSE_CANDIDATE = re.compile(r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,16384}+=*+(?=\.)")
-# Same string as app/stage_c_runner._CREDENTIAL_SHAPES (kept equal by a test): recognised credentials are masked
+# Same string as app/redact._CREDENTIAL_SHAPES (kept equal by a test): recognised credentials are masked
 # before the result is written to done/result.json, which the runner's later masking cannot reach.
 CREDENTIAL_SHAPES = '(?-i:(?:(?<![a-z]{2})|(?=sk-ant-[a-z]{3,5}\\d{2}-(?:[a-z0-9_-]{0,40}+[A-Z]){6}))sk-ant-(?:oat|api|ort|sid|admin)\\d{2}-[\\w-]{40,}+)|(?<!\\w)(?:sk-ant-[\\w-]{8,}|github_pat_\\w{8,}|gh[pousr]_\\w{16,}|sk-[\\w-]{16,}|xox[abprs]-[\\w-]{8,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
 KV_BASE = '|(?:bearer|token|authorization)\\s*+(?:[:=]\\s*+)?[\\w.~+/=-]{12,}|(?:api[_-]?key|secret|password|passwd|token)[\'\\"]?\\s*+[:=]\\s*+[\'\\"]?[^\\s\'\\"]{6,}|(?<![\\w-])(?-i:rt_)[\\w.-]{32,}+'

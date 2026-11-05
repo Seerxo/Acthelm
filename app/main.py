@@ -4,9 +4,11 @@ Internal only (§109): this app binds inside the Docker network and is never pub
 to a host port. Public access, when it is ever wanted, goes through Cloudflare Access
 plus a tunnel — not through an opened port.
 """
+import base64
 import hashlib
 import json
 import os
+import re
 import stat
 import logging
 from datetime import datetime, timedelta, timezone
@@ -24,6 +26,7 @@ from app import (api_auth, approval_identity, audit, keys, context_builder, cont
 from app.config import settings
 from app.db import get_db
 from app.notify import NotificationService, fingerprint, notifier
+from app.redact import redact, redact_data
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("company.api")
@@ -44,6 +47,33 @@ app = FastAPI(
     version="0.1.0",
 )
 app.middleware("http")(api_auth.middleware)
+
+_DESK = Path(__file__).resolve().parent / "static" / "desk.html"
+
+
+def _desk_csp() -> str:
+    """The Desk's policy: only its own inline scripts, by hash of the text served (read_text, as desk() reads it),
+    so a rebuild needs no hand-edited hash. Fonts are inline data: URLs; style-src needs 'unsafe-inline' (chart and
+    toast components inject <style>)."""
+    scripts = re.findall(r"<script\b(?![^>]*\bsrc=)[^>]*>(.*?)</script>", _DESK.read_text(), re.S | re.I)
+    hashes = " ".join(f"'sha256-{base64.b64encode(hashlib.sha256(js.encode()).digest()).decode()}'" for js in scripts)
+    return (f"default-src 'none'; script-src {hashes}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "font-src data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; "
+            "base-uri 'none'; form-action 'self'")
+
+
+DESK_CSP = _desk_csp()
+_SECURITY_HEADERS = {"x-content-type-options": "nosniff", "referrer-policy": "no-referrer", "x-frame-options": "DENY"}
+
+
+@app.middleware("http")   # registered last, so outermost: api_auth's 400/401/403 get these headers too
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in {**_SECURITY_HEADERS, "cache-control": "no-store"}.items():
+        response.headers.setdefault(name, value)   # a route's own Cache-Control (PWA assets, SSE) stays
+    if get_route_path(request.scope) in ("/", "/ui"):
+        response.headers["content-security-policy"] = DESK_CSP
+    return response
 
 
 # --------------------------------------------------------------------------- helpers
@@ -93,7 +123,6 @@ def _record_event(db: Session, payload: schemas.EventIn) -> models.Event:
 
 # --------------------------------------------------------------------------- desk UI
 
-_DESK = Path(__file__).resolve().parent / "static" / "desk.html"
 _PWA_ASSETS = {
     "manifest.webmanifest": "application/manifest+json",
     "sw.js": "text/javascript",
@@ -376,7 +405,7 @@ def company_brief(db: Session = Depends(get_db)) -> str:
     if st["priorities"]:
         L.append("Priorities")
         for t in st["priorities"]:
-            L.append(f"  {t['priority']} {t['key']} [{t['status']}] {t['title']}")
+            L.append(f"  {t['priority']} {t['key']} [{t['status']}] {redact(t['title'])}")
         L.append("")
     else:
         L += ["Priorities", "  no open P0/P1 tasks", ""]
@@ -722,7 +751,7 @@ def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = D
         if not (body.evidence or body.result):
             raise HTTPException(422, "DONE requires evidence or a result (§35, §130)")
 
-    before = audit.snapshot(task)
+    before = redact_data(audit.snapshot(task))
     previous = task.status
     task.status = body.status
     if body.result:
@@ -736,7 +765,7 @@ def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = D
     if body.status == enums.TaskStatus.FAILED:
         task.retry_count += 1
 
-    after = audit.snapshot(task)
+    after = redact_data(audit.snapshot(task))
     if body.actor != who.id:
         after["client_claimed_actor"] = body.actor
     audit.record(db, actor=who.id, action="task.status", entity_type="task",
@@ -772,9 +801,9 @@ def assign_task(key: str, body: schemas.TaskAssign, db: Session = Depends(get_db
     db.refresh(task, with_for_update=True)
     if task.status == enums.TaskStatus.IN_PROGRESS:
         raise HTTPException(409, f"{task.key} is IN_PROGRESS: an attempt owns it; block or cancel it first")
-    before = audit.snapshot(task)
+    before = redact_data(audit.snapshot(task))
     task.assigned_agent_id = agent.id
-    after = audit.snapshot(task)
+    after = redact_data(audit.snapshot(task))
     if body.actor != who.id:
         after["client_claimed_actor"] = body.actor
     audit.record(db, actor=who.id, action="task.assign", entity_type="task",
@@ -812,6 +841,7 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
     db.refresh(task, with_for_update=True)
     st = body.herdr_state
     outcome = runreport.interpret(st)
+    outcome.summary = redact(outcome.summary)
     who = (approval_identity.require_founder(request)
            if task.status in _FOUNDER_ONLY_TASK_STATES
            or outcome.task_status == enums.TaskStatus.REVIEW
@@ -857,15 +887,16 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
         run, also_open = (open_rows[0], open_rows[1:]) if open_rows else (None, [])
     if run is None:
         run = models.AgentRun(agent_id=agent.id if agent else None, task_id=task.id, provider=HERDR_PROVIDER)
+    workflow_name = (st.get("workflow") or {}).get("name")
     for k, v in dict(
         status=outcome.run_status,
         # model_class, not a model id: router.toml owns which model runs (§84).
-        model=(st.get("workflow") or {}).get("name"),
+        model=redact(workflow_name) if workflow_name is not None else None,
         supervisor_verdict=outcome.supervisor_verdict,
         supervisor_notes=outcome.summary,
-        result=st.get("goal"),
-        error=((st.get("checks") or {}).get("summary") if outcome.run_status ==
-               enums.AgentRunStatus.FAILED else None),
+        result=redact(st["goal"]) if st.get("goal") is not None else None,
+        error=(redact(str((st.get("checks") or {}).get("summary") or "")) or None
+               if outcome.run_status == enums.AgentRunStatus.FAILED else None),
         tool_calls={
             "herdr_state": st.get("state"),
             "branch": st.get("branch"),
@@ -897,7 +928,7 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
                 else "re-coding a stopped CI repair is the founder's decision") \
             or worker.ready_refusal(db, task)
 
-    before = audit.snapshot(task)
+    before = redact_data(audit.snapshot(task))
     if not requeue_refusal:
         task.status = outcome.task_status
     task.result = outcome.summary
@@ -913,7 +944,7 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
         notebook.record(db, note=lesson,
                         agent_key=agent.key if agent else None, task_key=task.key)
 
-    after = audit.snapshot(task)
+    after = redact_data(audit.snapshot(task))
     if body.reported_by != who.id:
         after["client_claimed_reported_by"] = body.reported_by
     if requeue_refusal:
@@ -928,8 +959,8 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
         event_type=outcome.event_type, source="herdr/project-control-center",
         severity=outcome.severity, task=task.key,
         payload={"title": f"{task.key}: {outcome.summary}",
-                 "detail": f"workflow={run.model} branch={st.get('branch')}",
-                 "message": task.title},
+                 "detail": redact(f"workflow={run.model} branch={st.get('branch')}"),
+                 "message": redact(task.title)},
     ))
     delivered, _ = notifier.dispatch(db, event)
 
@@ -1266,7 +1297,7 @@ def list_notes(agent: str | None = None, include_archived: bool = False,
         stmt.order_by(models.AgentNote.reference_count.desc(),
                       models.AgentNote.last_seen_at.desc()).limit(limit)
     ).scalars().all()
-    return [{"id": n.id, "note": n.note, "refs": n.reference_count, "tags": n.tags,
+    return [{"id": n.id, "note": redact(n.note), "refs": n.reference_count, "tags": n.tags,
              "last_seen_at": n.last_seen_at.isoformat(),
              "promoted": n.promoted_learning_id is not None,
              "archived": n.archived_at.isoformat() if n.archived_at else None}
@@ -1296,7 +1327,7 @@ def compact_notes(body: schemas.CompactionRequest, db: Session = Depends(get_db)
 @app.get("/learnings")
 def list_learnings(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.execute(select(models.Learning).order_by(models.Learning.created_at.desc())).scalars()
-    return [{"id": x.id, "title": x.title, "lesson": x.lesson, "tags": x.tags,
+    return [{"id": x.id, "title": redact(x.title), "lesson": redact(x.lesson), "tags": x.tags,
              "status": x.status.value, "created_at": x.created_at.isoformat()} for x in rows]
 
 
