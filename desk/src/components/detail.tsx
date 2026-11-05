@@ -39,8 +39,8 @@ export function Confirm({ title, description, action, destructive, onConfirm, ch
           <AlertDialogDescription asChild><div className="grid gap-2 text-sm">{description}</div></AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction variant={destructive ? "destructive" : "default"} onClick={onConfirm}>{action}</AlertDialogAction>
+          <AlertDialogCancel className="h-11">Cancel</AlertDialogCancel>
+          <AlertDialogAction className="h-11" variant={destructive ? "destructive" : "default"} onClick={onConfirm}>{action}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

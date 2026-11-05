@@ -159,7 +159,9 @@ export function systemChecks(d: DeskState, now: number): Check[] {
       : bad.length ? { key: "providers", label: "Agent providers", value: `${bad.length} of ${providers.length} unavailable`, tone: "warning",
           detail: bad.map(([n, h]) => `${n}: ${h.toLowerCase().replaceAll("_", " ")}`).join(" · "), page: "automation" }
       : { key: "providers", label: "Agent providers", value: "All available", tone: "success", detail: providers.map(([n]) => n).join(" · "), page: "automation" },
-    !rec ? { key: "reconciler", label: "Business reconciler", value: "Not reported", tone: "warning", detail: "This API version does not report it", page: "automation" }
+    d.control.agents_paused
+      ? { key: "reconciler", label: "Business reconciler", value: "PAUSED", tone: "warning", detail: "Business reconciler / scheduler is paused", page: "automation" }
+      : !rec ? { key: "reconciler", label: "Business reconciler", value: "Not reported", tone: "warning", detail: "This API version does not report it", page: "automation" }
       : reconcilerFresh(rec, now) && rec.outcome === "COMPLETED"
         ? { key: "reconciler", label: "Business reconciler", value: rec.per_goal_outcome === "FAILED" ? "Ran with goal errors" : "Running",
             tone: rec.per_goal_outcome === "FAILED" ? "warning" : "success", detail: `Last completed ${ageText(rec.last_completed_at, now) ?? "unknown"}`, page: "automation" }

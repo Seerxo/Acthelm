@@ -5,7 +5,7 @@
 // track), so it is never shown as a green "healthy".
 import type { Tone } from "./api"
 
-export type ReconcilerLabel = "UNKNOWN" | "STARTED" | "COMPLETED" | "FAILED" | "UNFINISHED" | "STALE"
+export type ReconcilerLabel = "UNKNOWN" | "STARTED" | "COMPLETED" | "FAILED" | "UNFINISHED" | "STALE" | "PAUSED"
 export interface ReconcilerView {
   label: ReconcilerLabel
   tone: Tone
@@ -49,9 +49,12 @@ export function reconcilerFresh(raw: { freshness?: unknown; last_attempt_at?: un
   return cadence === null || (Number.isFinite(at) && now - at <= 3 * cadence * 1000)
 }
 
-export function reconcilerView(raw: unknown, now: number = Date.now()): ReconcilerView {
+export function reconcilerView(raw: unknown, now: number = Date.now(), paused = false): ReconcilerView {
   const unknown = (detail: string, cadence: string | null = null): ReconcilerView =>
     ({ label: "UNKNOWN", tone: "neutral", detail, last: null, cadence })
+  if (paused)
+    return { label: "PAUSED", tone: "warning", detail: "Business reconciler / scheduler is paused", last: isObj(raw) ? time(raw.last_attempt_at, now) : null,
+      cadence: null }
   if (!isObj(raw)) return unknown("No execution evidence from this API (older API or unreadable response)")
   const cadenceS = count(raw.expected_cadence_s)
   const cadence = cadenceS && cadenceS % 60 === 0 ? `Every ${cadenceS / 60} min` : null

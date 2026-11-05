@@ -151,6 +151,6 @@ test("STALE measures age from the attempt the backend judged, not from a later c
 test("the Automation page judges reconciler evidence by the API's generated_at", async () => {
   const { readFileSync } = await import("node:fs")
   const src = readFileSync(new URL("../pages/automation.tsx", import.meta.url), "utf8")
-  assert.match(src, /reconcilerView\(e, serverNow\(generatedAt\)\)/)
-  assert.match(src, /reconcilerPresentation\(d\.reconciler_execution, d\.generated_at\)/)
+  assert.match(src, /reconcilerView\(e, serverNow\(generatedAt\), paused\)/)
+  assert.match(src, /reconcilerPresentation\(d\.reconciler_execution, d\.generated_at, d\.control\.agents_paused\)/)
 })
