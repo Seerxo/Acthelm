@@ -262,6 +262,18 @@ def test_unreadable_push_target_fails_closed(repo, tmp_path):
     with pytest.raises(stage_c_runner.PrivacyGateError) as error:
         stage_c_runner._privacy_gate(path, base, head, TASK, {}, remote=str(tmp_path / "missing.git"), protocol="file")
     assert str(error.value) == "unreadable"
+    out = stage_c_runner._privacy_stop(_db(), path, base, head, TASK, {},
+                                       str(tmp_path / "missing.git"), "file", expected_remote="")
+    assert out["outcome"] == stage_c_runner.PRIVACY_ERROR
+
+
+def test_shallow_history_is_a_privacy_error_even_with_a_remote_conflict(repo):
+    path, base = repo
+    head = _commit(path, {"x.py": "x = 1\n"})
+    _git(path, "update-ref", "refs/heads/task/TASK-0100", base)
+    (path / ".git/shallow").write_text(base + "\n")
+    out = stage_c_runner._privacy_stop(_db(), path, base, head, TASK, {}, str(path), "file", expected_remote="")
+    assert out["outcome"] == stage_c_runner.PRIVACY_ERROR
 
 
 def _submodule(path):
@@ -393,8 +405,9 @@ def test_existing_base_function_signature_verbatim_is_allowed(repo):
     lambda text: "".join(word.capitalize() for word in text.split()),
     lambda text: "\n".join(f'x{i} = "{word}"' for i, word in enumerate(text.split())),
     lambda text: "\n".join(f'x{i} = f"{word}"' for i, word in enumerate(text.split())),
+    lambda text: "\n".join(f'x{i} = b"{word}"' for i, word in enumerate(text.split())),
 ], ids=["zero-width", "soft-hyphen", "fullwidth", "underscores", "camel-case", "one-word-per-literal",
-        "one-word-per-f-literal"])
+        "one-word-per-f-literal", "one-word-per-bytes-literal"])
 def test_normalized_and_split_literal_private_text_is_blocked(repo, transform):
     path, base = repo
     note = "the founder needs a manual refund before the customer invoice is closed"
@@ -403,6 +416,10 @@ def test_normalized_and_split_literal_private_text_is_blocked(repo, transform):
     findings, _ = stage_c_runner._privacy_gate(path, base, head, task, {})
     assert findings and {f["category"] for f in findings} == {"private_task_text"}
     assert note not in json.dumps(findings)
+
+
+def test_bytes_prose_is_decoded_as_utf8_with_replacement():
+    assert stage_c_runner._prose_lines([(7, r'x = b"caf\xc3\xa9\xff"')]) == [(7, "caf\u00e9\ufffd")]
 
 
 def test_normalization_is_applied_to_private_text_too(repo):
@@ -492,6 +509,8 @@ def test_malformed_remote_state_fails_closed(repo, monkeypatch, listing):
     monkeypatch.setattr(stage_c_runner, "_git", lambda *a, **k: listing)
     with pytest.raises(stage_c_runner.PrivacyGateError, match="^unreadable$"):
         stage_c_runner._privacy_gate(path, base, head, TASK, {}, "remote", "file")
+    out = stage_c_runner._privacy_stop(_db(), path, base, head, TASK, {}, "remote", "file", expected_remote="")
+    assert out["outcome"] == stage_c_runner.PRIVACY_ERROR
 
 
 @pytest.mark.parametrize("failure", [RuntimeError, stage_c_runner.PrivacyGateError])

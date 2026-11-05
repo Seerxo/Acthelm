@@ -490,6 +490,10 @@ class PrivacyGateError(Exception):
     """The gate could not complete; the message is fixed text, never scanned content."""
 
 
+class PushLeaseConflict(PrivacyGateError):
+    """A readable remote task branch conflicts with the expected publication lease."""
+
+
 def _git_bytes(repo: Path, *args: str, protocol: str = "") -> bytes:
     """Raw stdout, undecoded: the gate classifies undecodable bytes itself instead of crashing in a decode."""
     env = coder_diff._env() | {"GIT_ALLOW_PROTOCOL": protocol, "GIT_TERMINAL_PROMPT": "0"}
@@ -653,6 +657,8 @@ def _prose_lines(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
                     text = ast.literal_eval(token.string)
                 except (ValueError, SyntaxError):
                     continue
+                if isinstance(text, bytes):
+                    text = text.decode("utf-8", errors="replace")
                 if not isinstance(text, str):
                     continue
             else:
@@ -745,6 +751,8 @@ def _privacy_gate(worktree: Path, base: str, sha: str, task: models.Task, public
             branch = f"refs/heads/task/{task.key}"
             remote_head = _privacy_remote_head(worktree, remote, branch, protocol)
             if expected_remote is not None and remote_head != expected_remote:
+                if remote_head:
+                    raise PushLeaseConflict("remote task branch does not match the publication lease; not published")
                 raise PrivacyGateError("unreadable")
             if remote_head:
                 _git_bytes(worktree, "cat-file", "-e", f"{remote_head}^{{commit}}")
@@ -799,6 +807,8 @@ def _privacy_stop(db: Session, worktree: Path, base: str, sha: str, task: models
             return None
         unique = sorted({(f["category"], f["path"], f["line"]) for f in findings})[:20]
         where = ", ".join(f"{c} {p}:{n}" for c, p, n in unique)
+    except PushLeaseConflict as e:
+        return _stop(db, "PUSH_FAILED", str(e))
     except Exception:
         return _stop(db, PRIVACY_ERROR, "privacy gate could not verify content; not published",
                      privacy=[{"category": "unreadable", "path": "<gate>", "line": 0}])
