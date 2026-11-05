@@ -670,7 +670,7 @@ def test_coder_quota_cools_down_without_spending_task_retry(monkeypatch, tmp_pat
         def quota(*a, **k):
             callbacks["before_enqueue"]()
             callbacks["after_start"](True)
-            raise RuntimeError("subscription usage limit reached")
+            raise stage_c_runner.CoderFailed("QUOTA_EXHAUSTED")
         return quota
     monkeypatch.setattr(stage_c_runner, "launcher_coder", launcher_coder)
     db = _db()
@@ -1697,7 +1697,7 @@ def test_a_cancel_after_the_capacity_cooldown_commit_is_never_overwritten(monkey
         def quota(*a, **k):
             callbacks["before_enqueue"]()
             callbacks["after_start"](True)
-            raise RuntimeError("subscription usage limit reached")
+            raise stage_c_runner.CoderFailed("QUOTA_EXHAUSTED")
         return quota
     monkeypatch.setattr(stage_c_runner, "launcher_coder", launcher_coder)
     db = _db()

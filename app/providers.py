@@ -108,16 +108,18 @@ def subprocess_runner(argv: list[str], cwd: str, timeout: int, env: dict,
         raise
 
 
+CAPACITY_PATTERNS = (
+    ("QUOTA_EXHAUSTED", r"usage limit|session limit|hit your limit|quota|credit|insufficient|billing|payment"),
+    ("RATE_LIMITED", r"rate.?limit|\b429\b|overloaded|too many requests"),
+    ("AUTH_REQUIRED", r"log ?in|logged in|unauthori[sz]ed|\b401\b|invalid api key|authenticat|oauth|organization has disabled .*subscription access"),
+)
+
+
 def classify(message: str) -> Health:
     m = (message or "").lower()
-    if re.search(r"usage limit|session limit|quota|credit|insufficient|billing|payment", m):
-        return Health.QUOTA_EXHAUSTED
-    if re.search(r"rate.?limit|\b429\b|overloaded|too many requests", m):
-        return Health.RATE_LIMITED
-    # "Your organization has disabled Claude subscription access for Claude Code" (2026-10-23): the account cannot
-    # run at all, so it is a login problem, never "available but this run failed".
-    if re.search(r"log ?in|logged in|unauthori[sz]ed|\b401\b|invalid api key|authenticat|oauth|organization has disabled .*subscription access", m):
-        return Health.AUTH_REQUIRED
+    for code, pattern in CAPACITY_PATTERNS:
+        if re.search(pattern, m):
+            return Health(code)
     return Health.BROKEN
 
 

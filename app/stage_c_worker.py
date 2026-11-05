@@ -423,12 +423,19 @@ def execute(db, task, spec, usable):
                       "company_os_git_sha": os.environ.get("COMPANY_OS_GIT_SHA")}
     if out.get("privacy"):   # categories, paths and line numbers only; never the matched text
         run.tool_calls["privacy"] = out["privacy"]
-    capacity = providers.classify(out.get("detail", ""))
+    if outcome == "CODER_FAILED":
+        code = out.get("failure_class")
+        run.tool_calls["failure_class"] = (code if isinstance(code, str) and
+                                          code in stage_c_runner.CODER_FAILURE_CLASSES else "CODER_ERROR")
+    elif outcome == "LAUNCHER_REFUSED":
+        run.tool_calls["failure_class"] = "LAUNCHER"
+    capacity = (run.tool_calls["failure_class"] if outcome == "CODER_FAILED" else
+                providers.classify(out.get("detail", "")).value)
     capacity_failure = outcome in ("CODER_FAILED", "REVIEW_FAILED") and capacity in {
-        providers.Health.AUTH_REQUIRED, providers.Health.QUOTA_EXHAUSTED, providers.Health.RATE_LIMITED}
+        providers.Health.AUTH_REQUIRED.value, providers.Health.QUOTA_EXHAUSTED.value, providers.Health.RATE_LIMITED.value}
     if capacity_failure:
         name = reviewer.name if outcome == "REVIEW_FAILED" else run.provider
-        attempts = [{"provider": name, "health": capacity.value}]
+        attempts = [{"provider": name, "health": capacity}]
         run.tool_calls = {**run.tool_calls, "attempts": attempts, "capacity_failure": True}
         worker._cool(db, attempts)  # commits (heartbeat): before the ownership check, never between it and the writes
     # A launcher refusal is free only if no model ran: a refused checks step after a coder run is a spent attempt.

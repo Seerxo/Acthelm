@@ -2,11 +2,15 @@
 It widens the authority in time only. Break caught: any form of it that a non-founder can issue, that outlives a
 deploy, covers a file nobody named, exceeds its daily cap, or turns on code writing by itself."""
 from datetime import datetime, timedelta, timezone
+import io
+import json
+from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 
 from app import control, models, stage_c_worker, worker
+from tests.test_coder_launch import CFG, FakeProcess, L  # noqa: F401 (fixture)
 from tests.test_founder_authorization import (ASSERT, CALLERS, FID, SHA, _c, _founder, env)  # noqa: F401 (fixture)
 from tests.test_stage_c_worker import (_same_repository_publishing, FOUNDER_ID, SHA_A, SHA_B, armed, assert_untouched, authorization, tick)
 from tests.test_worker import SPECS
@@ -230,7 +234,7 @@ def test_the_stage_c_worker_refunds_a_capacity_failure(monkeypatch, tmp_path):
     pipeline(monkeypatch, tmp_path)
     refunds = _spy_refunds(monkeypatch)
     def quota(*a, **k):
-        raise RuntimeError("subscription usage limit reached")
+        raise stage_c_runner.CoderFailed("QUOTA_EXHAUSTED")
     monkeypatch.setattr(stage_c_runner, "launcher_coder", lambda **kw: quota)
     db = _db()
     task = write_task(db)
@@ -246,3 +250,71 @@ def test_the_stage_c_worker_does_not_refund_a_completed_run(monkeypatch, tmp_pat
     write_task(db)
     out = worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
     assert out["verdict"] == "PR_OPEN" and refunds == []
+
+
+@pytest.mark.parametrize("message,channel,code,refunded", [
+    ("You've hit your usage limit", "stdout", "QUOTA_EXHAUSTED", True),
+    ("You've hit your limit", "stdout", "QUOTA_EXHAUSTED", True),
+    ("subscription usage limit reached", "stderr", "QUOTA_EXHAUSTED", True),
+    ("HTTP 429: too many requests", "stderr", "RATE_LIMITED", True),
+    ("Not logged in: please authenticate", "stderr", "AUTH_REQUIRED", True),
+    ("unexpected coder failure", "stdout", "CODER_ERROR", False),
+])
+def test_coder_cli_failure_reaches_standing_refund_without_raw_text(L, monkeypatch, tmp_path,
+                                                                  message, channel, code, refunded):
+    from app import enums, stage_c_runner
+    from tests.test_stage_c_worker import Reviewer, _db, pipeline, write_task
+    real_coder = stage_c_runner.launcher_coder
+    pipeline(monkeypatch, tmp_path, mock_authorization=False)
+    monkeypatch.setenv("COMPANY_OS_GIT_SHA", SHA_A)
+    db = _db()
+    task = write_task(db)
+    control.issue_standing(db, [PATH], SHA_A, founder=FOUNDER_ID, max_per_day=2)
+    # Preserve a previous spent run: a refund must restore the original count, not clear the day.
+    assert control.consume_write_authorization(db, task, SHA_A, 999) is None
+    db.commit()
+    canary = "RAW_CODER_CANARY_7ac452"
+    output = f"{message}\n{canary}\nlast line has no capacity hint\n".encode()
+    results = []
+
+    def host_start(_):
+        real_popen = L.subprocess.Popen
+        def popen(argv, **kw):
+            if argv[0] != "docker":
+                return real_popen(argv, **kw)
+            mount = next(a for a in argv if a.endswith("target=/run/company-coder"))
+            ack = Path(mount.split("source=", 1)[1].split(",target=", 1)[0])
+            proc = FakeProcess(output if channel == "stdout" else b"unhelpful stdout\n",
+                               read=lambda: (ack / "started").touch())
+            proc.returncode = 1
+            proc.stderr = io.BytesIO(output if channel == "stderr" else b"")
+            return proc
+        with monkeypatch.context() as patch:
+            patch.setattr(L.subprocess, "Popen", popen)
+            result = L.handle(task.key, CFG)
+        results.append(json.loads((L.JOBS / task.key / "done/result.json").read_text()))
+        assert result == results[-1]
+
+    def launcher_coder(**kw):
+        kw.update(poll_s=0, sleep=host_start)
+        return real_coder(**kw)
+    monkeypatch.setattr(stage_c_runner, "launcher_coder", launcher_coder)
+    out = worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+    db.expire_all()
+    run = db.get(models.AgentRun, out["run_id"])
+    assert out["verdict"] == "CODER_FAILED" and out["model_calls"] == 1
+    assert run.tool_calls["failure_class"] == code
+    assert results[0]["failure_class"] == code
+    assert standing(db).value["used"]["count"] == (1 if refunded else 2)
+    assert task.retry_count == (0 if refunded else 1)
+    assert ("stage-c.standing.refund" in audit_actions(db)) is refunded
+    cooldown = worker._cooldowns(db).get("claude")
+    if refunded:
+        assert task.status == enums.TaskStatus.READY and worker._capacity_only(run)
+        assert cooldown["health"] == code
+        assert datetime.fromisoformat(cooldown["until"]) > datetime.now(timezone.utc)
+    else:
+        assert not cooldown and not worker._capacity_only(run)
+    persisted = [dict(row) for table in models.Base.metadata.sorted_tables
+                 for row in db.execute(table.select()).mappings()]
+    assert canary not in json.dumps([results, out, persisted], default=str)
