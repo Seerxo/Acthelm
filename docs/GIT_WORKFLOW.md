@@ -45,16 +45,21 @@ private self-hosted CI as the normal engineering path.
 
 - Do not use GitHub's **Update branch** just because a branch is behind `main`.
 - If the branch is mergeable and repository rules allow it, leave it unchanged.
-- If an update is required, use the authorized workflow and preserve independent review.
-  A changed head invalidates earlier exact-head CI evidence; rerun required checks.
+- Branch protection (a repository setting) requires a branch that is up to date with `main`, so a
+  behind branch must be updated by a maintainer before it can merge (there is no automated refresh tool). The update
+  changes the head: it invalidates earlier exact-head CI evidence, so rerun required checks, and
+  preserve independent review. For Stage C PRs, see the behind-`main` limit in
+  [README.md](../README.md#stage-c-from-task-to-pull-request).
 
 ## 4. CI gates
 
-- The `ci` workflow must pass on the exact head commit of the PR: compile, Alembic single head,
-  the pytest suite, and the deterministic docs and branch-policy checks.
+- The required checks `python-tests`, `frontend-tests` and `trufflehog` must pass on the exact head
+  commit of the PR. `python-tests` covers compile, Alembic single head, the pytest suite, and the
+  deterministic docs and branch-policy checks; the manual `ci` workflow is not required.
 - The Postgres-only tests run in their own CI step.
-- **Advisory vs enforced:** GitHub does not enforce these checks here (no branch protection on the free
-  plan). `scripts/merge-pr` is the audited command path and refuses a merge unless CI is green on the
+- **Enforcement:** GitHub branch protection on `main` requires those three checks, an up-to-date
+  branch and one approving review. It is a repository setting, not code, so nothing here can detect a change to it.
+  `scripts/merge-pr` is the audited command path and also refuses a merge unless CI is green on the
   checked head commit. The founder retains direct GitHub merge authority; reconciliation verifies the
   exact head, CI, independent review and founder actor. It records the verified GitHub merge and links
   any matching control-plane authorization, but does not claim which client initiated the merge. GitHub
@@ -79,8 +84,9 @@ private self-hosted CI as the normal engineering path.
 
 ## 6. Deployment separation
 
-- Merging to `main` does **not** deploy. Production deploys are a separate, founder-approved step
-  (`scripts/deploy-company-os.sh`, §72–74). Deploy evidence is the deployed API and worker SHA.
+- Merging to `main` is not releasing. Production releases go through the signed release gateway
+  ([security/RELEASE_GATEWAY.md](security/RELEASE_GATEWAY.md)): LOW-risk releases are gateway-signed,
+  HIGH-risk releases are founder-signed. Deploy evidence is the deployed API and worker SHA.
 - Do not enable auto-merge or automatic deployment unless the founder approves a specific,
   tightly scoped policy. A passing CI run or merged PR is not a production deployment.
 
@@ -90,6 +96,12 @@ private self-hosted CI as the normal engineering path.
   never pushes to `main`, never calls the merge controller, and never gets GitHub admin credentials.
 - Generated work opens a PR with a task branch name and a Conventional Commit title. Stage C jobs
   that stop before the PR leave no merged PR, so cleanup never touches them.
+- Before a Stage C push, the privacy gate scans every commit new to the fork's target branch relative
+  to upstream main, plus public PR/commit text, for credentials and overlap with indexed founder task
+  text. It fails closed and binds publication to the scanned SHA and remote lease; repair pushes and
+  missing-PR recovery also use it (`app/stage_c_runner.py`, `tests/test_stage_c_privacy_gate.py`).
+  Its thresholds and residual limits still require human privacy review; see
+  [the security policy](../SECURITY.md#security-layers-are-separate).
 
 ## 8. Branch retention and recovery
 

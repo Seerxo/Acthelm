@@ -30,7 +30,7 @@ public source → CI runner → artifact → release gateway → production host
 
 | Threat | Control | Evidence |
 |---|---|---|
-| A change merges without passing tests | Required checks `python-tests` and `frontend` on the exact head commit; `scripts/merge-pr` refuses pending, failed or other-commit evidence | Tested: `tests/test_ci_status_gate.py`, `tests/test_merge_pr.py`. Branch protection is an **assumption** until configured |
+| A change merges without passing tests | Required checks `python-tests`, `frontend-tests` and `trufflehog` on the exact head commit, enforced by branch protection on `main`; `scripts/merge-pr` refuses pending, failed or other-commit evidence | Tested: `tests/test_ci_status_gate.py`, `tests/test_merge_pr.py`. Branch protection is a repository setting, not tested here |
 | An agent merges its own work | The coding agent's account is read-only on the repository and publishes only to a fork | Verified at runtime by the Stage C preflight (`app/stage_c_preflight.py`, `app/stage_c_credential_boundary.py`) |
 | An unexpected push to `main` | `app/main_guard.py` detects commits that did not come through a recorded merge | Detection only; prevention depends on branch protection |
 
@@ -50,6 +50,7 @@ public source → CI runner → artifact → release gateway → production host
 | Prompt injection in repository files or task text steers the coder | The coder has no GitHub credentials, writes only to a scoped path list, and its output is reviewed by a different provider before publication | Scope and fingerprint tested in `tests/test_stage_c_*.py`; review quality is an **assumption** |
 | Network exfiltration from the coder | The coder container reaches only the model provider hosts through an egress proxy | Verified at runtime by preflight acceptance checks (`acceptance:egress`, `direct_egress_blocked`, `random_hosts_blocked`) |
 | Credential theft from the sandbox | Provider logins are mounted separately from GitHub credentials; the coder cannot read the worker token | Runtime acceptance check `credential_isolation` |
+| Private task text or credentials leak through a public fork | The pre-push privacy gate in `app/stage_c_runner.py` scans every commit new to the target branch relative to upstream main, including commit objects, full changed blobs and paths, plus public PR/commit text. Errors and unscannable content stop publication; the scan binds to the pushed SHA and remote lease. Repairs and missing-PR recovery are gated too | Coverage: `tests/test_stage_c_privacy_gate.py`. Not verified: semantic privacy or arbitrary secrets; homoglyphs, encodings, rewording, translation, junk-word insertion and fragments below both the 8-word and 64-character thresholds can pass. Indexed fields exclude the title and generated `improvement` evidence; unrelated private facts and already published history are not protected. Contiguous base Python code, excluding comments/literals, is exempt from overlap matching. No live fork acceptance is established by these local tests |
 | Runaway cost | No metered API keys; a quota limit means waiting; no automatic purchases | Policy in `agents/cost_policy.yaml`, enforced by provider configuration |
 
 ## 5. API and Desk
@@ -57,6 +58,9 @@ public source → CI runner → artifact → release gateway → production host
 | Threat | Control | Evidence |
 |---|---|---|
 | Unauthenticated access to the API or Desk | Production is reachable only through an authenticated tunnel; routes have scoped policies; founder-only actions require a verified identity assertion | Tested: `tests/test_api_auth.py`, `tests/test_approval_identity.py` |
+| Model/provider text exposes data through the Desk | `app/redact.py` masks credential shapes at write and read boundaries, with fixed placeholders on errors or oversized input; `app/worker.py` redacts stored output and audits, and `app/desk.py` filters legacy reads and allowlists task-detail context/artifacts. `app/main.py` sets security headers and a script-hash CSP, discovering inline scripts with `html.parser` | Coverage: `tests/test_desk_data_exposure.py`. Not verified: complete detection of secrets or private prose, every browser's CSP enforcement, or live deployment configuration. Inline styles remain allowed; parser/browser script-data escape differences are bounded by a built-bundle test, not a general HTML parsing guarantee |
+| Cross-site writes or DNS rebinding inherit a trusted peer's authority | `app/api_auth.py` checks Origin/Sec-Fetch-Site on writes before dispatch, including log mode. Browser writes require the configured Desk Host or a fixed loopback endpoint, so a matching attacker Host/Origin pair is refused | Coverage: `tests/test_api_auth.py`, `tests/test_desk_data_exposure.py`. Not verified: live DNS, tunnel/proxy configuration or real-browser behavior. Requests with neither browser header use caller authentication instead; same-origin malicious scripts are outside this control |
+| An agent or operator tampers with goals to steer planning | `app/main.py` requires the verified founder for goal creation and editing and audits that principal, treating supplied actor fields as metadata; `app/api_auth.py` enforces founder scope even in log mode. The agent pause also stops `app/business_reconciler.py` and `app/experiment_scheduler.py` | Coverage: `tests/test_founder_authorization.py`, `tests/test_goals.py`, `tests/test_business_reconciler.py`, `tests/test_experiment_scheduler.py`. Not verified: compromised founder sessions, direct database writes, production identity configuration or live pause behavior; read access to goals is not made founder-only |
 | SQL injection | SQLAlchemy ORM; the two raw SQL statements in `app/` use bound parameters | Reviewed: no SQL in `app/` is built with f-strings, `%` or `.format` |
 | Path traversal in release archives | Archive paths are validated; mode and scope are checked | Tested: `tests/test_release_archive_permissions.py`, `tests/test_release_host_hardening.py` |
 
@@ -69,11 +73,12 @@ public source → CI runner → artifact → release gateway → production host
 
 ## Known residual risks
 
-- **GitHub settings are not code.** Branch protection, required reviews, secret scanning push
-  protection and Actions approval policies must be configured on the repository; this document cannot
-  enforce them.
+- **GitHub settings are not code.** Branch protection on `main` requires `python-tests`,
+  `frontend-tests` and `trufflehog`, an up-to-date branch and one approving review, but it is not
+  versioned here and no test detects a change to it. The review setting, secret scanning push protection and Actions approval
+  policies are not verified from this repository.
 - **Single owner.** The founder login is the final merge and release authority; a compromise of that
-  account or its signing key bypasses the human gate.
+  account or its signing key bypasses the human gate. The gateway key can release low-risk paths on its own.
 - **Third-party apps.** Any GitHub App with write access to the repository can push to it. Keep app
   permissions minimal.
 - **Release driver timeout.** The host verifier runs the deploy driver without its own time limit; a hung
