@@ -84,8 +84,9 @@ def _invalid(field: str, raw) -> str | None:
 
 
 def validate(funnel: dict) -> list[str]:
-    """Problems that make the whole snapshot untrustworthy. A field that is absent or null is
-    missing, never zero; a present field that is invalid or contradicts another rejects the snapshot,
+    """Problems that make the whole snapshot untrustworthy. An absent field is missing;
+    null on a new field rejects the snapshot. A present field that is invalid or
+    contradicts another rejects the snapshot,
     so no half-believed funnel reaches a goal."""
     problems = [why for field, *_ in FIELDS if field not in NEW_COUNTS and (raw := funnel.get(field)) is not None
                 and (why := _invalid(field, raw))]
