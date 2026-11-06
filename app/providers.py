@@ -109,9 +109,9 @@ def subprocess_runner(argv: list[str], cwd: str, timeout: int, env: dict,
 
 
 CAPACITY_PATTERNS = (
-    ("QUOTA_EXHAUSTED", r"\b(?:usage limit|session limit|hit your limit|quota|credits?|insufficient (?:balance|funds)|billing|payment)\b"),
-    ("RATE_LIMITED", r"\b(?:rate[ _-]?limit(?:ed)?|overloaded|too many requests)\b|(?<![\w.])429(?![\w.])"),
-    ("AUTH_REQUIRED", r"\b(?:log ?in|logged in|unauthori[sz]ed|invalid api key|authenticate|authentication|oauth|organization has disabled .*subscription access)\b|(?<![\w.])401(?![\w.])"),
+    ("QUOTA_EXHAUSTED", r"(?<![a-z0-9])(?:usage[ _]limit|session[ _]limit|hit your limit|quota|credits?|insufficient[ _](?:balance|funds|quota)|billing|payment)(?![a-z0-9])"),
+    ("RATE_LIMITED", r"(?<![a-z0-9])(?:rate[ _-]?limit(?:ed)?|overloaded|too many requests)(?![a-z0-9])|(?<![\w.])429(?!\w|\.\d)"),
+    ("AUTH_REQUIRED", r"(?<![a-z0-9])(?:log ?in|logged in|unauthori[sz]ed|invalid api key|authenticat(?:e|ed|ion|ing)|oauth|organization has disabled .*subscription access)(?![a-z0-9])|(?<![\w.])401(?!\w|\.\d)"),
 )
 
 

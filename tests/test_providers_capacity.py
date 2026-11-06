@@ -22,7 +22,28 @@ def test_launcher_classifies_capacity_like_providers(message):
     assert _load().capacity_class(message) == ("CODER_ERROR" if health == "BROKEN" else health)
 
 
-@pytest.mark.parametrize("message", ["catalog in use", "insufficient context", "0.401", "0.429"])
+@pytest.mark.parametrize("message,expected", [
+    ("insufficient_quota", "QUOTA_EXHAUSTED"),
+    ("quota_exceeded", "QUOTA_EXHAUSTED"),
+    ("rate_limit_error", "RATE_LIMITED"),
+    ("overloaded_error", "RATE_LIMITED"),
+    ("authentication_error", "AUTH_REQUIRED"),
+    ("authentication_failed", "AUTH_REQUIRED"),
+    ("Not authenticated", "AUTH_REQUIRED"),
+    ("status 429.", "RATE_LIMITED"),
+    ("HTTP 429.", "RATE_LIMITED"),
+    ("usage_limit", "QUOTA_EXHAUSTED"),
+    ("session_limit", "QUOTA_EXHAUSTED"),
+    ("insufficient_funds", "QUOTA_EXHAUSTED"),
+    ("authenticating", "AUTH_REQUIRED"),
+    ("HTTP 401.", "AUTH_REQUIRED"),
+])
+def test_capacity_error_variants(message, expected):
+    assert providers.classify(message).value == expected
+    assert _load().capacity_class(message) == expected
+
+
+@pytest.mark.parametrize("message", ["catalog in use", "insufficient context", "0.401", "0.429", "blogin"])
 def test_non_capacity_phrases_are_spent_errors(message):
     assert _load().capacity_class(message) == "CODER_ERROR"
     assert providers.classify(message) == providers.Health.BROKEN
@@ -42,6 +63,8 @@ def test_non_capacity_phrases_are_spent_errors(message):
     (b'[]', b"usage limit reached", "QUOTA_EXHAUSTED"),
     (b'{"is_error":"true","result":"quota"}', b"", "CODER_ERROR"),
     (b'{"is_error":true,"result":429,"errors":[401,{"path":"quota"}]}', b"", "CODER_ERROR"),
+    (b'{"is_error":true,"result":"unexpected failure","duration_ms":429}', b"", "CODER_ERROR"),
+    (b'{"is_error":true,"result":"unexpected failure","total_cost_usd":0.401}', b"", "CODER_ERROR"),
 ])
 def test_launcher_uses_only_stderr_and_eligible_envelope_error_text(monkeypatch, stdout, stderr, expected):
     import io
