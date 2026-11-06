@@ -423,12 +423,19 @@ def execute(db, task, spec, usable):
                       "company_os_git_sha": os.environ.get("COMPANY_OS_GIT_SHA")}
     if out.get("privacy"):   # categories, paths and line numbers only; never the matched text
         run.tool_calls["privacy"] = out["privacy"]
-    capacity = providers.classify(out.get("detail", ""))
+    if outcome == "CODER_FAILED":
+        code = out.get("failure_class")
+        run.tool_calls["failure_class"] = (code if isinstance(code, str) and
+                                          code in stage_c_runner.CODER_FAILURE_CLASSES else "CODER_ERROR")
+    elif outcome == "LAUNCHER_REFUSED":
+        run.tool_calls["failure_class"] = "LAUNCHER"
+    capacity = (run.tool_calls["failure_class"] if outcome == "CODER_FAILED" else
+                providers.classify(out.get("detail", "")).value)
     capacity_failure = outcome in ("CODER_FAILED", "REVIEW_FAILED") and capacity in {
-        providers.Health.AUTH_REQUIRED, providers.Health.QUOTA_EXHAUSTED, providers.Health.RATE_LIMITED}
+        providers.Health.AUTH_REQUIRED.value, providers.Health.QUOTA_EXHAUSTED.value, providers.Health.RATE_LIMITED.value}
     if capacity_failure:
         name = reviewer.name if outcome == "REVIEW_FAILED" else run.provider
-        attempts = [{"provider": name, "health": capacity.value}]
+        attempts = [{"provider": name, "health": capacity}]
         run.tool_calls = {**run.tool_calls, "attempts": attempts, "capacity_failure": True}
         worker._cool(db, attempts)  # commits (heartbeat): before the ownership check, never between it and the writes
     # A launcher refusal is free only if no model ran: a refused checks step after a coder run is a spent attempt.
@@ -447,6 +454,16 @@ def execute(db, task, spec, usable):
         control.refund_standing_run(db, task, run.id)  # an unavailable provider is not a spent attempt
         if owns_attempt:
             task.status = enums.TaskStatus.READY
+            if outcome == "CODER_FAILED":
+                recent = db.scalars(select(models.AgentRun.tool_calls).where(models.AgentRun.task_id == task.id,
+                                                                            models.AgentRun.id != run.id)
+                                    .order_by(models.AgentRun.id.desc()).limit(MAX_CODER_CAPACITY_FAILURES - 1)).all()
+                if len(recent) == MAX_CODER_CAPACITY_FAILURES - 1 and all(
+                        (r or {}).get("outcome") == "CODER_FAILED" and (r or {}).get("capacity_failure") is True
+                        for r in recent):
+                    task.status = enums.TaskStatus.BLOCKED
+                    task.error = (f"CODER_CAPACITY: the coder was unavailable {MAX_CODER_CAPACITY_FAILURES} attempts in a row; "
+                                  "check the provider's subscription access and limits, then set READY")
         run.status = enums.AgentRunStatus.FAILED
     elif free_refusal:
         # The host launcher refused before any model ran (pause authority, fence, config): infrastructure. No retry
@@ -592,6 +609,7 @@ def published_pr_number(task) -> int | None:
 REPAIR_STAGES = ("IMPLEMENTING", "TESTING", "INDEPENDENT_REVIEW")
 MAX_FEEDBACK_CHARS = 12000
 MAX_LAUNCHER_REFUSALS = 3                  # consecutive free refusals before the task is BLOCKED
+MAX_CODER_CAPACITY_FAILURES = 3            # consecutive coder capacity failures before founder inspection
 LAUNCHER_COOLDOWN_KEY = "stage_c_launcher"  # worker cooldown entry that pauses Stage C admission only
 
 

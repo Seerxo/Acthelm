@@ -670,7 +670,7 @@ def test_coder_quota_cools_down_without_spending_task_retry(monkeypatch, tmp_pat
         def quota(*a, **k):
             callbacks["before_enqueue"]()
             callbacks["after_start"](True)
-            raise RuntimeError("subscription usage limit reached")
+            raise stage_c_runner.CoderFailed("QUOTA_EXHAUSTED")
         return quota
     monkeypatch.setattr(stage_c_runner, "launcher_coder", launcher_coder)
     db = _db()
@@ -680,6 +680,82 @@ def test_coder_quota_cools_down_without_spending_task_retry(monkeypatch, tmp_pat
     assert task.status == enums.TaskStatus.READY and task.retry_count == 0
     assert worker._capacity_only(run) and worker._cooldowns(db)[run.provider]["health"] == "QUOTA_EXHAUSTED"
     assert out["model_calls"] == 1
+
+
+def test_three_consecutive_coder_capacity_failures_block_and_refund_once_each(monkeypatch, tmp_path):
+    pipeline(monkeypatch, tmp_path, mock_authorization=False)
+    monkeypatch.setenv("COMPANY_OS_GIT_SHA", SHA_A)
+    monkeypatch.setattr(worker, "PROVIDER_COOLDOWN", timedelta(0))
+    db = _db()
+    task = write_task(db)
+    control.issue_standing(db, ["tests/test_metrics.py"], SHA_A, founder=FOUNDER_ID, max_per_day=1)
+    codes = iter(["QUOTA_EXHAUSTED", "AUTH_REQUIRED", "RATE_LIMITED"])
+    def launcher_coder(**callbacks):
+        def fail(directory, job):
+            callbacks["before_enqueue"]()
+            callbacks["after_start"](True)
+            done = directory.parent / "done"
+            done.mkdir()
+            (done / "result.json").write_text('{"exit":1}')
+            raise stage_c_runner.CoderFailed(next(codes))
+        return fail
+    monkeypatch.setattr(stage_c_runner, "launcher_coder", launcher_coder)
+    ps = {n: Reviewer(n) for n in ("claude", "codex")}
+    for attempt in range(3):
+        out = worker.run_once(db, ps, SPECS)
+        assert out["verdict"] == "CODER_FAILED"
+        assert task.status == (enums.TaskStatus.BLOCKED if attempt == 2 else enums.TaskStatus.READY)
+        assert task.retry_count == 0
+        assert db.get(models.ControlState, control.STANDING_AUTHORIZATION).value["used"]["count"] == 0
+        assert control.refund_standing_run(db, task, out["run_id"]) is False
+        assert db.query(models.AuditLog).filter_by(action="stage-c.standing.refund").count() == attempt + 1
+    assert task.error == ("CODER_CAPACITY: the coder was unavailable 3 attempts in a row; "
+                          "check the provider's subscription access and limits, then set READY")
+    assert worker.run_once(db, ps, SPECS)["model_calls"] == 0
+    assert db.query(models.AgentRun).filter_by(task_id=task.id).count() == 3
+
+
+@pytest.mark.parametrize("intervening", ["PR_OPEN", "CODER_FAILED", "REVIEW_FAILED"])
+def test_non_capacity_coder_outcome_resets_consecutive_capacity_count(monkeypatch, tmp_path, intervening):
+    pipeline(monkeypatch, tmp_path)
+    db = _db()
+    task = write_task(db)
+    # Persisted history: capacity, success/non-capacity outcome, capacity. The next capacity failure is only #2.
+    for outcome in ("capacity", intervening, "capacity"):
+        capacity = outcome == "capacity"
+        db.add(models.AgentRun(agent_id=task.assigned_agent_id, task_id=task.id, provider="claude",
+                              status=enums.AgentRunStatus.SUCCEEDED if outcome == "PR_OPEN" else enums.AgentRunStatus.FAILED,
+                              tool_calls={"outcome": "CODER_FAILED" if capacity else outcome,
+                                          "capacity_failure": capacity or outcome == "REVIEW_FAILED"}))
+    db.commit()
+    def fail(*a, **k):
+        raise stage_c_runner.CoderFailed("QUOTA_EXHAUSTED")
+    monkeypatch.setattr(stage_c_runner, "launcher_coder", lambda **kw: fail)
+    out = worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+    assert out["verdict"] == "CODER_FAILED"
+    assert task.status == enums.TaskStatus.READY and task.retry_count == 0
+    assert task.error is None
+
+
+@pytest.mark.parametrize("exception,code", [(ValueError, "CODER_ERROR"), (TimeoutError, "TIMEOUT")])
+def test_internal_coder_failure_detail_keeps_only_exception_type(monkeypatch, tmp_path, exception, code):
+    pipeline(monkeypatch, tmp_path)
+    db = _db()
+    write_task(db)
+    captured = []
+    real_run = stage_c_runner.run
+    def run(*a, **kw):
+        result = real_run(*a, **kw)
+        captured.append(result)
+        return result
+    def fail(*a, **kw):
+        raise exception("PRIVATE_EXCEPTION_MESSAGE login quota")
+    monkeypatch.setattr(stage_c_runner, "run", run)
+    monkeypatch.setattr(stage_c_runner, "launcher_coder", lambda **kw: fail)
+    out = worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+    assert out["verdict"] == "CODER_FAILED"
+    assert captured == [{"outcome": "CODER_FAILED", "detail": f"{code}: {exception.__name__}", "failure_class": code}]
+    assert "PRIVATE_EXCEPTION_MESSAGE" not in json.dumps(out)
 
 
 def test_start_ack_persistence_failure_blocks_without_spending_retry(monkeypatch, tmp_path):
@@ -1697,7 +1773,7 @@ def test_a_cancel_after_the_capacity_cooldown_commit_is_never_overwritten(monkey
         def quota(*a, **k):
             callbacks["before_enqueue"]()
             callbacks["after_start"](True)
-            raise RuntimeError("subscription usage limit reached")
+            raise stage_c_runner.CoderFailed("QUOTA_EXHAUSTED")
         return quota
     monkeypatch.setattr(stage_c_runner, "launcher_coder", launcher_coder)
     db = _db()
@@ -2011,7 +2087,7 @@ def test_b5_worker_publishes_to_the_configured_fork_and_opens_the_pr_from_it(mon
     "https://github.com/seerxo/acthelm/pull/0",
     "https://github.com/seerxo/acthelm/pull/abc",
     "https://github.com/seerxo/acthelm/pull/" + "9" * 5000,
-])
+], ids=lambda u: "url")
 def test_published_pr_identity_rejects_other_repositories_and_malformed_urls(url):
     db = _db()
     task = _published_task_for_merge_reconciliation(db)

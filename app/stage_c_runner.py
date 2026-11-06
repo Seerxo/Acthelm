@@ -146,6 +146,15 @@ def _stop(db: Session, outcome: str, detail: str, **extra) -> dict:
     return {"outcome": outcome, "detail": _redact(detail), **extra}
 
 
+CODER_FAILURE_CLASSES = {"QUOTA_EXHAUSTED", "RATE_LIMITED", "AUTH_REQUIRED", "TIMEOUT", "LAUNCHER", "CODER_ERROR"}
+
+
+class CoderFailed(RuntimeError):
+    def __init__(self, code):
+        self.failure_class = code if isinstance(code, str) and code in CODER_FAILURE_CLASSES else "CODER_ERROR"
+        super().__init__(self.failure_class)
+
+
 def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, workdir: Path,
         ttl: timedelta = timedelta(minutes=30), *, before_write: Callable[[], None] | None = None) -> dict:
     """One attempt. Outcomes: LEASE_BUSY, CODER_FAILED, REJECTED, CHECKS_FAILED, LEASE_LOST,
@@ -181,7 +190,10 @@ def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, 
         except LauncherRefused as e:
             return _stop(db, "LAUNCHER_REFUSED", str(e)[:300])
         except Exception as e:  # the coder is untrusted; its failure is an outcome, not a crash
-            return _stop(db, "CODER_FAILED", f"{type(e).__name__}: {e}")
+            code = (e.failure_class if isinstance(e, CoderFailed) else
+                    "TIMEOUT" if isinstance(e, TimeoutError) else "CODER_ERROR")
+            detail = code if isinstance(e, CoderFailed) else f"{code}: {type(e).__name__}"
+            return _stop(db, "CODER_FAILED", detail, failure_class=code)
         if before_write:
             before_write()
         try:
@@ -1226,11 +1238,11 @@ def launcher_coder(timeout_s: int = 1200, poll_s: float = 5.0, sleep=time.sleep,
         if result.get("refused"):
             raise LauncherRefused(f"launcher {result['refused']}"[:300])
         if result.get("timed_out") or result.get("exit") != 0:
-            # run() turns this into CODER_FAILED; detail is bounded, never raw model output.
-            raise RuntimeError(f"coder {result.get('refused') or result.get('summary') or 'failed'}"[:300])
+            # Only launcher-classified codes cross this boundary; summaries never become capacity evidence.
+            raise CoderFailed("TIMEOUT" if result.get("timed_out") else result.get("failure_class"))
         edited = job_dir / "done" / "workspace"
         if not edited.is_dir() or edited.is_symlink():
-            raise RuntimeError("launcher returned no workspace")
+            raise CoderFailed("LAUNCHER")
         # The edited copy replaces the export; import_changes still treats it as untrusted.
         shutil.rmtree(workspace)
         shutil.copytree(edited, workspace, symlinks=True)

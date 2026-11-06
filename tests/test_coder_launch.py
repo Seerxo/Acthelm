@@ -393,6 +393,25 @@ def test_a_failed_or_timed_out_coder_is_a_failure(L, tmp_path):
         coder(job_dir / "workspace", job)
 
 
+@pytest.mark.parametrize("result,code", [
+    ({"exit": 1, "failure_class": "QUOTA_EXHAUSTED"}, "QUOTA_EXHAUSTED"),
+    ({"exit": 1, "failure_class": "RATE_LIMITED"}, "RATE_LIMITED"),
+    ({"exit": 1, "failure_class": "AUTH_REQUIRED"}, "AUTH_REQUIRED"),
+    ({"exit": None, "timed_out": True, "failure_class": "QUOTA_EXHAUSTED"}, "TIMEOUT"),
+    ({"exit": 1, "summary": "usage limit RAW_CODER_CANARY"}, "CODER_ERROR"),
+    ({"exit": 1, "failure_class": "quota RAW_CODER_CANARY"}, "CODER_ERROR"),
+    ({"exit": 1, "failure_class": ["QUOTA_EXHAUSTED"]}, "CODER_ERROR"),
+])
+def test_coder_adapter_accepts_only_fixed_failure_codes(monkeypatch, tmp_path, result, code):
+    monkeypatch.setattr(stage_c_runner, "_launch", lambda *a, **k: result)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    job = Job("TASK-0101", "r", tmp_path, "0" * 40, ["a.py"], "o", "c", "claude")
+    with pytest.raises(stage_c_runner.CoderFailed) as caught:
+        stage_c_runner.launcher_coder()(workspace, job)
+    assert caught.value.failure_class == str(caught.value) == code
+
+
 def test_checks_pass_only_on_exit_zero(L):
     job_dir = L.JOBS / "TASK-0101"
     (job_dir / "checks").mkdir(parents=True)

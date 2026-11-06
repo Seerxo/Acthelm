@@ -108,16 +108,18 @@ def subprocess_runner(argv: list[str], cwd: str, timeout: int, env: dict,
         raise
 
 
+CAPACITY_PATTERNS = (
+    ("QUOTA_EXHAUSTED", r"(?<![a-z0-9])(?:usage[ _]limit|session[ _]limit|hit your limit|quota|credits?|insufficient[ _](?:balance|funds|quota)|billing|payment)(?![a-z0-9])"),
+    ("RATE_LIMITED", r"(?<![a-z0-9])(?:rate[ _-]?limit(?:ed)?|overloaded|too many requests)(?![a-z0-9])|(?<![\w.])429(?!\w|\.\d)"),
+    ("AUTH_REQUIRED", r"(?<![a-z0-9])(?:log ?in|logged in|unauthori[sz]ed|invalid api key|authenticat(?:e|ed|ion|ing)|oauth|organization has disabled .*subscription access)(?![a-z0-9])|(?<![\w.])401(?!\w|\.\d)"),
+)
+
+
 def classify(message: str) -> Health:
     m = (message or "").lower()
-    if re.search(r"usage limit|session limit|quota|credit|insufficient|billing|payment", m):
-        return Health.QUOTA_EXHAUSTED
-    if re.search(r"rate.?limit|\b429\b|overloaded|too many requests", m):
-        return Health.RATE_LIMITED
-    # "Your organization has disabled Claude subscription access for Claude Code" (2026-10-23): the account cannot
-    # run at all, so it is a login problem, never "available but this run failed".
-    if re.search(r"log ?in|logged in|unauthori[sz]ed|\b401\b|invalid api key|authenticat|oauth|organization has disabled .*subscription access", m):
-        return Health.AUTH_REQUIRED
+    for code, pattern in CAPACITY_PATTERNS:
+        if re.search(pattern, m):
+            return Health(code)
     return Health.BROKEN
 
 
