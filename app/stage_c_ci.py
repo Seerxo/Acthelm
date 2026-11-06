@@ -28,7 +28,7 @@ from urllib.parse import quote
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import approval_identity, audit, coder_diff, enums, merge_authorization, models, stage_c
+from app import approval_identity, audit, coder_diff, enums, merge_authorization, models, stage_c, stage_c_merge_gate
 from app.commit_statuses import (STATUS_FAILED, STATUS_PAGE, STATUS_QUERY, latest_statuses,
                                  status_checks)
 
@@ -107,7 +107,9 @@ def merge_recovery_block(db: Session, task: models.Task):
         return None
     latest = db.scalar(select(models.AuditLog).where(
         models.AuditLog.entity_type == "task", models.AuditLog.entity_key == task.key,
-        models.AuditLog.task_id == task.id).order_by(models.AuditLog.id.desc()).limit(1))
+        models.AuditLog.task_id == task.id,
+        models.AuditLog.action.notin_(("stage-c.refresh_reconcile.requested",
+                                       "stage-c.refresh_reconcile.dry_run"))).order_by(models.AuditLog.id.desc()).limit(1))
     if (not latest or latest.actor != ACTOR or latest.action != "improvement.blocked"
             or not isinstance(latest.after, dict)):
         return None
@@ -287,10 +289,10 @@ def reconcile_refreshed(db: Session, task: models.Task, request: models.AuditLog
             or body.get("merge_commit") != facts.get("merge_commit")
             or not facts.get("merged") or published.get("pr") != f"https://github.com/{repository}/pull/{body.get('pr_number')}"):
         reasons.append("REQUEST_MISMATCH")
-    if facts.get("merged_by") != "semihbugrasezer":
+    if facts.get("merged_by") != stage_c_merge_gate.FOUNDER:
         reasons.append("NOT_FOUNDER_MERGE")
     if _merge_problems("READY_TO_MERGE", facts, {"commit": body.get("final_head")},
-                       "semihbugrasezer", "main") and "NOT_FOUNDER_MERGE" not in reasons:
+                       stage_c_merge_gate.FOUNDER, "main") and "NOT_FOUNDER_MERGE" not in reasons:
         reasons.append("MERGE_FACTS")
     if chain.get("published_head") != published.get("commit") or not chain.get("refreshed_heads") or chain["refreshed_heads"][-1] != body.get("final_head"):
         reasons.append("REQUEST_MISMATCH")
@@ -352,7 +354,7 @@ def reconcile_refreshed(db: Session, task: models.Task, request: models.AuditLog
                          before={"status": task.status.value, "error": task.error, "blocked_audit_id": block.id},
                          after=record)
     db.flush()
-    stage_c.advance(db, task, "MERGED", "founder (github:semihbugrasezer, via founder_github_refreshed)",
+    stage_c.advance(db, task, "MERGED", f"founder (github:{stage_c_merge_gate.FOUNDER}, via founder_github_refreshed)",
                     {"pr_number": body["pr_number"], "commit": published["commit"],
                      "final_head": body["final_head"], "refreshed_heads": chain["refreshed_heads"],
                      "merged_by": facts["merged_by"], "merge_commit": body["merge_commit"],

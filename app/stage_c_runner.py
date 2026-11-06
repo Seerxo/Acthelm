@@ -557,7 +557,9 @@ def refresh_chain(mirror: Path, number: int, published: str, final_head: str, me
         expected = subprocess.run(["git", "--no-pager", "-C", str(mirror), "merge-tree", "--write-tree",
                                    parents[1], parents[2]], env=coder_diff._env(), capture_output=True, timeout=30)
         tree = git("rev-parse", f"{sha}^{{tree}}")
-        if expected.returncode or expected.stdout.decode().strip() != tree:
+        if expected.returncode not in (0, 1):
+            raise RuntimeError("merge-tree unavailable")
+        if expected.returncode == 1 or expected.stdout.decode().strip() != tree:
             raise RefreshRefused("CONFLICT_RESOLVED")
         updates.append({"sha": sha, "p1": parents[1], "p2": parents[2], "tree": tree})
         previous = sha

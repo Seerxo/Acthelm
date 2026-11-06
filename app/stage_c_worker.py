@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -14,7 +15,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 
 from app import (audit, control, coder_source, enums, models, project_profiles, providers, repo_guardian,
-                 repo_guardian_github, stage_c, stage_c_ci, stage_c_credential_boundary, stage_c_runner,
+                 repo_guardian_github, stage_c, stage_c_ci, stage_c_credential_boundary, stage_c_merge_gate, stage_c_runner,
                  stage_c_verify)
 
 REPOSITORY = "seerxo/acthelm"
@@ -55,6 +56,7 @@ RUNTIME_READINESS_KEY = "stage-c-runtime-readiness"
 RUNTIME_READINESS_MAX_AGE = timedelta(minutes=15)
 PUBLICATION_PROBES = 3
 PUBLICATION_COOLDOWN = timedelta(minutes=5)
+REFRESH_DRY_RUN_COOLDOWN = timedelta(minutes=15)
 
 
 def jobs_root():
@@ -713,12 +715,12 @@ def published_guard(db, task, expected=None) -> str | None:
         # repair's: merged before CI passed, so it is recorded as a block, never as a verified merge.
         stage = ((locked.context or {}).get("improvement") or {}).get("stage")
         outcome = stage_c_ci._record_merge(db, locked, stage, facts, {"pr_number": number, "commit": ev.get("commit")},
-                                           "semihbugrasezer", "main")
+                                           stage_c_merge_gate.FOUNDER, "main")
         db.commit()
         return f"merged:{outcome['outcome']}"
     if facts.get("merged"):
         outcome = stage_c_ci.ingest(db, locked, facts, repository=REPOSITORY,
-                                    founder_login="semihbugrasezer", tracked_branch="main",
+                                    founder_login=stage_c_merge_gate.FOUNDER, tracked_branch="main",
                                     required_statuses=contexts,
                                     head_repository=repo_guardian_github.publish_repository(policy, REPOSITORY))
         db.commit()
@@ -907,16 +909,23 @@ def reconcile(db):
                 .order_by(models.AuditLog.id.desc()).limit(1))
             if consumed:
                 request = None
+        mode = os.environ.get("STAGE_C_REFRESH_RECONCILE", "dry-run")
+        if request:
+            requested_at = (request.occurred_at.replace(tzinfo=timezone.utc)
+                            if request.occurred_at.tzinfo is None else request.occurred_at)
+            if requested_at < datetime.now(timezone.utc) - timedelta(hours=24) or mode == "off":
+                request = None
+            elif mode == "dry-run":
+                last = db.scalar(select(models.AuditLog).where(
+                    models.AuditLog.task_id == task.id,
+                    models.AuditLog.action == "stage-c.refresh_reconcile.dry_run")
+                    .order_by(models.AuditLog.id.desc()).limit(1))
+                if (last and isinstance(last.after, dict) and last.after.get("request_audit_id") == request.id
+                        and (last.occurred_at.replace(tzinfo=timezone.utc) if last.occurred_at.tzinfo is None
+                             else last.occurred_at) > datetime.now(timezone.utc) - REFRESH_DRY_RUN_COOLDOWN):
+                    request = None
         if request:
             try:
-                mode = os.environ.get("STAGE_C_REFRESH_RECONCILE", "dry-run")
-                if mode == "off":
-                    outcomes.append({"task": task.key, "outcome": "SKIPPED", "reason": "refresh_disabled"})
-                    db.commit()
-                    continue
-                requested_at = request.occurred_at.replace(tzinfo=timezone.utc) if request.occurred_at.tzinfo is None else request.occurred_at
-                if requested_at < datetime.now(timezone.utc) - timedelta(hours=24):
-                    raise stage_c_runner.RefreshRefused("REQUEST_MISMATCH")
                 number = published_pr_number(task)
                 if number is None:
                     raise stage_c_runner.RefreshRefused("REQUEST_MISMATCH")
@@ -926,6 +935,10 @@ def reconcile(db):
                 body = request.after if isinstance(request.after, dict) else {}
                 if body.get("pr_number") != number:
                     raise stage_c_runner.RefreshRefused("REQUEST_MISMATCH")
+                version = subprocess.run(["git", "--version"], check=True, capture_output=True, text=True, timeout=5)
+                match = re.match(r"git version (\d+)\.(\d+)", version.stdout)
+                if not match or tuple(map(int, match.groups())) < (2, 38):
+                    raise RuntimeError("merge-tree unavailable")
                 with tempfile.TemporaryDirectory(prefix="stage-c-refresh-") as tmp:
                     scratch = Path(tmp) / "mirror.git"
                     stage_c_runner._git(mirror_path(), "clone", "--bare", "--shared",
@@ -937,19 +950,34 @@ def reconcile(db):
                         db, task, request, facts, chain, scratch, repository=REPOSITORY,
                         head_repository=repo_guardian_github.publish_repository(policy, REPOSITORY),
                         required_statuses=contexts, apply=mode == "apply")
+                if mode == "dry-run":
+                    code = "PASS" if out["outcome"] == "DRY_RUN" else out["reasons"][0].split(":", 1)[0]
+                    audit.record(db, actor="stage-c-ci", action="stage-c.refresh_reconcile.dry_run",
+                                 entity_type="task", entity_key=task.key, task_id=task.id,
+                                 after={"request_audit_id": request.id, "code": code})
                 db.commit()
                 outcomes.append({"task": task.key, **out})
             except stage_c_runner.RefreshRefused as exc:
-                if os.environ.get("STAGE_C_REFRESH_RECONCILE", "dry-run") == "apply":
+                if mode == "apply":
                     audit.record(db, actor="stage-c-ci", action="improvement.refresh_reconcile_refused",
                                  entity_type="task", entity_key=task.key, task_id=task.id,
                                  after={"request_audit_id": request.id, "reasons": [exc.code]})
+                elif mode == "dry-run":
+                    audit.record(db, actor="stage-c-ci", action="stage-c.refresh_reconcile.dry_run",
+                                 entity_type="task", entity_key=task.key, task_id=task.id,
+                                 after={"request_audit_id": request.id, "code": exc.code})
                 db.commit()
                 outcomes.append({"task": task.key, "outcome": "BLOCKED", "reasons": [exc.code]})
             except Exception:
                 db.rollback()
+                if mode == "dry-run":
+                    audit.record(db, actor="stage-c-ci", action="stage-c.refresh_reconcile.dry_run",
+                                 entity_type="task", entity_key=task.key, task_id=task.id,
+                                 after={"request_audit_id": request.id, "code": "EVIDENCE_UNAVAILABLE"})
+                    db.commit()
                 outcomes.append({"task": task.key, "outcome": "BLOCKED", "reasons": ["EVIDENCE_UNAVAILABLE"]})
-            continue
+            if mode == "apply":
+                continue
         if (task.status == enums.TaskStatus.BLOCKED
                 and stage_c_ci.merge_recovery_block(db, task) is None):
             db.commit()
@@ -976,7 +1004,7 @@ def reconcile(db):
                 facts = stage_c_ci.gh_facts(REPOSITORY, number, set(policy["workflows"]),
                                             publisher=publisher, status_contexts=contexts)
                 out = stage_c_ci.ingest(db, task, facts, repository=REPOSITORY,
-                                        founder_login="semihbugrasezer", tracked_branch="main",
+                                        founder_login=stage_c_merge_gate.FOUNDER, tracked_branch="main",
                                         required_statuses=contexts,
                                         head_repository=repo_guardian_github.publish_repository(policy, REPOSITORY))
                 if out["outcome"] == "REPAIR":

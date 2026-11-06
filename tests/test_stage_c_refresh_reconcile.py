@@ -105,6 +105,149 @@ def judge(scene, *, apply=True):
         repository="seerxo/acthelm", head_repository="seerxo/acthelm", required_statuses=(), apply=apply)
 
 
+@pytest.fixture(params=["head", "merge"], ids=["head", "merge"])
+def blocked_scene(scene, request):
+    db, task, _, block, facts, *_ = scene
+    if request.param == "merge":
+        task.error = stage_c_ci.MERGE_NOT_RECORDED + "eligibility was not proven"
+        block.after = {"merge_eligibility": "refused", "stage": "READY_TO_MERGE",
+                       "pr_number": 1, "merge_commit": facts["merge_commit"],
+                       "merged_by": facts["merged_by"]}
+        db.commit()
+    return scene
+
+
+def assert_refused(scene, code):
+    out = judge(scene, apply=False)
+    assert out["outcome"] == "BLOCKED"
+    assert any(reason.startswith(code) for reason in out["reasons"])
+
+
+@pytest.mark.parametrize("case", ["actor", "before", "expired", "head", "number"],
+                         ids=["actor", "before", "expired", "head", "number"])
+def test_request_identity_refusals(blocked_scene, case, monkeypatch):
+    scene = blocked_scene
+    db, task, request, block, facts, *_ = scene
+    if case == "actor":
+        request.actor = "company-worker"
+    elif case == "before":
+        audit.record(db, actor="stage-c-ci", action="improvement.blocked", entity_type="task",
+                     entity_key=task.key, task_id=task.id, after=block.after)
+    elif case == "expired":
+        request.occurred_at = datetime.now(timezone.utc) - timedelta(hours=25)
+    elif case == "head":
+        request.after = {**request.after, "final_head": "f" * 40}
+    else:
+        request.after = {**request.after, "pr_number": 2}
+        monkeypatch.setattr(stage_c_ci, "pr_number", lambda _: 1)
+        # Keep the URL cross-check independent of the request-number comparison.
+        monkeypatch.setattr(stage_c_ci, "_evidence", lambda t, s: {
+            **stage_c_ci.publication(t), "pr": "https://github.com/seerxo/acthelm/pull/2"}
+            if s == "PR_OPEN" else {})
+    db.flush()
+    assert_refused(scene, "REQUEST_MISMATCH")
+
+
+def test_review_must_predate_merge(blocked_scene):
+    db, task, *_ = blocked_scene
+    approval_id = task.context["improvement"]["approval"]["audit_id"]
+    db.get(models.AuditLog, approval_id).occurred_at = datetime.now(timezone.utc) + timedelta(minutes=2)
+    db.flush()
+    assert_refused(blocked_scene, "BINDING:review approval does not predate")
+
+
+def test_body_head_matches_github(blocked_scene, monkeypatch):
+    _, _, _, _, facts, *_ = blocked_scene
+    facts["head_sha"] = "f" * 40
+    monkeypatch.setattr(stage_c_ci, "_merge_problems", lambda *a: [])
+    monkeypatch.setattr(stage_c_ci.merge_authorization, "binding_reasons", lambda **kw: [])
+    assert_refused(blocked_scene, "REQUEST_MISMATCH")
+
+
+def test_chain_identity_matches_request(blocked_scene, monkeypatch):
+    _, _, _, _, _, chain, *_ = blocked_scene
+    chain["published_head"] = "f" * 40
+    monkeypatch.setattr(stage_c_ci.merge_authorization, "binding_reasons", lambda **kw: [])
+    assert_refused(blocked_scene, "REQUEST_MISMATCH")
+
+
+@pytest.mark.parametrize("case,code", [("tree", "NOT_UP_TO_DATE"), ("list", "EXTRA_COMMIT"),
+                                      ("notmain", "MERGE_FACTS")], ids=["tree", "list", "notmain"])
+def test_refresh_git_refusals(blocked_scene, case, code):
+    _, _, _, _, facts, chain, mirror, upstream, _ = blocked_scene
+    merged = facts["merge_commit"]
+    commits = [chain["published_head"], facts["head_sha"]]
+    if case == "tree":
+        (upstream / "app" / "altered.py").write_text("different = True\n")
+        git(upstream, "add", ".")
+        altered = git(upstream, "write-tree")
+        merged = git(upstream, "commit-tree", altered, "-p", f"{merged}^", "-m", "wrong squash tree")
+        git(upstream, "update-ref", "refs/heads/main", merged)
+    elif case == "list":
+        commits = [facts["head_sha"], chain["published_head"]]
+    else:
+        merged = git(upstream, "commit-tree", git(upstream, "rev-parse", f"{merged}^{{tree}}"),
+                     "-p", f"{merged}^", "-m", "unlanded squash")
+    with pytest.raises(stage_c_runner.RefreshRefused, match=code):
+        stage_c_runner.refresh_chain(mirror, 1, chain["published_head"], facts["head_sha"], merged,
+                                     remote=str(upstream), pr_commits=commits)
+
+
+@pytest.mark.parametrize("rc,error", [(1, stage_c_runner.RefreshRefused), (129, RuntimeError)],
+                         ids=["conflict", "git-error"])
+def test_merge_tree_return_codes(blocked_scene, monkeypatch, rc, error):
+    _, _, _, _, facts, chain, mirror, upstream, _ = blocked_scene
+    original = stage_c_runner.subprocess.run
+
+    def fail_merge_tree(args, **kwargs):
+        if "merge-tree" in args:
+            return SimpleNamespace(returncode=rc, stdout=b"", stderr=b"unsupported")
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(stage_c_runner.subprocess, "run", fail_merge_tree)
+    with pytest.raises(error, match="CONFLICT_RESOLVED" if rc == 1 else "merge-tree unavailable"):
+        stage_c_runner.refresh_chain(mirror, 1, chain["published_head"], facts["head_sha"],
+                                     facts["merge_commit"], remote=str(upstream),
+                                     pr_commits=[chain["published_head"], facts["head_sha"]])
+
+
+def test_refresh_second_parent_must_be_on_main(blocked_scene, monkeypatch):
+    _, _, _, _, facts, chain, mirror, upstream, fork = blocked_scene
+    published = chain["published_head"]
+    main_move = git(upstream, "rev-parse", f"{facts['merge_commit']}^")
+    base = git(upstream, "rev-parse", f"{main_move}^")
+    off_main = git(upstream, "commit-tree", git(upstream, "rev-parse", f"{main_move}^{{tree}}"),
+                   "-p", base, "-m", "same tree off main")
+    git(fork, "fetch", "-q", "origin", off_main)
+    first_tree = git(fork, "merge-tree", "--write-tree", published, off_main)
+    first_refresh = git(fork, "commit-tree", first_tree, "-p", published, "-p", off_main,
+                        "-m", "off-main refresh")
+    git(upstream, "update-ref", "refs/heads/main", main_move)
+    git(upstream, "checkout", "-f", "main")
+    (upstream / "app" / "later.py").write_text("later = 1\n")
+    git(upstream, "add", ".")
+    git(upstream, "commit", "-qm", "later main")
+    latest_main = git(upstream, "rev-parse", "HEAD")
+    git(fork, "fetch", "-q", "origin", "main")
+    final_tree = git(fork, "merge-tree", "--write-tree", first_refresh, latest_main)
+    final = git(fork, "commit-tree", final_tree, "-p", first_refresh, "-p", latest_main,
+                "-m", "good final refresh")
+    git(fork, "push", "-q", "origin", f"{final}:refs/pull/1/head", "--force")
+    merged = git(upstream, "commit-tree", final_tree, "-p", latest_main, "-m", "founder squash")
+    git(upstream, "update-ref", "refs/heads/main", merged)
+    original = stage_c_runner._git_bytes
+
+    def branch_only(repo, *args, **kwargs):
+        if args == ("rev-list", final, f"^{published}", f"^{latest_main}"):
+            return f"{first_refresh}\n{final}\n".encode()
+        return original(repo, *args, **kwargs)
+
+    monkeypatch.setattr(stage_c_runner, "_git_bytes", branch_only)
+    with pytest.raises(stage_c_runner.RefreshRefused, match="EXTRA_COMMIT"):
+        stage_c_runner.refresh_chain(mirror, 1, published, final, merged, remote=str(upstream),
+                                     pr_commits=[published, first_refresh, final])
+
+
 def test_clean_refresh_records_append_only_merge(scene):
     db, task, _, block, facts, chain, *_ = scene
     old = deepcopy(task.context["improvement"]["history"])
@@ -215,7 +358,88 @@ def test_worker_refusal_or_dry_run_never_changes_block(scene, monkeypatch, mode,
         row = db.get(models.AuditLog, after)
         assert row.after == {"request_audit_id": request.id, "reasons": ["EXTRA_COMMIT"]}
     else:
-        assert after == before
+        row = db.get(models.AuditLog, after)
+        assert after > before
+        assert row.action == "stage-c.refresh_reconcile.dry_run"
+        assert row.after == {"request_audit_id": request.id, "code": "PASS"}
+
+
+def worker_facts(monkeypatch, scene, *, mode, chain=None):
+    from app import repo_guardian_github
+    _, _, _, _, facts, original_chain, mirror, *_ = scene
+    monkeypatch.setenv("STAGE_C_REFRESH_RECONCILE", mode)
+    monkeypatch.setattr(repo_guardian_github, "load_policy", lambda path: {"workflows": ["ci"]})
+    monkeypatch.setattr(repo_guardian_github, "merge_statuses", lambda policy: ({}, ()))
+    monkeypatch.setattr(repo_guardian_github, "publish_repository", lambda policy, repo: repo)
+    monkeypatch.setattr(stage_c_worker, "mirror_path", lambda: mirror)
+    monkeypatch.setattr(stage_c_ci, "gh_facts", lambda *args, **kwargs: facts)
+    monkeypatch.setattr(stage_c_runner, "refresh_chain", chain or (lambda *args, **kwargs: original_chain))
+
+
+@pytest.mark.parametrize("mode", ["off", "expired"], ids=["off", "expired"])
+def test_pending_request_falls_to_normal_merge_recovery(blocked_scene, monkeypatch, mode):
+    db, task, request, *_ = blocked_scene
+    if mode == "expired":
+        request.occurred_at = datetime.now(timezone.utc) - timedelta(hours=25)
+    worker_facts(monkeypatch, blocked_scene, mode="off" if mode == "off" else "dry-run",
+                 chain=lambda *args, **kwargs: pytest.fail("refresh must not run"))
+    monkeypatch.setattr(stage_c_worker, "admission", lambda *args: None)
+    calls = []
+    monkeypatch.setattr(stage_c_ci, "ingest", lambda *args, **kwargs: calls.append(1) or {"outcome": "WAITING"})
+    out = stage_c_worker.reconcile(db)
+    if task.error.startswith(stage_c_ci.MERGE_NOT_RECORDED):
+        assert calls == [1]
+        assert out == [{"task": task.key, "outcome": "WAITING"}]
+    else:
+        assert calls == [] and out == []
+
+
+def test_dry_run_is_audited_once_per_request_and_recovers_normally(blocked_scene, monkeypatch):
+    db, task, request, *_ = blocked_scene
+    calls = []
+    worker_facts(monkeypatch, blocked_scene, mode="dry-run",
+                 chain=lambda *args, **kwargs: calls.append(1) or blocked_scene[5])
+    monkeypatch.setattr(stage_c_worker, "admission", lambda *args: None)
+    normal = []
+    monkeypatch.setattr(stage_c_ci, "ingest", lambda *args, **kwargs: normal.append(1) or {"outcome": "WAITING"})
+    first = stage_c_worker.reconcile(db)
+    second = stage_c_worker.reconcile(db)
+    assert calls == [1]
+    rows = db.scalars(select(models.AuditLog).where(
+        models.AuditLog.action == "stage-c.refresh_reconcile.dry_run")).all()
+    assert len(rows) == 1 and rows[0].after == {"request_audit_id": request.id, "code": "PASS"}
+    assert not db.scalar(select(models.AuditLog).where(
+        models.AuditLog.action.in_(("improvement.refresh_reconciled", "improvement.refresh_reconcile_refused"))))
+    assert first[0]["outcome"] == "DRY_RUN"
+    assert all(item["outcome"] != "DRY_RUN" for item in second)
+    if task.error.startswith(stage_c_ci.MERGE_NOT_RECORDED):
+        assert normal == [1, 1]
+
+
+@pytest.mark.parametrize("error,code", [(stage_c_runner.RefreshRefused("EXTRA_COMMIT"), "EXTRA_COMMIT"),
+                                         (RuntimeError("git failed"), "EVIDENCE_UNAVAILABLE")],
+                         ids=["refuse", "git-error"])
+def test_dry_run_records_refusal_code(blocked_scene, monkeypatch, error, code):
+    db, task, request, *_ = blocked_scene
+    worker_facts(monkeypatch, blocked_scene, mode="dry-run",
+                 chain=lambda *args, **kwargs: (_ for _ in ()).throw(error))
+    assert stage_c_worker.reconcile(db)[0]["reasons"] == [code]
+    row = db.scalar(select(models.AuditLog).where(
+        models.AuditLog.action == "stage-c.refresh_reconcile.dry_run"))
+    assert row.after == {"request_audit_id": request.id, "code": code}
+    assert task.status == enums.TaskStatus.BLOCKED
+
+
+def test_old_git_refuses_without_cloning(blocked_scene, monkeypatch):
+    db, task, *_ = blocked_scene
+    worker_facts(monkeypatch, blocked_scene, mode="apply",
+                 chain=lambda *args, **kwargs: pytest.fail("refresh must not run"))
+    original = stage_c_worker.subprocess.run
+    monkeypatch.setattr(stage_c_worker.subprocess, "run", lambda args, **kw:
+                        SimpleNamespace(stdout="git version 2.37.9", returncode=0)
+                        if args == ["git", "--version"] else original(args, **kw))
+    assert stage_c_worker.reconcile(db)[0]["reasons"] == ["EVIDENCE_UNAVAILABLE"]
+    assert task.status == enums.TaskStatus.BLOCKED
 
 
 @pytest.mark.parametrize("case,code", [
