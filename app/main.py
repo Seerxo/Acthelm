@@ -1115,6 +1115,21 @@ def stage_c_authorize(body: schemas.StageCAuthorize, request: Request, db: Sessi
     return {k: value[k] for k in ("task_key", "source_sha", "expires_at", "issued_by", "action")}
 
 
+@app.post("/stage-c/reconcile-refresh", status_code=202)
+def stage_c_reconcile_refresh(body: schemas.StageCRefreshReconcile, request: Request,
+                              db: Session = Depends(get_db)) -> dict:
+    who = approval_identity.require_founder(request)
+    task = _by_key(db, models.Task, body.task_key)
+    if ((task.context or {}).get("improvement") or {}).get("stage") == "MERGED":
+        return {"outcome": "ALREADY_MERGED"}
+    event = audit.record(db, actor=who.id, action="stage-c.refresh_reconcile.requested",
+                         entity_type="task", entity_key=task.key, task_id=task.id,
+                         after=body.model_dump())
+    db.flush()
+    db.commit()
+    return {"outcome": "REQUESTED", "audit_id": event.id}
+
+
 @app.post("/stage-c/acceptance", status_code=201)
 def stage_c_acceptance(request: Request, db: Session = Depends(get_db)) -> dict:
     """The verified founder accepts the Stage C host for the deployed SHA, from the fresh all-PASS candidate the host
