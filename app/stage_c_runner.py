@@ -20,15 +20,20 @@ execution plane gets a directory and nothing else:
 Everything the coder leaves behind is untrusted data: coder_diff decides what crosses back.
 Checks pass only on an explicit `{"passed": True}`; anything else is a failure, never success.
 """
+import ast
+import bisect
 import json
 import hashlib
 import fcntl
+import io
 import os
 import re
 import shutil
 import subprocess
 import tempfile
 import time
+import tokenize
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -465,6 +470,360 @@ def _outgoing_credentials(diff: bytes) -> list[str]:
     return leaked
 
 
+# --------------------------------------------------------------------------- privacy gate (audit PI-e)
+# The coder reads the private task text (coder_prompt) and could copy it into an allowed file; the repository and the
+# fork are public. Every commit that becomes new on the push target, and every PR/commit text, is scanned here in the
+# publishing code path, after the commit exists and before any push or PR create. Findings carry only a category, a
+# path and a line number: never the matched text.
+PRIVACY_BLOCKED, PRIVACY_ERROR = "PRIVACY_GATE_BLOCKED", "PRIVACY_GATE_ERROR"
+PRIVACY_CATEGORIES = {"private_task_text", "credential", "binary", "undecodable", "oversize", "symlink",
+                      "submodule", "mode_only", "mode_change", "unreadable", "merge_commit"}
+# ponytail: overlap = 8 normalized words or 64 normalized characters shared with founder text.
+# Ceiling: homoglyphs, encodings, junk-word insertion, fragments under the threshold, translation and rewording
+# can pass. Upgrade path: founder-supplied entity lists (names, emails, ids), matched exactly.
+PRIVACY_SHINGLE_WORDS, PRIVACY_SUBSTRING_CHARS = 8, 64
+MAX_PRIVACY_COMMITS = 20
+_WORD = re.compile(r"[^\W_]+")
+
+
+class PrivacyGateError(Exception):
+    """The gate could not complete; the message is fixed text, never scanned content."""
+
+
+class PushLeaseConflict(PrivacyGateError):
+    """A readable remote task branch conflicts with the expected publication lease."""
+
+
+def _git_bytes(repo: Path, *args: str, protocol: str = "") -> bytes:
+    """Raw stdout, undecoded: the gate classifies undecodable bytes itself instead of crashing in a decode."""
+    env = coder_diff._env() | {"GIT_ALLOW_PROTOCOL": protocol, "GIT_TERMINAL_PROMPT": "0"}
+    return subprocess.run(["git", "--no-pager", "-C", str(repo), *args], env=env, capture_output=True,
+                          timeout=120, check=True).stdout
+
+
+def _private_texts(task: models.Task) -> list[str]:
+    """Founder-authored fields and context; improvement is generated operational evidence."""
+    texts = []
+    for value in (task.description, task.objective, task.success_criteria):
+        if value is not None and not isinstance(value, str):
+            raise PrivacyGateError("task text is unreadable")
+        texts.append(value or "")
+    if task.context is not None and not isinstance(task.context, dict):
+        raise PrivacyGateError("task context is unreadable")
+    stack = [{k: v for k, v in (task.context or {}).items() if k != "improvement"}]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, str):
+            texts.append(value)
+        elif isinstance(value, dict):
+            texts += [k for k in value if isinstance(k, str)]
+            stack += value.values()
+        elif isinstance(value, list):
+            stack += value
+    return [t for t in texts if t.strip()]
+
+
+def _normalized(text: str) -> str:
+    text = "".join(c for c in unicodedata.normalize("NFKC", text) if unicodedata.category(c) != "Cf")
+    text = re.sub(r"([A-Z])([A-Z][a-z])", r"\1 \2", text)
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text).replace("_", " ")
+    return " ".join(text.casefold().split())
+
+
+def _commit_files(repo: Path, commit: str) -> tuple[dict[str, list[tuple[int, str]]], list[dict]]:
+    """Read changed blobs directly: attributes, diff drivers and forged patch headers cannot hide content."""
+    entries = _git_bytes(repo, "diff-tree", "--raw", "-r", "-z", "--root", "--no-commit-id",
+                         "--no-abbrev", "--no-renames", "--ignore-submodules=none", commit).split(b"\0")
+    contents, findings, total = {}, [], 0
+    if entries[-1] != b"" or len(entries) % 2 != 1:
+        raise PrivacyGateError("unreadable")
+    for i in range(0, len(entries) - 1, 2):
+        old_mode, mode, old_oid, oid, status = entries[i].split()
+        path = entries[i + 1].decode("utf-8")
+        category = None
+        if b"120000" in (old_mode.lstrip(b":"), mode):
+            category = "symlink"
+        elif b"160000" in (old_mode.lstrip(b":"), mode):
+            category = "submodule"
+        elif mode not in (b"100644", b"100755") or status not in (b"A", b"M"):
+            category = "unreadable"
+        elif old_mode.lstrip(b":") != mode and status == b"M":
+            category = "mode_only" if old_oid == oid else "mode_change"
+        elif i // 2 >= coder_diff.MAX_FILES:
+            category = "oversize"
+        else:
+            size = int(_git_bytes(repo, "cat-file", "-s", oid.decode()))
+            total += size
+            if size > coder_diff.MAX_FILE_BYTES or total > coder_diff.MAX_TOTAL_BYTES:
+                category = "oversize"
+            else:
+                data = _git_bytes(repo, "cat-file", "blob", oid.decode())
+                if len(data) != size:
+                    category = "unreadable"
+                elif b"\0" in data:
+                    category = "binary"
+                else:
+                    try:
+                        contents[path] = list(enumerate(data.decode("utf-8").split("\n"), 1))
+                    except UnicodeDecodeError:
+                        category = "undecodable"
+        if category:
+            findings.append({"category": category, "path": path, "line": 0})
+    return contents, findings
+
+
+class _Public:
+    """Contiguous base code, excluding comments and literals; loaded only for an exemption check."""
+
+    def __init__(self, repo: Path, base: str):
+        self.repo, self.base, self._identifiers = repo, base, None
+
+    def _load(self):
+        listing = _git_bytes(self.repo, "ls-tree", "-r", "-z", self.base)
+        blobs, blob_paths = [], []
+        for entry in listing.split(b"\0"):
+            if entry:
+                meta, path = entry.split(b"\t", 1)
+                if meta.split()[1] == b"blob":
+                    blobs.append(meta.split()[2])
+                    blob_paths.append(path.decode("utf-8"))
+        out = subprocess.run(["git", "--no-pager", "-C", str(self.repo), "cat-file", "--batch"],
+                             input=b"\n".join(blobs) + b"\n", env=coder_diff._env(), capture_output=True,
+                             timeout=120, check=True).stdout
+        identifiers, code_texts, code_words, position = set(), [], [], 0
+        for path in blob_paths:
+            header_end = out.index(b"\n", position)
+            size = int(out[position:header_end].split()[2])
+            data = out[header_end + 1:header_end + 1 + size]
+            position = header_end + 2 + size
+            if b"\0" in data:
+                continue
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue   # binary base assets grant no text exemptions
+            if path.endswith(".py"):
+                try:
+                    tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+                    code = tokenize.untokenize([t for t in tokens if t.type not in
+                                               (tokenize.COMMENT, tokenize.STRING, tokenize.FSTRING_START,
+                                                tokenize.FSTRING_MIDDLE, tokenize.FSTRING_END)])
+                except (tokenize.TokenError, IndentationError, SyntaxError):
+                    continue   # unparsed code grants no exemptions
+                norm = _normalized(code)
+                code_texts.append(norm)
+                code_words.append(" " + " ".join(_WORD.findall(norm)) + " ")
+                identifiers |= {t.string.casefold() for t in tokens if t.type == tokenize.NAME}
+        # File boundaries cannot manufacture a contiguous public sequence. Other file types grant no exemptions.
+        self._code_text = "\0".join(code_texts)
+        self._code_words = "\0".join(code_words)
+        self._identifiers = identifiers   # diagnostic only; membership never grants an exemption
+
+    def exempt_window(self, window: str) -> bool:
+        """The exact normalized character window must occur in base code."""
+        if self._identifiers is None:
+            self._load()
+        return window in self._code_text
+
+    def exempt_shingles(self, shingles: set[tuple]) -> set[tuple]:
+        """The complete word sequence must occur contiguously in base code."""
+        if self._identifiers is None:
+            self._load()
+        return {s for s in shingles if " " + " ".join(s) + " " in self._code_words}
+
+
+def _private_index(texts: list[str]) -> tuple[set[tuple], set[str]]:
+    n, size = PRIVACY_SHINGLE_WORDS, PRIVACY_SUBSTRING_CHARS
+    shingles, windows = set(), set()
+    for text in texts:
+        norm = _normalized(text)
+        words = _WORD.findall(norm)
+        shingles |= {tuple(words[i:i + n]) for i in range(len(words) - n + 1)}
+        windows |= {norm[i:i + size] for i in range(len(norm) - size + 1)}
+    return shingles, windows
+
+
+def _prose_lines(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Join comment/literal contents without intervening code obscuring their word sequence."""
+    prose = []
+    try:
+        for token in tokenize.generate_tokens(io.StringIO("\n".join(text for _, text in lines)).readline):
+            if token.type == tokenize.COMMENT:
+                text = token.string[1:]
+            elif token.type == tokenize.FSTRING_MIDDLE:
+                text = token.string
+            elif token.type == tokenize.STRING:
+                try:
+                    text = ast.literal_eval(token.string)
+                except (ValueError, SyntaxError):
+                    continue
+                if isinstance(text, bytes):
+                    text = text.decode("utf-8", errors="replace")
+                if not isinstance(text, str):
+                    continue
+            else:
+                continue
+            prose.append((lines[token.start[0] - 1][0], text))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        pass   # keep extracted prose; the complete raw text is always scanned too
+    return prose
+
+
+def _overlaps(label: str, lines: list[tuple[int, str]], private: tuple[set[tuple], set[str]],
+              public: _Public) -> list[dict]:
+    """Scan raw text and joined prose; exemptions require contiguous base code. Credentials have no exemption."""
+    findings = _stream_overlaps(label, lines, private, public)
+    findings += _stream_overlaps(label, _prose_lines(lines), private, public)
+    return [dict(category=c, path=p, line=n) for c, p, n in
+            dict.fromkeys((f["category"], f["path"], f["line"]) for f in findings)]
+
+
+def _stream_overlaps(label: str, lines: list[tuple[int, str]], private: tuple[set[tuple], set[str]],
+                     public: _Public) -> list[dict]:
+    n, size = PRIVACY_SHINGLE_WORDS, PRIVACY_SUBSTRING_CHARS
+    private_shingles, private_windows = private
+    # File lines read as one text: a note wrapped over comment lines still forms a shingle.
+    words, word_lines, pieces, offsets, position = [], [], [], [], 0
+    for line_no, text in lines:
+        norm = _normalized(text)
+        for w in _WORD.findall(norm):
+            words.append(w)
+            word_lines.append(line_no)
+        if norm:
+            pieces.append(norm)
+            offsets.append((position, line_no))
+            position += len(norm) + 1
+    hits = {}
+    for i in range(len(words) - n + 1):
+        if (shingle := tuple(words[i:i + n])) in private_shingles:
+            hits.setdefault(shingle, word_lines[i])
+    joined_text = "\n".join(text for _, text in lines)
+    findings = []
+    if _must_withhold(joined_text) or _has_credential(joined_text):
+        line = next((line for line, text in lines if _must_withhold(text) or _has_credential(text)), 0)
+        findings.append({"category": "credential", "path": label, "line": line})
+    if hits:
+        public_shingles = public.exempt_shingles(set(hits))
+        lines_hit = sorted({line for s, line in hits.items() if s not in public_shingles})
+        findings += [{"category": "private_task_text", "path": label, "line": line} for line in lines_hit]
+    joined = " ".join(pieces)
+    starts = [o for o, _ in offsets]
+    seen = {f["line"] for f in findings if f["category"] == "private_task_text"}
+    for i in range(len(joined) - size + 1 if private_windows else 0):
+        window = joined[i:i + size]
+        if window in private_windows:
+            line = offsets[max(0, bisect.bisect_right(starts, i) - 1)][1]
+            if line in seen:
+                continue
+            if not public.exempt_window(window):
+                seen.add(line)
+                findings.append({"category": "private_task_text", "path": label, "line": line})
+    return findings
+
+
+def _privacy_remote_head(worktree: Path, remote: str, branch: str, protocol: str) -> str:
+    listing = _git(worktree, "ls-remote", "--refs", remote, branch, protocol=protocol)
+    if not listing:
+        return ""
+    fields = listing.split("\t")
+    if len(fields) != 2 or fields[1] != branch or not re.fullmatch(r"[0-9a-f]{40}", fields[0]):
+        raise PrivacyGateError("unreadable")
+    return fields[0]
+
+
+def _privacy_gate(worktree: Path, base: str, sha: str, task: models.Task, public_texts: dict[str, str],
+                  remote: str | None = None, protocol: str = "",
+                  expected_remote: str | None = None) -> tuple[list[dict], list[str]]:
+    """(findings, scanned commits) for publishing `sha`. Scanned: every commit reachable from `sha` but not from the
+    base (upstream main) or, when `remote` is given, from the push target's current task branch, which is read here
+    (unreadable: an error). Without `remote` (a PR opened for an already pushed head) the whole base..sha range is
+    scanned, since the PR shows it upstream. Each commit's object text and full changed blobs are scanned, plus
+    `public_texts` ({label: text}: PR title, body, commit message). Raises PrivacyGateError when it cannot finish."""
+    try:
+        if not all(re.fullmatch(r"[0-9a-f]{40}", s) for s in (base, sha)):
+            raise PrivacyGateError("unreadable")
+        if _git_bytes(worktree, "rev-parse", "--is-shallow-repository").strip() != b"false":
+            raise PrivacyGateError("unreadable")
+        private = _private_index(_private_texts(task))
+        public = _Public(worktree, base)
+        exclude = [f"^{base}"]
+        if remote is not None:
+            branch = f"refs/heads/task/{task.key}"
+            remote_head = _privacy_remote_head(worktree, remote, branch, protocol)
+            if expected_remote is not None and remote_head != expected_remote:
+                if remote_head:
+                    raise PushLeaseConflict("remote task branch does not match the publication lease; not published")
+                raise PrivacyGateError("unreadable")
+            if remote_head:
+                _git_bytes(worktree, "cat-file", "-e", f"{remote_head}^{{commit}}")
+                # Verify the existing history, not merely the tip object; missing ancestors must fail closed.
+                _git_bytes(worktree, "rev-list", remote_head)
+                exclude.append(f"^{remote_head}")
+        graph = [line.split() for line in
+                 _git_bytes(worktree, "rev-list", "--reverse", "--parents", sha, *exclude).decode().splitlines()]
+        commits = [ids[0] for ids in graph]
+        if len(commits) > MAX_PRIVACY_COMMITS:
+            return [{"category": "oversize", "path": "<history>", "line": 0}], commits
+        findings = [{"category": "merge_commit", "path": "<history>", "line": 0} for ids in graph if len(ids) > 2]
+        for label, text in public_texts.items():
+            findings += _overlaps(label, list(enumerate(text.split("\n"), 1)), private, public)
+        for commit in commits:
+            try:
+                if int(_git_bytes(worktree, "cat-file", "-s", commit)) > coder_diff.MAX_FILE_BYTES:
+                    findings.append({"category": "oversize", "path": "<commit object>", "line": 0})
+                    continue
+                findings += _overlaps("<commit object>", list(enumerate(
+                    _git_bytes(worktree, "cat-file", "commit", commit).decode("utf-8").split("\n"), 1)), private, public)
+            except UnicodeDecodeError:
+                findings.append({"category": "undecodable", "path": "<commit object>", "line": 0})
+            added, unreviewable = _commit_files(worktree, commit)
+            findings += unreviewable
+            for path, lines in added.items():
+                findings += _overlaps(path, lines, private, public)
+            # Paths are untrusted text too; never echo a private value carried in a filename.
+            for path in set(added) | {f["path"] for f in unreviewable}:
+                if path_hits := _overlaps("<private path>", [(0, path)], private, public):
+                    findings = [{**f, "path": "<private path>"} if f["path"] == path else f for f in findings]
+                    findings += path_hits
+        return findings, commits
+    except PrivacyGateError:
+        raise
+    except Exception:
+        raise PrivacyGateError("unreadable") from None
+
+
+def _privacy_stop(db: Session, worktree: Path, base: str, sha: str, task: models.Task, texts: dict[str, str],
+                  remote: str | None = None, protocol: str = "", expected_remote: str | None = None) -> dict | None:
+    """None when `sha` may be published; else the BLOCKED outcome, naming categories, paths and lines only."""
+    try:
+        findings, commits = _privacy_gate(worktree, base, sha, task, texts, remote, protocol, expected_remote)
+        if (not isinstance(findings, list) or not isinstance(commits, list)
+                or any(not isinstance(c, str) or not re.fullmatch(r"[0-9a-f]{40}", c) for c in commits)
+                or any(not isinstance(f, dict) or set(f) != {"category", "path", "line"}
+                       or f["category"] not in PRIVACY_CATEGORIES or not isinstance(f["path"], str)
+                       or type(f["line"]) is not int or f["line"] < 0 for f in findings)):
+            raise PrivacyGateError("unreadable")
+        if not findings:
+            return None
+        unique = sorted({(f["category"], f["path"], f["line"]) for f in findings})[:20]
+        where = ", ".join(f"{c} {p}:{n}" for c, p, n in unique)
+    except PushLeaseConflict as e:
+        return _stop(db, "PUSH_FAILED", str(e))
+    except Exception:
+        return _stop(db, PRIVACY_ERROR, "privacy gate could not verify content; not published",
+                     privacy=[{"category": "unreadable", "path": "<gate>", "line": 0}])
+    return _stop(db, PRIVACY_BLOCKED, f"privacy gate: {where}; not published",
+                 privacy=[{"category": c, "path": p, "line": n} for c, p, n in unique])
+
+
+def _privacy_unchanged(worktree: Path, branch: str, sha: str, base: str, tree: str) -> bool:
+    """Recheck the immutable scanned object and its local binding immediately before publication."""
+    return (_git(worktree, "rev-parse", "HEAD") == sha
+            and _git(worktree, "symbolic-ref", "--short", "HEAD") == branch
+            and _git(worktree, "rev-parse", f"refs/heads/{branch}") == sha
+            and _git(worktree, "rev-parse", f"{sha}^{{tree}}") == tree
+            and _git(worktree, "rev-list", "--parents", "-n", "1", sha).split() == [sha, base]
+            and not _git(worktree, "status", "--porcelain", "--untracked-files=all"))
 
 
 def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Path, remote: str,
@@ -556,6 +915,17 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
             if url is None:
                 if before_publish is not None:
                     before_publish()   # outside any catch: a token-role or ownership refusal keeps its own outcome
+                # The PR shows base..head upstream: the whole range is scanned, although the branch is on the fork.
+                if blocked := _privacy_stop(db, worktree, job.base, head, task, {"<pr title>": pr_title,
+                                                                                "<pr body>": pr_body}):
+                    return blocked
+                try:
+                    if not _privacy_unchanged(worktree, branch, head, job.base, expected):
+                        raise PrivacyGateError("unreadable")
+                    if _privacy_remote_head(worktree, remote, f"refs/heads/{branch}", protocol) != head:
+                        raise PrivacyGateError("unreadable")
+                except Exception:
+                    return _stop(db, PRIVACY_ERROR, "privacy publication binding changed; not published")
                 try:
                     url = open_pr(branch, pr_title, pr_body, head)
                 except Exception:
@@ -565,17 +935,39 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
             return _stop(db, "PR_OPEN", url, branch=branch, commit=head, pr=url)
         _git(worktree, "commit", "-q", "--no-verify", "-m", commit_message)
         commit = _git(worktree, "rev-parse", "HEAD")
-        # A repair replaces only what this task last published, under the same PR.
+        # Both initial publication and repairs use this single push site. The remote lease must match the scan.
         previous = _last(imp["history"], "PR_OPEN").get("evidence", {})
+        remote_expected = previous.get("commit", "")
+        # The exact commit object to be pushed, and every commit it brings that the fork does not have, is scanned.
+        if blocked := _privacy_stop(db, worktree, job.base, commit, task, {
+                "<pr title>": pr_title, "<pr body>": pr_body, "<commit message>": commit_message},
+                remote=remote, protocol=protocol, expected_remote=remote_expected):
+            try:   # back to base + the approved change uncommitted, so a founder retry takes this path again
+                _git(worktree, "reset", "-q", "--soft", job.base)
+            except Exception:
+                pass
+            return blocked
         if not stage_c.holds(db, job.repository, token):
             return _stop(db, "LEASE_LOST", "lease expired or was taken before the push")
+        # The scan is bound to `commit`, which the push names by SHA; nothing may have moved since.
+        try:
+            moved = (not _privacy_unchanged(worktree, branch, commit, job.base, expected)
+                     or _privacy_remote_head(worktree, remote, f"refs/heads/{branch}", protocol) != remote_expected)
+        except Exception:
+            moved = True
+        if moved:
+            try:   # restore the same retry state as a blocked scan
+                _git(worktree, "reset", "-q", "--soft", job.base)
+            except Exception:
+                pass
+            return _stop(db, PRIVACY_ERROR, "the scanned commit changed before the push; not published")
         try:
             # The lease is checked atomically by the remote. First publish: an empty expected
             # value, so task/<KEY> is created only if it does not exist (even a fast-forward of
             # an existing branch is rejected). Repair: the expected value is the commit this task
             # published last, so a branch anyone else pushed to is rejected, never overwritten.
-            lease = f"--force-with-lease=refs/heads/{branch}:{previous.get('commit', '')}"
-            _git(worktree, "push", "--no-verify", "--porcelain", lease,
+            lease = f"--force-with-lease=refs/heads/{branch}:{remote_expected}"
+            _git(worktree, "-c", "push.followTags=false", "push", "--no-verify", "--porcelain", lease,
                  remote, f"{commit}:refs/heads/{branch}", protocol=protocol)
             remote_head = _git(worktree, "ls-remote", remote, f"refs/heads/{branch}",
                                protocol=protocol).split("\t")[0]
