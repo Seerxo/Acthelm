@@ -976,7 +976,7 @@ def reconcile(db):
                                  after={"request_audit_id": request.id, "code": "EVIDENCE_UNAVAILABLE"})
                     db.commit()
                 outcomes.append({"task": task.key, "outcome": "BLOCKED", "reasons": ["EVIDENCE_UNAVAILABLE"]})
-            if mode == "apply":
+            if mode in ("apply", "dry-run"):
                 continue
         if (task.status == enums.TaskStatus.BLOCKED
                 and stage_c_ci.merge_recovery_block(db, task) is None):

@@ -394,6 +394,15 @@ def test_pending_request_falls_to_normal_merge_recovery(blocked_scene, monkeypat
         assert calls == [] and out == []
 
 
+def test_dry_run_skips_normal(blocked_scene, monkeypatch):
+    db, task, *_ = blocked_scene
+    worker_facts(monkeypatch, blocked_scene, mode="dry-run")
+    monkeypatch.setattr(stage_c_ci, "merge_recovery_block", lambda *args: pytest.fail("merge recovery ran"))
+    monkeypatch.setattr(stage_c_ci, "ingest", lambda *args, **kwargs: pytest.fail("ingest ran"))
+    out = stage_c_worker.reconcile(db)
+    assert len(out) == 1 and out[0]["task"] == task.key and out[0]["outcome"] == "DRY_RUN"
+
+
 def test_dry_run_is_audited_once_per_request_and_recovers_normally(blocked_scene, monkeypatch):
     db, task, request, *_ = blocked_scene
     calls = []
@@ -403,6 +412,8 @@ def test_dry_run_is_audited_once_per_request_and_recovers_normally(blocked_scene
     normal = []
     monkeypatch.setattr(stage_c_ci, "ingest", lambda *args, **kwargs: normal.append(1) or {"outcome": "WAITING"})
     first = stage_c_worker.reconcile(db)
+    assert len(first) == 1 and first[0]["task"] == task.key and first[0]["outcome"] == "DRY_RUN"
+    assert normal == []
     second = stage_c_worker.reconcile(db)
     assert calls == [1]
     rows = db.scalars(select(models.AuditLog).where(
@@ -410,10 +421,9 @@ def test_dry_run_is_audited_once_per_request_and_recovers_normally(blocked_scene
     assert len(rows) == 1 and rows[0].after == {"request_audit_id": request.id, "code": "PASS"}
     assert not db.scalar(select(models.AuditLog).where(
         models.AuditLog.action.in_(("improvement.refresh_reconciled", "improvement.refresh_reconcile_refused"))))
-    assert first[0]["outcome"] == "DRY_RUN"
     assert all(item["outcome"] != "DRY_RUN" for item in second)
     if task.error.startswith(stage_c_ci.MERGE_NOT_RECORDED):
-        assert normal == [1, 1]
+        assert normal == [1]
 
 
 @pytest.mark.parametrize("error,code", [(stage_c_runner.RefreshRefused("EXTRA_COMMIT"), "EXTRA_COMMIT"),
