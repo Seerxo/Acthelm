@@ -332,6 +332,33 @@ def test_series_window_boundary_is_inclusive_to_the_microsecond():
     assert [p["value"] for p in out["points"]] == [1.0]
 
 
+def _series(db, days):
+    return metrics_store.series(db, source="youtube-data-api", subject="youtube:abc123", metric="views",
+                                window="24h", days=days, now=NOW)
+
+
+def test_series_drops_readings_older_than_a_short_days_window():
+    db = _db()
+    metrics_store.record(db, _views(1, NOW - timedelta(days=5)), now=NOW)
+    metrics_store.record(db, _views(2, NOW - timedelta(days=3, hours=1)), now=NOW)
+    metrics_store.record(db, _views(3, NOW - timedelta(days=2)), now=NOW)
+    out = _series(db, 3)
+    assert out["days"] == 3
+    assert [p["value"] for p in out["points"]] == [3.0]
+    assert [p["value"] for p in _series(db, 4)["points"]] == [2.0, 3.0]
+
+
+def test_series_is_oldest_first_regardless_of_insertion_order():
+    db = _db()
+    for value, days in ((3, 1), (1, 20), (4, 0), (2, 10)):
+        metrics_store.record(db, _views(value, NOW - timedelta(days=days)), now=NOW)
+    metrics_store.record(db, _views(9, NOW - timedelta(days=45)), now=NOW)  # outside the window
+    out = _series(db, 30)
+    assert [p["value"] for p in out["points"]] == [1.0, 2.0, 3.0, 4.0]
+    stamps = [datetime.fromisoformat(p["observed_at"]) for p in out["points"]]
+    assert stamps == sorted(stamps)
+
+
 def test_a_series_with_no_readings_is_empty_never_zero():
     db = _db()
     out = metrics_store.series(db, source="polar-api", subject="polar", metric="mrr", now=NOW)
