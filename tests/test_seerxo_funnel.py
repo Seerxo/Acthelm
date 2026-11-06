@@ -41,6 +41,8 @@ def test_counts_become_observations_and_missing_fields_stay_missing():
     assert out["inserted"] == 5 and seen == ["Bearer " + "t" * 40]
     assert {metrics_store._aware(r.observed_at) for r in observations} == {NOW}
     assert rows[("activation_rate", "7d")] == 0.3333 and rows[("signups", "7d")] == 12
+    assert not any(metric.startswith("signups_source_") or metric == "signups_attempted_first_generation"
+                   for metric, _ in rows)
     # Break caught: a field Seerxo did not report shows as 0 on the Desk.
     assert ("active_users", "7d") not in rows
     assert "t" * 40 not in json.dumps([r.evidence for r in db.execute(select(models.MetricObservation)).scalars()])
@@ -104,6 +106,8 @@ GOOD = {"generated_at": "2026-10-06T12:00:00Z", "total_users": 100, "signups_1d"
         "signups_30d": 40, "activation_cohort": 12, "activated_7d": 4, "activation_rate_7d": 0.3333,
         "active_users_7d": 30, "quota_hits_7d": 3, "paid_users": 3, "checkout_started_7d": 2,
         "new_signups_generated_7d": 5, "new_signups_failed_only_7d": 2}
+NEW = {"signups_by_source_7d": {"youtube": 3, "search": 2, "direct": 1, "unknown": 6},
+       "signups_source_known_7d": 6, "signups_attempted_first_generation_7d": 7}
 
 
 def _rows(db):
@@ -117,6 +121,57 @@ def _sync(db, funnel, now=NOW):
 def test_a_complete_consistent_snapshot_is_recorded_in_full():
     db = _db()
     assert _sync(db, GOOD)["inserted"] == 13
+
+
+def test_source_aggregates_become_six_separate_seven_day_observations():
+    db = _db()
+    out = _sync(db, {**GOOD, **NEW})
+    rows = {(r.metric, r.window): r for r in _rows(db)}
+    assert out["inserted"] == 19 and out["rejected"] == []
+    for category, count in NEW["signups_by_source_7d"].items():
+        row = rows[(f"signups_source_{category}", "7d")]
+        assert int(row.value) == count and row.subject == "seerxo:funnel"
+        assert row.evidence["seerxo_field"] == f"signups_by_source_7d.{category}"
+    assert int(rows[("signups_source_known", "7d")].value) == 6
+    assert int(rows[("signups_attempted_first_generation", "7d")].value) == 7
+    assert rows[("signups", "7d")].value == 12
+
+
+@pytest.mark.parametrize("source", [
+    {"youtube": 4, "search": 2, "direct": 1, "unknown": 6},
+    {"youtube": -1, "search": 2, "direct": 1, "unknown": 10},
+    {"youtube": True, "search": 2, "direct": 1, "unknown": 6},
+    {"youtube": 3.0, "search": 2, "direct": 1, "unknown": 6},
+    {"youtube": "3", "search": 2, "direct": 1, "unknown": 6},
+    {"youtube": 3, "search": 2, "direct": 1, "unknown": 6, "other": 0},
+    {"youtube": 3, "search": 2, "direct": 1},
+    None,
+], ids=["sum", "neg", "bool", "float", "str", "extra", "missing", "null"])
+def test_invalid_source_breakdown_rejects_the_whole_snapshot(source):
+    db = _db()
+    out = _sync(db, {**GOOD, **NEW, "signups_by_source_7d": source})
+    assert out["inserted"] == 0 and out["rejected"] and _rows(db) == []
+    assert all("signups_by_source_7d" in reason for reason in out["rejected"])
+
+
+@pytest.mark.parametrize("field", ["signups_source_known_7d", "signups_attempted_first_generation_7d"],
+                         ids=["known", "attempted"])
+@pytest.mark.parametrize("bad", [-1, True, 6.0, "6", None], ids=["neg", "bool", "float", "str", "null"])
+def test_invalid_new_scalar_rejects_the_whole_snapshot(field, bad):
+    db = _db()
+    out = _sync(db, {**GOOD, **NEW, field: bad})
+    assert out["inserted"] == 0 and out["rejected"] == [f"{field}: not a non-negative integer count"]
+    assert _rows(db) == []
+
+
+@pytest.mark.parametrize("patch", [
+    {"signups_source_known_7d": 5},
+    {"signups_attempted_first_generation_7d": 13},
+], ids=["known", "attempted"])
+def test_contradictory_new_aggregates_reject_the_whole_snapshot(patch):
+    db = _db()
+    out = _sync(db, {**GOOD, **NEW, **patch})
+    assert out["inserted"] == 0 and out["rejected"] and _rows(db) == []
 
 
 def test_legitimate_zeros_are_kept_and_an_undefined_rate_is_not_cross_checked():
