@@ -14,7 +14,7 @@ change and no GitHub login can put an unapproved commit on production. GitHub Fr
 
 | Side | Holds | Can be changed by agents? |
 |---|---|---|
-| `Seerxo/seerxo-os` repository, its workflows and CI results | code, tests, PRs | **yes**: untrusted input to a release |
+| `Seerxo/Acthelm` repository, its workflows and CI results | code, tests, PRs | **yes**: untrusted input to a release |
 | Stage C worker, coder container, PostgreSQL rows they write | task state, Stage C review records | **yes**: untrusted |
 | `company-reasoner` (separate container: no database, no GitHub token, no Docker socket) | model CLIs only; answers the signer's review request like any /run call. Holds **no** key | reachable by the worker over /run (by design, for Stage B) |
 | `company-review-signer` (F1: own uid 10002, no model CLI, no Docker socket, read-only, no route out) | the reviewer signing key; builds the release review itself, validates the answer strictly, signs it | **no**, required (H6) |
@@ -24,6 +24,12 @@ change and no GitHub login can put an unapproved commit on production. GitHub Fr
 
 A merged PR, a green workflow and a `merged_by` login are all on the agent side of the line, so none of them is
 release evidence here.
+
+Stage C's pre-push privacy gate is a separate publication control, not release authority. It scans
+outgoing history and public text before a fork push or missing-PR creation, with fail-closed errors
+and exact-SHA binding (`app/stage_c_runner.py`, `tests/test_stage_c_privacy_gate.py`). Its overlap
+thresholds and residual limits are documented in [SECURITY.md](../../SECURITY.md#security-layers-are-separate).
+Stage C never merges or deploys; auto-merge remains off. This gate changes none of the signing rules below.
 
 ## Keys and when the founder is involved
 
@@ -48,7 +54,7 @@ production at an older tree is refused for every signer, so no emergency bypass 
 
 **Risk is an allow-list.** A change is LOW only if every path is plain normalised ASCII, matches the policy's
 `low_risk_paths` and no `high_risk_paths` pattern. Everything else is HIGH. A deny-list protects file names, not
-behaviour: a new `app/api_auth/__init__.py` package or a compiled `.so` shadows `app/api_auth.py`, and
+behaviour: a new package or compiled `.so` can shadow `app/api_auth.py`, and
 `app/__init__.py`, `app/models.py` or `tests/*` reach high-risk code by import or execution. The proposed v1
 policy therefore auto-releases `docs/*` only. Widening it (Desk, backend modules) is a founder-signed policy
 change, and needs a reason the widened paths cannot reach privileged code: the Desk runs in the founder's
@@ -57,7 +63,7 @@ path or a migration, because the host re-classifies the change from its own diff
 
 ## Release flow
 
-1. Agent merges a PR to `main` (allowed; merging is not releasing).
+1. The founder merges a PR to `main` (merging is not releasing).
 2. Gateway fetches the exact commit into its own clone, computes the payload digest with the same file list and
    `sha256  path` listing as `deploy-company-os.sh`, and the changed paths since the last applied release.
 3. Gateway runs the checks itself in an offline container from its own image (reuses the Stage C checks container:
