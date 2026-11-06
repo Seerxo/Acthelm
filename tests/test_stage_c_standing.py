@@ -252,6 +252,35 @@ def test_the_stage_c_worker_does_not_refund_a_completed_run(monkeypatch, tmp_pat
     assert out["verdict"] == "PR_OPEN" and refunds == []
 
 
+def _cli_failures(L, monkeypatch, task, real_coder, outputs):
+    """Drive the real launcher and adapter with bounded CLI streams, without Docker."""
+    outputs, results = iter(outputs), []
+
+    def host_start(_):
+        real_popen = L.subprocess.Popen
+        def popen(argv, **kw):
+            if argv[0] != "docker":
+                return real_popen(argv, **kw)
+            stdout, stderr = next(outputs)
+            mount = next(a for a in argv if a.endswith("target=/run/company-coder"))
+            ack = Path(mount.split("source=", 1)[1].split(",target=", 1)[0])
+            proc = FakeProcess(stdout, read=lambda: (ack / "started").touch())
+            proc.returncode = 1
+            proc.stderr = io.BytesIO(stderr)
+            return proc
+        with monkeypatch.context() as patch:
+            patch.setattr(L.subprocess, "Popen", popen)
+            result = L.handle(task.key, CFG)
+        results.append(json.loads((L.JOBS / task.key / "done/result.json").read_text()))
+        assert result == results[-1]
+
+    def launcher_coder(**kw):
+        kw.update(poll_s=0, sleep=host_start)
+        return real_coder(**kw)
+    monkeypatch.setattr(stage_c_worker.stage_c_runner, "launcher_coder", launcher_coder)
+    return results
+
+
 @pytest.mark.parametrize("message,channel,code,refunded", [
     ("You've hit your usage limit", "stdout", "QUOTA_EXHAUSTED", True),
     ("You've hit your limit", "stdout", "QUOTA_EXHAUSTED", True),
@@ -259,6 +288,11 @@ def test_the_stage_c_worker_does_not_refund_a_completed_run(monkeypatch, tmp_pat
     ("HTTP 429: too many requests", "stderr", "RATE_LIMITED", True),
     ("Not logged in: please authenticate", "stderr", "AUTH_REQUIRED", True),
     ("unexpected coder failure", "stdout", "CODER_ERROR", False),
+    ({"duration_ms": 429}, "stdout", "CODER_ERROR", False),
+    ({"total_cost_usd": 0.401}, "stdout", "CODER_ERROR", False),
+    ({"is_error": False, "result": "I updated the login form..."}, "stdout", "CODER_ERROR", False),
+    ("catalog in use", "stderr", "CODER_ERROR", False),
+    ("insufficient context", "stderr", "CODER_ERROR", False),
 ])
 def test_coder_cli_failure_reaches_standing_refund_without_raw_text(L, monkeypatch, tmp_path,
                                                                   message, channel, code, refunded):
@@ -274,31 +308,16 @@ def test_coder_cli_failure_reaches_standing_refund_without_raw_text(L, monkeypat
     assert control.consume_write_authorization(db, task, SHA_A, 999) is None
     db.commit()
     canary = "RAW_CODER_CANARY_7ac452"
-    output = f"{message}\n{canary}\nlast line has no capacity hint\n".encode()
-    results = []
-
-    def host_start(_):
-        real_popen = L.subprocess.Popen
-        def popen(argv, **kw):
-            if argv[0] != "docker":
-                return real_popen(argv, **kw)
-            mount = next(a for a in argv if a.endswith("target=/run/company-coder"))
-            ack = Path(mount.split("source=", 1)[1].split(",target=", 1)[0])
-            proc = FakeProcess(output if channel == "stdout" else b"unhelpful stdout\n",
-                               read=lambda: (ack / "started").touch())
-            proc.returncode = 1
-            proc.stderr = io.BytesIO(output if channel == "stderr" else b"")
-            return proc
-        with monkeypatch.context() as patch:
-            patch.setattr(L.subprocess, "Popen", popen)
-            result = L.handle(task.key, CFG)
-        results.append(json.loads((L.JOBS / task.key / "done/result.json").read_text()))
-        assert result == results[-1]
-
-    def launcher_coder(**kw):
-        kw.update(poll_s=0, sleep=host_start)
-        return real_coder(**kw)
-    monkeypatch.setattr(stage_c_runner, "launcher_coder", launcher_coder)
+    old_summary = "last line has no capacity hint"
+    text = f"{message if isinstance(message, str) else 'unexpected failure'}\n{canary}\n{old_summary} {canary}"
+    envelope = {"type": "result", "subtype": "success", "is_error": True, "result": text}
+    if isinstance(message, dict):
+        envelope.update(message)
+    envelope["errors"] = [text]
+    # Compact JSON keeps the canary on stdout's last line; stderr also ends with it.
+    stdout = json.dumps(envelope).encode() if channel == "stdout" else b"unhelpful stdout\n"
+    stderr = text.encode() if channel == "stderr" else b""
+    results = _cli_failures(L, monkeypatch, task, real_coder, [(stdout, stderr)])
     out = worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
     db.expire_all()
     run = db.get(models.AgentRun, out["run_id"])
@@ -317,4 +336,64 @@ def test_coder_cli_failure_reaches_standing_refund_without_raw_text(L, monkeypat
         assert not cooldown and not worker._capacity_only(run)
     persisted = [dict(row) for table in models.Base.metadata.sorted_tables
                  for row in db.execute(table.select()).mappings()]
-    assert canary not in json.dumps([results, out, persisted], default=str)
+    for value in [results, out, *persisted]:
+        saved = json.dumps(value, default=str)
+        assert canary not in saved
+        assert old_summary not in saved
+
+
+def test_launcher_refund_cooldown_retry_and_daily_cap(L, monkeypatch, tmp_path):
+    from app import enums, stage_c_runner
+    from tests.test_stage_c_worker import Reviewer, _db, pipeline, write_task
+    real_coder = stage_c_runner.launcher_coder
+    pipeline(monkeypatch, tmp_path, mock_authorization=False)
+    monkeypatch.setenv("COMPANY_OS_GIT_SHA", SHA_A)
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(worker, "_now", lambda: now)
+    db = _db()
+    task = write_task(db)
+    ps = {n: Reviewer(n) for n in ("claude", "codex")}
+    control.issue_standing(db, [PATH], SHA_A, founder=FOUNDER_ID, max_per_day=1)
+    results = _cli_failures(L, monkeypatch, task, real_coder, [
+        (b'{"is_error":true,"subtype":"success","result":"usage limit reached"}', b""),
+        (b'{"is_error":false,"result":"I updated the login form"}', b""),
+    ])
+    first = worker.run_once(db, ps, SPECS)
+    assert first["verdict"] == "CODER_FAILED" and results[0]["failure_class"] == "QUOTA_EXHAUSTED"
+    assert standing(db).value["used"]["count"] == 0
+    assert control.refund_standing_run(db, task, first["run_id"]) is False
+    blocked = worker.run_once(db, ps, SPECS)
+    assert blocked["model_calls"] == 0 and db.query(models.AgentRun).count() == 1
+    assert task.status == enums.TaskStatus.READY and len(results) == 1
+
+    now = datetime.fromisoformat(worker._cooldowns(db)["claude"]["until"]) + timedelta(seconds=1)
+    second = worker.run_once(db, ps, SPECS)
+    assert second["verdict"] == "CODER_FAILED" and second["run_id"] != first["run_id"]
+    assert results[1]["failure_class"] == "CODER_ERROR" and len(results) == 2
+    assert standing(db).value["used"]["count"] == 1 and task.retry_count == 1
+    assert control.refund_standing_run(db, task, first["run_id"]) is False
+    assert audit_actions(db).count("stage-c.standing.refund") == 1
+    assert audit_actions(db).count("stage-c.standing.consume") == 2
+    out, skipped = tick(db, ps)
+    assert skipped == {"stage_c_standing_daily_limit"} and out["model_calls"] == 0
+    assert db.query(models.AgentRun).count() == 2 and len(results) == 2
+    assert standing(db).value["used"]["count"] == 1
+
+
+def test_denied_authorization_with_capacity_output_never_claims_or_refunds(L, monkeypatch, tmp_path):
+    from app import stage_c_runner
+    from tests.test_stage_c_worker import Reviewer, _db, pipeline, write_task
+    real_coder = stage_c_runner.launcher_coder
+    pipeline(monkeypatch, tmp_path, mock_authorization=False)
+    monkeypatch.setenv("COMPANY_OS_GIT_SHA", SHA_A)
+    db = _db()
+    task = write_task(db)
+    control.issue_standing(db, [PATH], SHA_B, founder=FOUNDER_ID)
+    results = _cli_failures(L, monkeypatch, task, real_coder, [(b"", b"usage limit reached")])
+    refunds = _spy_refunds(monkeypatch)
+    out, skipped = tick(db, {n: Reviewer(n) for n in ("claude", "codex")})
+    assert skipped == {"stage_c_standing_invalid"}
+    assert_untouched(db, task, out)
+    assert results == [] and refunds == [] and standing(db).value["used"]["count"] == 0
+    assert "stage-c.standing.consume" not in audit_actions(db)
+    assert "stage-c.standing.refund" not in audit_actions(db)

@@ -454,6 +454,16 @@ def execute(db, task, spec, usable):
         control.refund_standing_run(db, task, run.id)  # an unavailable provider is not a spent attempt
         if owns_attempt:
             task.status = enums.TaskStatus.READY
+            if outcome == "CODER_FAILED":
+                recent = db.scalars(select(models.AgentRun.tool_calls).where(models.AgentRun.task_id == task.id,
+                                                                            models.AgentRun.id != run.id)
+                                    .order_by(models.AgentRun.id.desc()).limit(MAX_CODER_CAPACITY_FAILURES - 1)).all()
+                if len(recent) == MAX_CODER_CAPACITY_FAILURES - 1 and all(
+                        (r or {}).get("outcome") == "CODER_FAILED" and (r or {}).get("capacity_failure") is True
+                        for r in recent):
+                    task.status = enums.TaskStatus.BLOCKED
+                    task.error = (f"CODER_CAPACITY: the coder was unavailable {MAX_CODER_CAPACITY_FAILURES} attempts in a row; "
+                                  "check the provider's subscription access and limits, then set READY")
         run.status = enums.AgentRunStatus.FAILED
     elif free_refusal:
         # The host launcher refused before any model ran (pause authority, fence, config): infrastructure. No retry
@@ -599,6 +609,7 @@ def published_pr_number(task) -> int | None:
 REPAIR_STAGES = ("IMPLEMENTING", "TESTING", "INDEPENDENT_REVIEW")
 MAX_FEEDBACK_CHARS = 12000
 MAX_LAUNCHER_REFUSALS = 3                  # consecutive free refusals before the task is BLOCKED
+MAX_CODER_CAPACITY_FAILURES = 3            # consecutive coder capacity failures before founder inspection
 LAUNCHER_COOLDOWN_KEY = "stage_c_launcher"  # worker cooldown entry that pauses Stage C admission only
 
 

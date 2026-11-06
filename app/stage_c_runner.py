@@ -192,7 +192,8 @@ def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, 
         except Exception as e:  # the coder is untrusted; its failure is an outcome, not a crash
             code = (e.failure_class if isinstance(e, CoderFailed) else
                     "TIMEOUT" if isinstance(e, TimeoutError) else "CODER_ERROR")
-            return _stop(db, "CODER_FAILED", code, failure_class=code)
+            detail = code if isinstance(e, CoderFailed) else f"{code}: {type(e).__name__}"
+            return _stop(db, "CODER_FAILED", detail, failure_class=code)
         if before_write:
             before_write()
         try:

@@ -109,9 +109,9 @@ def subprocess_runner(argv: list[str], cwd: str, timeout: int, env: dict,
 
 
 CAPACITY_PATTERNS = (
-    ("QUOTA_EXHAUSTED", r"usage limit|session limit|hit your limit|quota|credit|insufficient|billing|payment"),
-    ("RATE_LIMITED", r"rate.?limit|\b429\b|overloaded|too many requests"),
-    ("AUTH_REQUIRED", r"log ?in|logged in|unauthori[sz]ed|\b401\b|invalid api key|authenticat|oauth|organization has disabled .*subscription access"),
+    ("QUOTA_EXHAUSTED", r"\b(?:usage limit|session limit|hit your limit|quota|credits?|insufficient (?:balance|funds)|billing|payment)\b"),
+    ("RATE_LIMITED", r"\b(?:rate[ _-]?limit(?:ed)?|overloaded|too many requests)\b|(?<![\w.])429(?![\w.])"),
+    ("AUTH_REQUIRED", r"\b(?:log ?in|logged in|unauthori[sz]ed|invalid api key|authenticate|authentication|oauth|organization has disabled .*subscription access)\b|(?<![\w.])401(?![\w.])"),
 )
 
 

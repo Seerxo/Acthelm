@@ -302,9 +302,9 @@ MAX_STDOUT, MAX_STDERR = 1024 * 1024, 64 * 1024   # bytes kept while draining: t
 
 # No app imports as host root; tests/test_providers_capacity.py pins these to providers.classify.
 CAPACITY_PATTERNS = (
-    ("QUOTA_EXHAUSTED", r"usage limit|session limit|hit your limit|quota|credit|insufficient|billing|payment"),
-    ("RATE_LIMITED", r"rate.?limit|\b429\b|overloaded|too many requests"),
-    ("AUTH_REQUIRED", r"log ?in|logged in|unauthori[sz]ed|\b401\b|invalid api key|authenticat|oauth|organization has disabled .*subscription access"),
+    ("QUOTA_EXHAUSTED", r"\b(?:usage limit|session limit|hit your limit|quota|credits?|insufficient (?:balance|funds)|billing|payment)\b"),
+    ("RATE_LIMITED", r"\b(?:rate[ _-]?limit(?:ed)?|overloaded|too many requests)\b|(?<![\w.])429(?![\w.])"),
+    ("AUTH_REQUIRED", r"\b(?:log ?in|logged in|unauthori[sz]ed|invalid api key|authenticate|authentication|oauth|organization has disabled .*subscription access)\b|(?<![\w.])401(?![\w.])"),
 )
 
 
@@ -426,8 +426,20 @@ def run_container(argv: list[str], prompt: bytes, timeout_s: int, name: str,
     if kind == "code":
         result = {"exit": proc.returncode, "timed_out": False}
         if proc.returncode != 0:
-            # Classify both bounded streams before discarding all model/CLI text.
-            result["failure_class"] = capacity_class((stdout + b"\n" + _stderr).decode(errors="replace"))
+            messages = [_stderr.decode(errors="replace")]
+            try:
+                envelope = json.loads(stdout)
+            except (ValueError, RecursionError):
+                envelope = None
+            # Only CLI error text is evidence; ordinary results, metadata and denials are model data.
+            if (isinstance(envelope, dict) and envelope.get("is_error") is True
+                    and envelope.get("subtype") not in ("error_max_turns", "error_during_execution")):
+                if isinstance(envelope.get("result"), str):
+                    messages.append(envelope["result"])
+                errors = envelope.get("errors")
+                if isinstance(errors, list):
+                    messages.extend(error for error in errors if isinstance(error, str))
+            result["failure_class"] = capacity_class("\n".join(messages))
         return result
     # Test output is untrusted and may be large: only the last line, bounded.
     text = stdout.decode(errors="replace")
