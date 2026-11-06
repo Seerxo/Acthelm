@@ -429,7 +429,7 @@ def test_company_merge_requires_the_sengi_frontend_run_on_the_exact_head(env):
     (company_runs(company_run(), total=-1), "incomplete"),
     (company_runs(company_run(), total=0), "incomplete"),
     (json.dumps({"workflow_runs": "x"}), "malformed"),
-])
+], ids=lambda v: v.replace(" ", "-") if v in ("missing required workflow run", "not green", "incomplete", "malformed") else "")
 def test_company_merge_refuses_anything_short_of_a_green_sengi_run_on_the_head(env, runs, why):
     res = company_merge(env, FAKE_RUNS=runs)
     assert res.returncode != 0

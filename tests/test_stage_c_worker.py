@@ -2087,7 +2087,7 @@ def test_b5_worker_publishes_to_the_configured_fork_and_opens_the_pr_from_it(mon
     "https://github.com/seerxo/acthelm/pull/0",
     "https://github.com/seerxo/acthelm/pull/abc",
     "https://github.com/seerxo/acthelm/pull/" + "9" * 5000,
-])
+], ids=lambda u: "url")
 def test_published_pr_identity_rejects_other_repositories_and_malformed_urls(url):
     db = _db()
     task = _published_task_for_merge_reconciliation(db)

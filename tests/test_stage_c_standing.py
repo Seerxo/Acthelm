@@ -293,8 +293,8 @@ def _cli_failures(L, monkeypatch, task, real_coder, outputs):
     ({"is_error": False, "result": "I updated the login form..."}, "stdout", "CODER_ERROR", False),
     ("catalog in use", "stderr", "CODER_ERROR", False),
     ("insufficient context", "stderr", "CODER_ERROR", False),
-])
-def test_coder_cli_failure_reaches_standing_refund_without_raw_text(L, monkeypatch, tmp_path,
+], ids=lambda v: None if isinstance(v, (int, bool)) or v in ("CODER_ERROR", "QUOTA_EXHAUSTED", "RATE_LIMITED", "AUTH_REQUIRED", "TIMEOUT", "stdout", "stderr") else "")
+def test_cli_failure_refund(L, monkeypatch, tmp_path,
                                                                   message, channel, code, refunded):
     from app import enums, stage_c_runner
     from tests.test_stage_c_worker import Reviewer, _db, pipeline, write_task

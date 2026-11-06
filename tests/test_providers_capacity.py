@@ -5,7 +5,7 @@ from app import providers
 from tests.test_coder_launch import FakeProcess, _load
 
 
-def test_launcher_capacity_patterns_match_providers():
+def test_patterns_pinned():
     assert _load().CAPACITY_PATTERNS == providers.CAPACITY_PATTERNS
 
 
@@ -16,8 +16,8 @@ def test_launcher_capacity_patterns_match_providers():
     "invalid api key", "authentication failed", "OAuth error",
     "Your organization has disabled Claude subscription access for Claude Code",
     "unexpected failure", "",
-])
-def test_launcher_classifies_capacity_like_providers(message):
+], ids=lambda v: None if isinstance(v, (int, bool)) or v in ("CODER_ERROR", "QUOTA_EXHAUSTED", "RATE_LIMITED", "AUTH_REQUIRED", "TIMEOUT", "stdout", "stderr") else "")
+def test_capacity_parity(message):
     health = providers.classify(message).value
     assert _load().capacity_class(message) == ("CODER_ERROR" if health == "BROKEN" else health)
 
@@ -37,14 +37,14 @@ def test_launcher_classifies_capacity_like_providers(message):
     ("insufficient_funds", "QUOTA_EXHAUSTED"),
     ("authenticating", "AUTH_REQUIRED"),
     ("HTTP 401.", "AUTH_REQUIRED"),
-])
-def test_capacity_error_variants(message, expected):
+], ids=lambda v: None if isinstance(v, (int, bool)) or v in ("CODER_ERROR", "QUOTA_EXHAUSTED", "RATE_LIMITED", "AUTH_REQUIRED", "TIMEOUT", "stdout", "stderr") else "")
+def test_capacity_variants(message, expected):
     assert providers.classify(message).value == expected
     assert _load().capacity_class(message) == expected
 
 
 @pytest.mark.parametrize("message", ["catalog in use", "insufficient context", "0.401", "0.429", "blogin"])
-def test_non_capacity_phrases_are_spent_errors(message):
+def test_not_capacity(message):
     assert _load().capacity_class(message) == "CODER_ERROR"
     assert providers.classify(message) == providers.Health.BROKEN
 
@@ -65,8 +65,8 @@ def test_non_capacity_phrases_are_spent_errors(message):
     (b'{"is_error":true,"result":429,"errors":[401,{"path":"quota"}]}', b"", "CODER_ERROR"),
     (b'{"is_error":true,"result":"unexpected failure","duration_ms":429}', b"", "CODER_ERROR"),
     (b'{"is_error":true,"result":"unexpected failure","total_cost_usd":0.401}', b"", "CODER_ERROR"),
-])
-def test_launcher_uses_only_stderr_and_eligible_envelope_error_text(monkeypatch, stdout, stderr, expected):
+], ids=lambda v: None if isinstance(v, (int, bool)) or v in ("CODER_ERROR", "QUOTA_EXHAUSTED", "RATE_LIMITED", "AUTH_REQUIRED", "TIMEOUT", "stdout", "stderr") else "")
+def test_envelope_class(monkeypatch, stdout, stderr, expected):
     import io
     launcher = _load()
     proc = FakeProcess(stdout)

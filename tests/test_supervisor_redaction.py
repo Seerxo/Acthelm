@@ -8,7 +8,8 @@ from tests.test_worker import SPECS, FakeProvider, _db, _good, _needs_items
 @pytest.mark.parametrize("action", ["[unavailable]", "[withheld: too large to scan]",
                                     "[withheld: credential-shaped content]", "***",
                                     "token=" + "Q9w8E7r6T5y4U3i2O1p0" * 2,
-                                    "x" * (redact.MAX_SCAN_CHARS + 1)])
+                                    "x" * (redact.MAX_SCAN_CHARS + 1)],
+                         ids=["unavailable", "too-large", "withheld", "masked", "token", "oversized"])
 def test_supervisor_does_not_count_placeholders_or_oversized_actions(action):
     db = _db()
     task = _needs_items(db, 2)
