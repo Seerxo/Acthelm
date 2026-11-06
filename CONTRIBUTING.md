@@ -55,7 +55,7 @@ Also run on pull requests, but not required: `dependency-scan` (OSV, when depend
 and `ci` is a manually started readiness check for a `main` commit.
 
 GitHub branch protection on `main` requires these three checks (`python-tests`, `frontend-tests`,
-`trufflehog`) and a branch that is up to date with `main`. On top of that, the merge tooling
+`trufflehog`), a branch that is up to date with `main` and one approving review. On top of that, the merge tooling
 (`scripts/merge-pr`) and the Stage C merge gate run their own exact-head check: they refuse a missing,
 pending, failed, cancelled, skipped or other-commit run. These exact-head checks apply only when
 `merge-pr` is used; a direct GitHub merge is limited by branch protection alone, and Stage C
@@ -73,13 +73,18 @@ contributions open.
   privileged triggers, actions pinned to full commit SHAs.
 - Changes to `.github/workflows/`, the release gateway, the host verifier, the review signer, the
   agent policies in `agents/` or `tests/test_trust_boundary.py` receive an extra security review.
+- Stage C's pre-push privacy gate checks outgoing history and public text for credentials and overlap
+  with indexed founder task text (`tests/test_stage_c_privacy_gate.py`). It does not replace reviewing
+  every commit for private material: encodings, homoglyphs, rewording and short fragments can pass.
+  See [SECURITY.md](SECURITY.md#security-layers-are-separate) for its scope and thresholds.
 
 ## Review, merge and deploy
 
 - **Independent review.** Project policy is that every pull request is reviewed by someone other than
-  its author. Independence is enforced in code only for Stage C: the reviewer must differ from the coder
-  and the approval is bound to the exact diff by a fingerprint (`app/stage_c_runner.py`). Required
-  reviews are not verified as a repository setting. A model's answer alone is not an approval.
+  its author. Branch protection requires one approving review. Stage C additionally enforces a
+  reviewer different from the coder and binds approval to the exact diff by a fingerprint
+  (`app/stage_c_runner.py`). Repository settings are not verified by local tests. A model's answer
+  alone is not an approval.
 - **Agents cannot approve their own work.** An author reviewing its own change brings the same blind
   spots that produced a mistake to the check that should catch it. Agents also cannot merge, and the
   coding agent's account has only read access to this repository.

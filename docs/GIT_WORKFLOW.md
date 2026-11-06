@@ -57,8 +57,8 @@ private self-hosted CI as the normal engineering path.
   commit of the PR. `python-tests` covers compile, Alembic single head, the pytest suite, and the
   deterministic docs and branch-policy checks; the manual `ci` workflow is not required.
 - The Postgres-only tests run in their own CI step.
-- **Enforcement:** GitHub branch protection on `main` requires those three checks and an up-to-date
-  branch. It is a repository setting, not code, so nothing here can detect a change to it.
+- **Enforcement:** GitHub branch protection on `main` requires those three checks, an up-to-date
+  branch and one approving review. It is a repository setting, not code, so nothing here can detect a change to it.
   `scripts/merge-pr` is the audited command path and also refuses a merge unless CI is green on the
   checked head commit. The founder retains direct GitHub merge authority; reconciliation verifies the
   exact head, CI, independent review and founder actor. It records the verified GitHub merge and links
@@ -96,6 +96,12 @@ private self-hosted CI as the normal engineering path.
   never pushes to `main`, never calls the merge controller, and never gets GitHub admin credentials.
 - Generated work opens a PR with a task branch name and a Conventional Commit title. Stage C jobs
   that stop before the PR leave no merged PR, so cleanup never touches them.
+- Before a Stage C push, the privacy gate scans every commit new to the fork's target branch relative
+  to upstream main, plus public PR/commit text, for credentials and overlap with indexed founder task
+  text. It fails closed and binds publication to the scanned SHA and remote lease; repair pushes and
+  missing-PR recovery also use it (`app/stage_c_runner.py`, `tests/test_stage_c_privacy_gate.py`).
+  Its thresholds and residual limits still require human privacy review; see
+  [the security policy](../SECURITY.md#security-layers-are-separate).
 
 ## 8. Branch retention and recovery
 

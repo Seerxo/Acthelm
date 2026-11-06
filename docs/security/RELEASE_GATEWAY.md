@@ -25,6 +25,12 @@ change and no GitHub login can put an unapproved commit on production. GitHub Fr
 A merged PR, a green workflow and a `merged_by` login are all on the agent side of the line, so none of them is
 release evidence here.
 
+Stage C's pre-push privacy gate is a separate publication control, not release authority. It scans
+outgoing history and public text before a fork push or missing-PR creation, with fail-closed errors
+and exact-SHA binding (`app/stage_c_runner.py`, `tests/test_stage_c_privacy_gate.py`). Its overlap
+thresholds and residual limits are documented in [SECURITY.md](../../SECURITY.md#security-layers-are-separate).
+Stage C never merges or deploys; auto-merge remains off. This gate changes none of the signing rules below.
+
 ## Keys and when the founder is involved
 
 | Key | Signs | When |
@@ -48,7 +54,7 @@ production at an older tree is refused for every signer, so no emergency bypass 
 
 **Risk is an allow-list.** A change is LOW only if every path is plain normalised ASCII, matches the policy's
 `low_risk_paths` and no `high_risk_paths` pattern. Everything else is HIGH. A deny-list protects file names, not
-behaviour: a new `app/api_auth/__init__.py` package or a compiled `.so` shadows `app/api_auth.py`, and
+behaviour: a new package or compiled `.so` can shadow `app/api_auth.py`, and
 `app/__init__.py`, `app/models.py` or `tests/*` reach high-risk code by import or execution. The proposed v1
 policy therefore auto-releases `docs/*` only. Widening it (Desk, backend modules) is a founder-signed policy
 change, and needs a reason the widened paths cannot reach privileged code: the Desk runs in the founder's

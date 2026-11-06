@@ -138,14 +138,31 @@ PLAN → CODE → OFFLINE TESTS → CODEX REVIEW → PR FROM A FORK → EXACT-HE
 | CODE (`IMPLEMENTING`) | Claude edits the files in an isolated, read-only, capability-free container whose only route out is the provider egress proxy. It holds no GitHub credential. |
 | OFFLINE TESTS (`TESTING`) | The project's checks run in a separate container with no network (`--network=none` in `scripts/company-coder-launch`). Every changed test file must report a passing test. |
 | CODEX REVIEW (`INDEPENDENT_REVIEW`) | A different provider (Codex) reviews the exact diff. The approval records a SHA-256 fingerprint of that diff; the reviewer may not be the coder (`app/stage_c_runner.py`). |
-| PR FROM A FORK (`PR_OPEN`) | The control plane pushes the branch to a fork and opens a pull request. The agent account has read-only access to the upstream repository's contents; an optional PR-only token can open pull requests (`docker-compose.yml`). |
+| PR FROM A FORK (`PR_OPEN`) | After the pre-push privacy gate passes, the control plane pushes the scanned commit to a fork and opens a pull request. The agent account has read-only access to the upstream repository's contents; an optional PR-only token can open pull requests (`docker-compose.yml`). |
 | EXACT-HEAD CI (`CI`) | The required workflows must pass on the PR's exact head commit, and that head must match the reviewed fingerprint (`app/stage_c_ci.py`). |
 | READY_TO_MERGE (`READY_TO_MERGE`) | Stage C stops here. Only the founder can move a task to `MERGED` (`app/stage_c.py`, tested in `tests/test_stage_c.py`). |
 
 **Demonstrated.** Stage C has run this workflow unattended, from coding to pull request:
-[PR #61](https://github.com/Seerxo/Acthelm/pull/61) and [PR #62](https://github.com/Seerxo/Acthelm/pull/62)
+[PR #61](https://github.com/Seerxo/Acthelm/pull/61), [PR #62](https://github.com/Seerxo/Acthelm/pull/62)
+and [PR #72](https://github.com/Seerxo/Acthelm/pull/72)
 were each created by the system, passed offline tests, independent review and exact-head CI, and were
 then merged by the founder.
+
+**Pre-push privacy gate.** `app/stage_c_runner.py` scans every commit new to the fork's target
+branch relative to upstream `main`, including earlier commits whose content is absent from the tip.
+It checks commit objects, full changed blobs, paths, and public PR/commit text for credential shapes
+and overlap with the task's founder-authored description, objective, success criteria and context
+(excluding generated `improvement` evidence). Public titles and messages use fixed text and validated
+identifiers. The scan is bound to the exact pushed SHA; local state is rechecked and a remote lease
+guards the branch update. Repair pushes and recovery that opens a missing PR use the gate too.
+Unscannable content, unreadable history or scanner errors stop publication; findings report categories,
+paths and line numbers, never matched text. See `tests/test_stage_c_privacy_gate.py`.
+
+The overlap check matches 8 normalized words or 64 normalized characters; a contiguous match already
+in base Python code (excluding comments and literals) is exempt. This is a bounded check, not a proof
+of privacy: homoglyphs, encodings, inserted junk words, rewording, translation and fragments below
+both thresholds can pass. It does not detect unrelated private facts absent from the indexed task
+fields, or remove content already published. Credential detection is pattern-based too.
 
 **Not enabled.** That result does not imply automatic merge or deployment. Stage C never merges or
 deploys. Automatic merge is not enabled. Production release is decided separately by the signed gateway
@@ -168,6 +185,9 @@ own founder authorization or under a *standing authorization* that:
 
 The bounds are enforced in `app/control.py` and tested in `tests/test_stage_c_standing.py`. Production
 release authority is separate from all of this and is not granted by any Stage C authorization.
+Revocation blocks subsequent claims; an attempt already running can still publish because grants
+are consumed at attempt start and are not rechecked at publication. The agent pause is the existing
+pre-publication stop (`tests/test_stage_c_state.py`).
 
 ## Founder Desk
 
@@ -178,6 +198,20 @@ Founder-only decisions and issuing Stage C authorizations require a verified fou
 operator may also decide approvals and withdraw authority (revoke)
 ([docs/APPROVAL_IDENTITY.md](docs/APPROVAL_IDENTITY.md)). In production the Desk is reachable only
 through an authenticated tunnel.
+
+The **Stage C page** at `#/stage-c` uses the founder-only `GET /stage-c/state` read model. It shows
+an evidence-gated pipeline, PR and exact-head CI evidence, blockers (including standing-authorization
+denials), the next suggested founder action, worker readiness and the paused state (`PAUSED`
+heartbeat / agents paused). Its standing-authorization panel shows scope, expiry and usage, with an
+emergency revoke action; it cannot issue or renew a grant, enable code writes, merge or deploy.
+Task/attempt counts, combined model calls, minutes, tokens and recorded USD are shown when recorded;
+USD excludes subscription costs and missing values stay unknown.
+
+This page reads recorded evidence, not fresh GitHub or host checks. Its task list is bounded to 20
+and metrics to the newest 5,000 runs, with truncation reported. Reasoner identity and host facts remain
+unverified; API/worker agreement alone is not full runtime agreement. A failed refresh marks retained
+data stale. See [docs/STAGE_C_STATE.md](docs/STAGE_C_STATE.md), `desk/src/pages/stage-c.tsx`,
+`desk/src/lib/stage-c.test.ts` and `tests/test_stage_c_state.py`.
 
 ## Agent lifecycle
 
@@ -208,8 +242,9 @@ publishing, merges, production deploys, credentials and policy changes. In parti
 - Merge authority and production release authority are separate permissions; holding one does not
   grant the other.
 
-Automation flags default to off, and a pause stops autonomous execution without stopping production
-services. See the Stage C security design in
+Automation flags default to off, and a pause stops autonomous execution, including the business
+reconciler and experiment scheduler, without stopping production services. Goal creation and editing
+require a verified founder identity (`tests/test_founder_authorization.py`). See the Stage C security design in
 [docs/AUTONOMOUS_AGENT_ARCHITECTURE.md](docs/AUTONOMOUS_AGENT_ARCHITECTURE.md) and
 [docs/APPROVAL_IDENTITY.md](docs/APPROVAL_IDENTITY.md).
 
@@ -316,6 +351,13 @@ Documentation links and repository paths cited in the main documents are checked
   fork, including under a standing authorization.
 - **Independent review.** Code written by one provider is reviewed by another; the reviewed diff is
   bound to the published commit by a fingerprint.
+- **Publication privacy gate.** Stage C scans outgoing history and public text before publishing;
+  the [thresholds and residual limits](#stage-c-from-task-to-pull-request) still require human review.
+- **Desk exposure controls.** Model/provider text is redacted at write and read boundaries;
+  `app/redact.py` fails closed on scan errors. Task detail uses allowlisted context and artifact
+  projections. Security headers and a script-hash CSP protect the Desk; inline scripts are discovered
+  with `html.parser`. Browser writes require an allowed Host and matching origin metadata
+  (`app/api_auth.py`, `tests/test_desk_data_exposure.py`, `tests/test_api_auth.py`).
 - **Signed releases.** Production applies only a manifest that the host-side verifier checks against a
   founder-signed policy and an append-only ledger. A merge to `main` does not deploy anything by
   itself.
@@ -330,8 +372,8 @@ Documentation links and repository paths cited in the main documents are checked
 Limits of this model, stated plainly:
 
 - **Repository settings are not code.** GitHub branch protection on `main` requires the three checks
-  listed under [CI](#ci) and an up-to-date branch, but it is a repository setting: it is not versioned
-  in this repository, and the tests here cannot detect a change to it.
+  listed under [CI](#ci), an up-to-date branch and one approving review, but it is a repository setting:
+  it is not versioned in this repository, and the tests here cannot detect a change to it.
 - **One owner.** The founder account and its signing key are the final merge and release authority; a
   compromise of either bypasses the human gate. The gateway key can release low-risk paths on its own.
 - **Model review is not a proof.** An independent model review lowers, but does not remove, the risk of
@@ -366,7 +408,7 @@ Every workflow runs on GitHub-hosted `ubuntu-24.04` runners with a read-only tok
 | `ci` | A manually started readiness check for one exact `main` commit; it deploys nothing | no |
 
 GitHub branch protection on `main` requires the `python-tests`, `frontend-tests` and `trufflehog`
-checks and a branch that is up to date with `main`. On top of that, the merge tooling
+checks, a branch that is up to date with `main` and one approving review. On top of that, the merge tooling
 (`scripts/merge-pr`) and the Stage C merge gate apply their own exact-head check: they refuse a merge
 unless each workflow listed in [`agents/repository_guardian.yaml`](agents/repository_guardian.yaml)
 passed on the exact head commit being merged.
@@ -416,8 +458,9 @@ Please do not open a public issue. Use GitHub's private vulnerability reporting 
 - **V1.** The API, worker, reconciler, Desk, backups and release gateway run in production for one
   company.
 - **Stage C is narrow.** It has demonstrated an unattended coding-to-pull-request workflow
-  ([PR #61](https://github.com/Seerxo/Acthelm/pull/61), [PR #62](https://github.com/Seerxo/Acthelm/pull/62)),
-  but only on a short allowlist of low-risk files; those two changes were test additions. Coding is
+  ([PR #61](https://github.com/Seerxo/Acthelm/pull/61), [PR #62](https://github.com/Seerxo/Acthelm/pull/62),
+  [PR #72](https://github.com/Seerxo/Acthelm/pull/72)),
+  but only on a short allowlist of low-risk files; those three changes were test additions. Coding is
   Claude-only, so the independent reviewer is Codex.
 - **Stage C does not merge or deploy.** Merging remains a founder decision; release authority is
   separate (see [docs/security/RELEASE_GATEWAY.md](docs/security/RELEASE_GATEWAY.md)).
