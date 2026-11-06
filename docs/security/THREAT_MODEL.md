@@ -78,7 +78,7 @@ public source → CI runner → artifact → release gateway → production host
   versioned here and no test detects a change to it. The review setting, secret scanning push protection and Actions approval
   policies are not verified from this repository.
 - **Single owner.** The founder login is the final merge and release authority; a compromise of that
-  account or its signing key bypasses the human gate.
+  account or its signing key bypasses the human gate. The gateway key can release low-risk paths on its own.
 - **Third-party apps.** Any GitHub App with write access to the repository can push to it. Keep app
   permissions minimal.
 - **Release driver timeout.** The host verifier runs the deploy driver without its own time limit; a hung

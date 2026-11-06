@@ -46,7 +46,7 @@ private self-hosted CI as the normal engineering path.
 - Do not use GitHub's **Update branch** just because a branch is behind `main`.
 - If the branch is mergeable and repository rules allow it, leave it unchanged.
 - Branch protection (a repository setting) requires a branch that is up to date with `main`, so a
-  behind branch must be updated through the authorized refresh path before it can merge. The update
+  behind branch must be updated by a maintainer before it can merge (there is no automated refresh tool). The update
   changes the head: it invalidates earlier exact-head CI evidence, so rerun required checks, and
   preserve independent review. For Stage C PRs, see the behind-`main` limit in
   [README.md](../README.md#stage-c-from-task-to-pull-request).
