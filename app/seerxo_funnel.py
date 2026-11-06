@@ -37,7 +37,11 @@ FIELDS = [
     # of signups_7d (the rest have not tried yet). "So far": an immature cohort, unlike activation_cohort.
     ("new_signups_generated_7d", "new_signups_generated", "7d", None),
     ("new_signups_failed_only_7d", "new_signups_failed_only", "7d", None),
+    ("signups_source_known_7d", "signups_source_known", "7d", None),
+    ("signups_attempted_first_generation_7d", "signups_attempted_first_generation", "7d", None),
 ]
+SOURCE_CATEGORIES = ("youtube", "search", "direct", "unknown")
+NEW_COUNTS = ("signups_source_known_7d", "signups_attempted_first_generation_7d")
 
 
 def source_time(funnel: dict) -> datetime | None:
@@ -62,7 +66,8 @@ RATE_FIELD = "activation_rate_7d"
 # and subsets of all users.
 ORDERED = [("signups_1d", "signups_7d"), ("signups_7d", "signups_30d"), ("activated_7d", "activation_cohort"),
            ("paid_users", "total_users"), ("active_users_7d", "total_users"), ("checkout_started_7d", "total_users"),
-           ("new_signups_generated_7d", "signups_7d"), ("new_signups_failed_only_7d", "signups_7d")]
+           ("new_signups_generated_7d", "signups_7d"), ("new_signups_failed_only_7d", "signups_7d"),
+           ("signups_attempted_first_generation_7d", "signups_7d")]
 
 
 def _invalid(field: str, raw) -> str | None:
@@ -79,13 +84,28 @@ def _invalid(field: str, raw) -> str | None:
 
 
 def validate(funnel: dict) -> list[str]:
-    """Problems that make the whole snapshot untrustworthy. A field that is absent or null is
-    missing, never zero; a present field that is invalid or contradicts another rejects the snapshot,
+    """Problems that make the whole snapshot untrustworthy. An absent field is missing;
+    null on a new field rejects the snapshot. A present field that is invalid or
+    contradicts another rejects the snapshot,
     so no half-believed funnel reaches a goal."""
-    problems = [why for field, *_ in FIELDS if (raw := funnel.get(field)) is not None
+    problems = [why for field, *_ in FIELDS if field not in NEW_COUNTS and (raw := funnel.get(field)) is not None
                 and (why := _invalid(field, raw))]
+    for field in NEW_COUNTS:
+        if field in funnel and (type(funnel[field]) is not int or not 0 <= funnel[field] <= MAX_COUNT):
+            problems.append(f"{field}: not a non-negative integer count")
+    source = funnel.get("signups_by_source_7d")
+    if "signups_by_source_7d" in funnel and (not isinstance(source, dict) or set(source) != set(SOURCE_CATEGORIES)
+                                              or any(type(v) is not int or not 0 <= v <= MAX_COUNT for v in source.values())):
+        problems.append("signups_by_source_7d: expected four non-negative integer counts")
     if problems:
         return problems
+    if source is not None and (funnel.get("signups_7d") is None or sum(source.values()) != funnel["signups_7d"]):
+        problems.append("inconsistent: signups_by_source_7d does not sum to signups_7d")
+    if "signups_source_known_7d" in funnel and (source is None or funnel["signups_source_known_7d"]
+                                                  != sum(source[k] for k in SOURCE_CATEGORIES[:3])):
+        problems.append("inconsistent: signups_source_known_7d disagrees with signups_by_source_7d")
+    if "signups_attempted_first_generation_7d" in funnel and funnel.get("signups_7d") is None:
+        problems.append("inconsistent: signups_attempted_first_generation_7d requires signups_7d")
     for small, large in ORDERED:
         a, b = funnel.get(small), funnel.get(large)
         if a is not None and b is not None and a > b:
@@ -101,8 +121,11 @@ def validate(funnel: dict) -> list[str]:
 
 def observations(funnel: dict, observed_at: datetime) -> list[schemas.MetricIn]:
     out = []
-    for field, metric, window, unit in FIELDS:
-        raw = funnel.get(field)
+    reported = [(field, metric, window, unit, funnel.get(field)) for field, metric, window, unit in FIELDS]
+    if source := funnel.get("signups_by_source_7d"):
+        reported.extend((f"signups_by_source_7d.{category}", f"signups_source_{category}", "7d", None, source[category])
+                        for category in SOURCE_CATEGORIES)
+    for field, metric, window, unit, raw in reported:
         if raw is None:
             continue
         out.append(schemas.MetricIn(subject=SUBJECT, metric=metric, window=window, value=raw, unit=unit,
