@@ -506,6 +506,67 @@ class PushLeaseConflict(PrivacyGateError):
     """A readable remote task branch conflicts with the expected publication lease."""
 
 
+class RefreshRefused(ValueError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def refresh_chain(mirror: Path, number: int, published: str, final_head: str, merge_commit: str, *,
+                  repository: str = "seerxo/acthelm", remote: str | None = None,
+                  pr_commits: list[str] | None = None) -> dict:
+    """Prove every moved PR commit is a clean merge of target-branch history."""
+    if (type(number) is not int or number <= 0 or
+            any(not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha)
+                for sha in (published, final_head, merge_commit))):
+        raise RefreshRefused("REQUEST_MISMATCH")
+    remote = remote or f"https://github.com/{repository}.git"
+    protocol = "file" if Path(remote).is_absolute() else "https"
+    _git_bytes(mirror, "fetch", "--no-tags", remote,
+               f"+refs/pull/{number}/head:refs/e1/pr/{number}",
+               "+refs/heads/main:refs/e1/main", protocol=protocol)
+    git = lambda *args: _git_bytes(mirror, *args).decode().strip()
+    if git("rev-parse", f"refs/e1/pr/{number}") != final_head:
+        raise RefreshRefused("REQUEST_MISMATCH")
+    if pr_commits is None:
+        out = subprocess.run(["gh", "api", "--method", "GET",
+                              f"repos/{repository}/pulls/{number}/commits?per_page=100", "--jq", ".[].sha"],
+                             capture_output=True, text=True, timeout=20)
+        if out.returncode:
+            raise RuntimeError("PR commit list unavailable")
+        pr_commits = out.stdout.splitlines()
+    main = git("rev-list", "--first-parent", "refs/e1/main").splitlines()
+    if merge_commit not in main:
+        raise RefreshRefused("MERGE_FACTS")
+    merge_parents = git("rev-list", "--parents", "-n", "1", merge_commit).split()
+    if len(merge_parents) != 2:
+        raise RefreshRefused("MERGE_FACTS")
+    landed_base = merge_parents[1]
+    commits = git("rev-list", "--first-parent", "--reverse", f"{published}..{final_head}").splitlines()
+    if not commits or pr_commits != [published, *commits]:
+        raise RefreshRefused("EXTRA_COMMIT")
+    branch_only = set(git("rev-list", final_head, f"^{published}", f"^{landed_base}").splitlines())
+    if branch_only != set(commits):
+        raise RefreshRefused("EXTRA_COMMIT")
+    updates = []
+    previous = published
+    for sha in commits:
+        parents = git("rev-list", "--parents", "-n", "1", sha).split()
+        if len(parents) != 3 or parents[1] != previous or parents[2] not in main:
+            raise RefreshRefused("EXTRA_COMMIT")
+        expected = subprocess.run(["git", "--no-pager", "-C", str(mirror), "merge-tree", "--write-tree",
+                                   parents[1], parents[2]], env=coder_diff._env(), capture_output=True, timeout=30)
+        tree = git("rev-parse", f"{sha}^{{tree}}")
+        if expected.returncode or expected.stdout.decode().strip() != tree:
+            raise RefreshRefused("CONFLICT_RESOLVED")
+        updates.append({"sha": sha, "p1": parents[1], "p2": parents[2], "tree": tree})
+        previous = sha
+    if updates[-1]["p2"] != landed_base or git("rev-parse", f"{merge_commit}^{{tree}}") != git("rev-parse", f"{final_head}^{{tree}}"):
+        raise RefreshRefused("NOT_UP_TO_DATE")
+    return {"published_head": published, "refreshed_heads": commits, "update_merges": updates,
+            "fingerprint_base": landed_base}
+
+
 def _git_bytes(repo: Path, *args: str, protocol: str = "") -> bytes:
     """Raw stdout, undecoded: the gate classifies undecodable bytes itself instead of crashing in a decode."""
     env = coder_diff._env() | {"GIT_ALLOW_PROTOCOL": protocol, "GIT_TERMINAL_PROMPT": "0"}

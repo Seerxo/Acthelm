@@ -37,7 +37,8 @@ def _last(history: list, stage: str) -> dict:
 
 
 def binding_reasons(*, context: dict, repository: str, task_key: str, target_branch: str,
-                    facts: dict, blocked: bool = False, head_repository: str | None = None) -> list[str]:
+                    facts: dict, blocked: bool = False, head_repository: str | None = None,
+                    refreshed_head: str | None = None, verified_chain: dict | None = None) -> list[str]:
     """Review/publication identity checks, including while a CI re-run is still pending."""
     reasons: list[str] = []
     imp = (context or {}).get("improvement") or {}
@@ -90,7 +91,12 @@ def binding_reasons(*, context: dict, repository: str, task_key: str, target_bra
         reasons.append(f"PR state is {facts.get('state')!r}, not open")
     if facts.get("draft"):
         reasons.append("PR is a draft")
-    if published.get("commit") and facts.get("head_sha") != published.get("commit"):
+    if refreshed_head is not None and (not verified_chain
+            or verified_chain.get("published_head") != published.get("commit")
+            or not verified_chain.get("refreshed_heads")
+            or verified_chain["refreshed_heads"][-1] != refreshed_head):
+        reasons.append("refreshed head has no verified movement chain")
+    if published.get("commit") and facts.get("head_sha") != (refreshed_head or published.get("commit")):
         reasons.append("PR head is not the published commit; the reviewed bytes may not be the ones tested")
     return reasons
 

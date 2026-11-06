@@ -572,6 +572,8 @@ def test_gh_facts_reads_only_the_configured_workflow_and_trusted_statuses_on_the
             {"path": ".github/workflows/other.yml", "name": "x", "head_sha": SHA, "status": "completed", "conclusion": "failure", "run_number": 9, "run_attempt": 1, "head_repo": "o/r"}]}))
     out = stage_c_ci.gh_facts("o/r", 81, {".github/workflows/ci.yml"}, publisher=PUBLISHER,
                               status_contexts=REQUIRED, run=run)
+    receipts = out.pop("ci_receipts")
+    assert [r["name"] for r in receipts] == ["test", *REQUIRED]
     assert out == {"state": "open", "merged": False, "head_sha": SHA,
                    "head_ref": "task/TASK-0070", "head_repo": "o/r", "checks_complete": True,
                    "draft": False, "base_ref": "main", "merged_by": None, "merge_commit": None,

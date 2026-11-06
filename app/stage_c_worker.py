@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -868,7 +869,10 @@ def reconcile(db):
         models.Task.error.startswith(stage_c_ci.MERGE_NOT_RECORDED))))
     blocked_publications = list(db.scalars(select(models.Task.id).where(
         models.Task.status == enums.TaskStatus.BLOCKED, models.Task.error == "PR_FAILED")))
-    ids = list(dict.fromkeys([*review_ids, *blocked_merge_ids, *blocked_publications]))
+    requested_ids = list(db.scalars(select(models.AuditLog.task_id).where(
+        models.AuditLog.action == "stage-c.refresh_reconcile.requested",
+        models.AuditLog.task_id.is_not(None))))
+    ids = list(dict.fromkeys([*review_ids, *blocked_merge_ids, *blocked_publications, *requested_ids]))
     # A CI repair leaves a published task READY at IMPLEMENTING: it must not reach the coder
     # before GitHub says its PR is still open. A repair that stopped BLOCKED (interrupted, runtime or
     # push failure) keeps its PR tracked the same way until its merge or close is recorded.
@@ -891,6 +895,61 @@ def reconcile(db):
         ctx = task.context if isinstance(task.context, dict) else {}
         imp = ctx.get("improvement") if isinstance(ctx.get("improvement"), dict) else {}
         stage = imp.get("stage")
+        request = db.scalar(select(models.AuditLog).where(
+            models.AuditLog.task_id == task.id,
+            models.AuditLog.action == "stage-c.refresh_reconcile.requested")
+            .order_by(models.AuditLog.id.desc()).limit(1)) if task.status == enums.TaskStatus.BLOCKED else None
+        if request:
+            consumed = db.scalar(select(models.AuditLog.id).where(
+                models.AuditLog.task_id == task.id, models.AuditLog.id > request.id,
+                models.AuditLog.action.in_(("improvement.refresh_reconciled",
+                                            "improvement.refresh_reconcile_refused")))
+                .order_by(models.AuditLog.id.desc()).limit(1))
+            if consumed:
+                request = None
+        if request:
+            try:
+                mode = os.environ.get("STAGE_C_REFRESH_RECONCILE", "dry-run")
+                if mode == "off":
+                    outcomes.append({"task": task.key, "outcome": "SKIPPED", "reason": "refresh_disabled"})
+                    db.commit()
+                    continue
+                requested_at = request.occurred_at.replace(tzinfo=timezone.utc) if request.occurred_at.tzinfo is None else request.occurred_at
+                if requested_at < datetime.now(timezone.utc) - timedelta(hours=24):
+                    raise stage_c_runner.RefreshRefused("REQUEST_MISMATCH")
+                number = published_pr_number(task)
+                if number is None:
+                    raise stage_c_runner.RefreshRefused("REQUEST_MISMATCH")
+                publisher, contexts = repo_guardian_github.merge_statuses(policy)
+                facts = stage_c_ci.gh_facts(REPOSITORY, number, set(policy["workflows"]),
+                                            publisher=publisher, status_contexts=contexts)
+                body = request.after if isinstance(request.after, dict) else {}
+                if body.get("pr_number") != number:
+                    raise stage_c_runner.RefreshRefused("REQUEST_MISMATCH")
+                with tempfile.TemporaryDirectory(prefix="stage-c-refresh-") as tmp:
+                    scratch = Path(tmp) / "mirror.git"
+                    stage_c_runner._git(mirror_path(), "clone", "--bare", "--shared",
+                                        str(mirror_path()), str(scratch), protocol="file")
+                    chain = stage_c_runner.refresh_chain(scratch, number,
+                        stage_c_ci._evidence(task, "PR_OPEN").get("commit"),
+                        body.get("final_head"), body.get("merge_commit"), repository=REPOSITORY)
+                    out = stage_c_ci.reconcile_refreshed(
+                        db, task, request, facts, chain, scratch, repository=REPOSITORY,
+                        head_repository=repo_guardian_github.publish_repository(policy, REPOSITORY),
+                        required_statuses=contexts, apply=mode == "apply")
+                db.commit()
+                outcomes.append({"task": task.key, **out})
+            except stage_c_runner.RefreshRefused as exc:
+                if os.environ.get("STAGE_C_REFRESH_RECONCILE", "dry-run") == "apply":
+                    audit.record(db, actor="stage-c-ci", action="improvement.refresh_reconcile_refused",
+                                 entity_type="task", entity_key=task.key, task_id=task.id,
+                                 after={"request_audit_id": request.id, "reasons": [exc.code]})
+                db.commit()
+                outcomes.append({"task": task.key, "outcome": "BLOCKED", "reasons": [exc.code]})
+            except Exception:
+                db.rollback()
+                outcomes.append({"task": task.key, "outcome": "BLOCKED", "reasons": ["EVIDENCE_UNAVAILABLE"]})
+            continue
         if (task.status == enums.TaskStatus.BLOCKED
                 and stage_c_ci.merge_recovery_block(db, task) is None):
             db.commit()
