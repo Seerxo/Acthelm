@@ -42,6 +42,8 @@ DESK = [  # the only Desk policy; tests/test_api_auth.py pins it
     ("GET", r"/desk/metrics/series"),
     # Read-only change notices (app/desk_stream.py): the Desk updates when committed state changes, without polling.
     ("GET", r"/desk/stream"),
+    # Read-only Stage C read model (app/stage_c_state.py); the handler also requires the verified founder.
+    ("GET", r"/stage-c/state"),
     ("POST", r"/tasks/[A-Za-z0-9_-]+/assign"), ("POST", r"/dispatch/run"),
     ("POST", r"/control/agents"), ("POST", r"/approvals/[A-Za-z0-9_-]+"),
 ]
