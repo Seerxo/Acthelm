@@ -30,7 +30,7 @@ public source → CI runner → artifact → release gateway → production host
 
 | Threat | Control | Evidence |
 |---|---|---|
-| A change merges without passing tests | Required checks `python-tests` and `frontend` on the exact head commit; `scripts/merge-pr` refuses pending, failed or other-commit evidence | Tested: `tests/test_ci_status_gate.py`, `tests/test_merge_pr.py`. Branch protection is an **assumption** until configured |
+| A change merges without passing tests | Required checks `python-tests`, `frontend-tests` and `trufflehog` on the exact head commit, enforced by branch protection on `main`; `scripts/merge-pr` refuses pending, failed or other-commit evidence | Tested: `tests/test_ci_status_gate.py`, `tests/test_merge_pr.py`. Branch protection is a repository setting, not tested here |
 | An agent merges its own work | The coding agent's account is read-only on the repository and publishes only to a fork | Verified at runtime by the Stage C preflight (`app/stage_c_preflight.py`, `app/stage_c_credential_boundary.py`) |
 | An unexpected push to `main` | `app/main_guard.py` detects commits that did not come through a recorded merge | Detection only; prevention depends on branch protection |
 
@@ -69,9 +69,10 @@ public source → CI runner → artifact → release gateway → production host
 
 ## Known residual risks
 
-- **GitHub settings are not code.** Branch protection, required reviews, secret scanning push
-  protection and Actions approval policies must be configured on the repository; this document cannot
-  enforce them.
+- **GitHub settings are not code.** Branch protection on `main` requires `python-tests`,
+  `frontend-tests` and `trufflehog` and an up-to-date branch, but it is not versioned here and no test
+  detects a change to it. Required reviews, secret scanning push protection and Actions approval
+  policies are not verified from this repository.
 - **Single owner.** The founder login is the final merge and release authority; a compromise of that
   account or its signing key bypasses the human gate.
 - **Third-party apps.** Any GitHub App with write access to the repository can push to it. Keep app

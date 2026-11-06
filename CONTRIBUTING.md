@@ -34,12 +34,64 @@ The repository is trunk-based ([docs/GIT_WORKFLOW.md](docs/GIT_WORKFLOW.md)):
 ## Pull request expectations
 
 - Describe what changed, why, which tests you ran, and anything left open.
-- Required checks must pass on the exact head commit: `python-tests` and `frontend`.
 - Keep pull requests focused; prefer under about 400 changed lines.
 - Do not commit secrets, real credentials, production addresses, personal data or database dumps.
-  Use `.env.example` style placeholders.
+  Use `.env.example` style placeholders and the synthetic fixture pattern in
+  [SECURITY.md](SECURITY.md#synthetic-test-fixtures).
+
+## Required checks
+
+These workflows must pass on the **exact head commit** of the pull request. They are the list in
+[`agents/repository_guardian.yaml`](agents/repository_guardian.yaml):
+
+| Workflow | Check (job) name | What it runs |
+|---|---|---|
+| `.github/workflows/python-tests.yml` | `python-tests` | Compile, single Alembic head, the pytest suite and golden evaluations, and the PostgreSQL, concurrency, Stage C and crash-recovery tests |
+| `.github/workflows/frontend.yml` | `frontend-tests` | Desk build, committed-bundle check, unit tests, lint |
+| `.github/workflows/secret-scan.yml` | `trufflehog` | TruffleHog secret scan of the pull request's commits |
+
+Also run on pull requests, but not required: `dependency-scan` (OSV, when dependency files change) and
+`workflow-lint` (zizmor and actionlint, when workflows change). `prowler` runs on a schedule or by hand,
+and `ci` is a manually started readiness check for a `main` commit.
+
+GitHub branch protection on `main` requires these three checks (`python-tests`, `frontend-tests`,
+`trufflehog`) and a branch that is up to date with `main`. On top of that, the merge tooling
+(`scripts/merge-pr`) and the Stage C merge gate run their own exact-head check: they refuse a missing,
+pending, failed, cancelled, skipped or other-commit run. These exact-head checks apply only when
+`merge-pr` is used; a direct GitHub merge is limited by branch protection alone, and Stage C
+reconciliation records or blocks it afterwards.
+
+## Safe pull requests
+
+The safe-PR and review sections apply to maintainers and agents now, and to outside contributors once
+contributions open.
+
+- One problem per pull request, from a short-lived branch, with tests that fail without the change.
+- Never weaken a test, a scanner rule or a security check to make a change pass.
+- Changes to `.github/workflows/` must keep the trust-boundary tests passing
+  (`tests/test_trust_boundary.py`): GitHub-hosted runners only, read-only tokens, no secrets, no
+  privileged triggers, actions pinned to full commit SHAs.
 - Changes to `.github/workflows/`, the release gateway, the host verifier, the review signer, the
   agent policies in `agents/` or `tests/test_trust_boundary.py` receive an extra security review.
+
+## Review, merge and deploy
+
+- **Independent review.** Project policy is that every pull request is reviewed by someone other than
+  its author. Independence is enforced in code only for Stage C: the reviewer must differ from the coder
+  and the approval is bound to the exact diff by a fingerprint (`app/stage_c_runner.py`). Required
+  reviews are not verified as a repository setting. A model's answer alone is not an approval.
+- **Agents cannot approve their own work.** An author reviewing its own change brings the same blind
+  spots that produced a mistake to the check that should catch it. Agents also cannot merge, and the
+  coding agent's account has only read access to this repository.
+- **Exact-head CI.** A green run on an earlier commit does not count. Any new push, rebase or branch
+  update invalidates earlier CI evidence; the required checks run again on the new head. For
+  agent-written changes, a new diff also needs a new review, because the approval is bound to the
+  reviewed diff.
+- **Merge and deploy are separate permissions.** Merging is not releasing: a release needs a signed
+  manifest; low-risk paths (currently docs only) are gateway-signed after merge, everything else needs
+  the founder's signature. Production releases go through the signed release gateway
+  ([docs/security/RELEASE_GATEWAY.md](docs/security/RELEASE_GATEWAY.md)), which is a separate authority
+  from merging.
 
 ## Coding style
 
