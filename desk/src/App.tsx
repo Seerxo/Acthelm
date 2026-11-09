@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils"
 import { ago } from "@/lib/format"
 import { healthSummary, systemChecks } from "@/lib/operating"
 import { useTheme, type Theme } from "@/lib/theme"
-import { PAGE_LABEL, SECTIONS, pageTitle, sectionOf, visibleTabs, type SectionKey } from "@/lib/nav"
+import { LEGACY_SHORTCUTS, PAGE_LABEL, SECTIONS, pageTitle, sectionOf, visibleTabs, type SectionKey } from "@/lib/nav"
 import { useStageCPresent } from "@/hooks/use-stage-c"
 import { commandLifecycle } from "@/lib/lifecycle"
 import { ErrorBoundary } from "@/components/error-boundary"
@@ -498,7 +498,9 @@ function useShortcuts({ palette, create, help }: { palette: () => void; create: 
       if (Date.now() - leader.current < 1200) {
         leader.current = 0
         const s = SECTIONS.find(x => x.shortcut === k)
+        const legacy = s ? undefined : LEGACY_SHORTCUTS[k]
         if (s) { e.preventDefault(); go(s.home) }
+        else if (legacy) { e.preventDefault(); go(legacy) }
         return
       }
       if (k === "g") { leader.current = Date.now(); return }

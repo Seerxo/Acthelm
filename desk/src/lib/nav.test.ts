@@ -1,7 +1,7 @@
 // The founder's IA (2026-11-09): eight places (Releases added 2026-11-09); no destination is lost and old links still resolve. `npm test`.
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { ALIASES, PAGES, SECTIONS, pageTitle, reachable, resolvePage, sectionOf, visibleTabs } from "./nav.ts"
+import { ALIASES, LEGACY_SHORTCUTS, PAGES, SECTIONS, pageTitle, reachable, resolvePage, sectionOf, visibleTabs } from "./nav.ts"
 
 test("the IA places in the founder's order, each page reachable from exactly one", () => {
   assert.deepEqual(SECTIONS.map(s => s.label), ["Dashboard", "Goals", "Tasks", "Agents", "Approvals", "Releases", "Metrics", "System"])
@@ -45,4 +45,10 @@ test("Stage C is listed only where the environment is proven; its route still re
   assert.deepEqual(visibleTabs(tasks, false), ["tasks", "activity"])
   assert.deepEqual(visibleTabs(tasks, true), ["tasks", "stage-c", "activity"])
   assert.equal(resolvePage("stage-c"), "stage-c")
+})
+
+test("legacy go-to keys G H and G W still land on Dashboard and Tasks, and never shadow a section key", () => {
+  assert.equal(LEGACY_SHORTCUTS.h, "overview")
+  assert.equal(LEGACY_SHORTCUTS.w, "tasks")
+  for (const k of Object.keys(LEGACY_SHORTCUTS)) assert.ok(!SECTIONS.some(s => s.shortcut === k), k)
 })

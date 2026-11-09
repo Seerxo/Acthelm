@@ -22,6 +22,9 @@ export type SectionKey = "dashboard" | "goals" | "tasks" | "agents" | "approvals
 /** `shortcut`: the second key of the "g <key>" go-to shortcut. `tabs` always starts with `home`. */
 export interface NavSection { key: SectionKey; label: string; home: Page; tabs: Page[]; shortcut: string }
 
+/** Go-to keys from the earlier Desk (G H = Home, G W = Work), kept so muscle memory still lands: founder 2026-11-09. */
+export const LEGACY_SHORTCUTS: Record<string, Page> = { h: "overview", w: "tasks" }
+
 export const SECTIONS: NavSection[] = [
   { key: "dashboard", label: "Dashboard", home: "overview", tabs: ["overview"], shortcut: "d" },
   { key: "goals", label: "Goals", home: "projects", tabs: ["projects"], shortcut: "g" },
