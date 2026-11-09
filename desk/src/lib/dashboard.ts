@@ -1,6 +1,7 @@
 // Home's whole-company view, derived only from what the Desk already reads: /desk/state (DeskState) and, when the
 // founder's session may read it, /stage-c/state (StageCState). Every figure is the API's own; a source the API did not
 // report is null and reads "unknown", never 0 or "none". Pure functions, so `npm test` runs them without a browser.
+import { stageCEvidence } from "./stage-c-gate.ts"
 import type { Agent, DeskState, Event, Need, TaskRow, Tone } from "./api.ts"
 import { agentState } from "./agent-state.ts"
 import { blockerLabel, lastReadyPr, nextAction, prHref, type StageCState } from "./stage-c.ts"
@@ -34,10 +35,8 @@ export function mergedVerified(improvements: DeskState["improvements"], key: str
  *  watchdog preflight. Production serves the route too, with neither; there Home hides Stage C instead of showing it
  *  broken. Returns the state when proven, else null. */
 export function stageCOnHost(sc: StageCState | null): StageCState | null {
-  if (!sc) return null
-  const { acceptance: a, preflight: p } = sc.runtime
-  const proven = a.accepted_at !== null || a.source_sha !== null || p.checked_at !== null || ["PASS", "FAIL", "STALE"].includes(p.status)
-  return proven ? sc : null
+  // The one gate rule (lib/stage-c-gate.ts): a recorded-but-failing preflight exists on production too.
+  return sc && stageCEvidence(sc) ? sc : null
 }
 
 export function needsYou(d: Pick<DeskState, "needs_you" | "tasks" | "improvements">, sc: StageCState | null): NeedsView {

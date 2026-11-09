@@ -10,7 +10,8 @@ const task = (key: string, status: string, updated_at = "2026-11-09T10:00:00Z") 
   agent: null, project: null, business_unit: null, approval_required: false, created_at: updated_at, updated_at })
 const need = (over: Partial<Need>): Need => ({ kind: "OTHER", rank: 8, level: "warning", title: "n", why: "w", affected: "", since: null,
   evidence: "", action: "", target: { page: "approvals" }, ...over })
-const sc = (over: Record<string, unknown> = {}) => parseStageC({ version: 1, state: "BLOCKED", blockers: [], runtime: {}, metrics: {}, tasks: [], ...over })
+const sc = (over: Record<string, unknown> = {}) => parseStageC({ version: 1, state: "BLOCKED", blockers: [], runtime: {}, metrics: {}, tasks: [],
+  authorizations: { one_task: null, standing: null }, ...over })
 const state = (over: Partial<DeskState> = {}) => ({
   control: { agents_paused: false }, worker: { status: "HEALTHY", heartbeat_at: "2026-11-09T11:59:00Z" }, needs_you: [],
   tasks: [], agents: [], ...over,
@@ -69,11 +70,13 @@ test("agents: running without a heard worker is unknown, blocked sorts first", (
   assert.equal(silent.counts.running, 0)
 })
 
-test("Stage C shows only where the host proves it: acceptance or a preflight", () => {
+test("Stage C shows only on the host's current capability, never on history or a failing preflight", () => {
   assert.equal(stageCOnHost(null), null)
   assert.equal(stageCOnHost(sc()), null)   // production: the route answers, with no host evidence
-  assert.ok(stageCOnHost(sc({ runtime: { preflight: { status: "FAIL", checked_at: "2026-11-09T11:00:00Z" } } })))
-  assert.ok(stageCOnHost(sc({ runtime: { acceptance: { accepted_at: "2026-11-09T11:00:00Z" } } })))
+  assert.equal(stageCOnHost(sc({ runtime: { preflight: { status: "FAIL", checked_at: "2026-11-09T11:00:00Z" } } })), null)
+  assert.equal(stageCOnHost(sc({ runtime: { acceptance: { accepted_at: "2026-10-23T11:00:00Z", source_sha: "a".repeat(40) } } })), null)
+  assert.ok(stageCOnHost(sc({ runtime: { preflight: { status: "PASS", checked_at: "2026-11-09T11:00:00Z" } } })))
+  assert.ok(stageCOnHost(sc({ runtime: { api_sha: "b".repeat(40), acceptance: { accepted_at: "2026-11-09T11:00:00Z", source_sha: "b".repeat(40) } } })))
 })
 
 test("now, finished and next come from task status, in a fixed order", () => {

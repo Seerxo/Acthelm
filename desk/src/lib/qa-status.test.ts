@@ -17,21 +17,26 @@ test("any other status or stage keeps its own status; missing reads unknown", ()
 })
 
 import { stageCOnHost } from "./qa-status.ts"
-const host = (over: { accepted_at?: string | null; checked_at?: string | null; tasks?: unknown[] | null; one_task?: unknown; standing?: unknown } = {}) => ({
-  runtime: { acceptance: { accepted_at: over.accepted_at ?? null, source_sha: null }, preflight: { checked_at: over.checked_at ?? null } },
+const host = (over: { source_sha?: string | null; api_sha?: string | null; status?: string; tasks?: unknown[] | null; one_task?: unknown; standing?: unknown } = {}) => ({
+  runtime: { api_sha: over.api_sha ?? null, acceptance: { accepted_at: null, source_sha: over.source_sha ?? null },
+    preflight: { status: over.status ?? "NOT_VERIFIED", checked_at: null } },
   authorizations: { one_task: "one_task" in over ? over.one_task : null, standing: "standing" in over ? over.standing : null },
   tasks: "tasks" in over ? over.tasks! : [],
-})
+}) as Parameters<typeof stageCOnHost>[0]
 
 test("a host with no Stage C evidence (production) is not a Stage C host", () => {
   assert.equal(stageCOnHost(host()), false)
   assert.equal(stageCOnHost(host({ tasks: null })), false)
 })
 
-test("any positive Stage C evidence, or an unreadable grant, makes it a Stage C host", () => {
-  assert.equal(stageCOnHost(host({ accepted_at: "2026-11-09T00:00:00Z" })), true)
-  assert.equal(stageCOnHost(host({ checked_at: "2026-11-09T00:00:00Z" })), true)
-  assert.equal(stageCOnHost(host({ tasks: [{}] })), true)
+test("only current capability makes a Stage C host; history does not (founder rule 2026-11-09)", () => {
+  const SHA = "c".repeat(40)
+  assert.equal(stageCOnHost(host({ status: "PASS" })), true)
+  assert.equal(stageCOnHost(host({ source_sha: SHA, api_sha: SHA })), true)
   assert.equal(stageCOnHost(host({ standing: { status: "ACTIVE" } })), true)
-  assert.equal(stageCOnHost(host({ standing: undefined })), true)
+  assert.equal(stageCOnHost(host({ standing: undefined })), true)           // unreadable grant keeps Revoke reachable
+  assert.equal(stageCOnHost(host({ source_sha: SHA, api_sha: "d".repeat(40) })), false)   // accepted for older code
+  assert.equal(stageCOnHost(host({ tasks: [{}] })), false)                 // past tasks
+  assert.equal(stageCOnHost(host({ status: "FAIL" })), false)              // recorded on every host
+  assert.equal(stageCOnHost(host({ one_task: { status: "CONSUMED" } })), false)
 })

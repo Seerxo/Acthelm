@@ -128,7 +128,7 @@ export function AgentsPage() {
   const n = (s: string) => d.agents.filter(a => (s === "RUNNING" ? agentState(a, d, now).running : a.status === s)).length
   const name = (key: string | null) => key ? short(d.agents.find(a => a.key === key)?.name ?? key) : "—"
   const mine = (a: Agent) => d.tasks.filter(t => t.agent === a.key)
-  const merged = new Set((d.improvements ?? []).filter(i => mergedAwaitingAcceptance("REVIEW", i.stage)).map(i => i.task))
+  const merged = new Set((d.improvements ?? []).filter(i => mergedAwaitingAcceptance("REVIEW", i.stage) && (i as { pr_verified?: unknown }).pr_verified === true).map(i => i.task))
   // An agent with no open task, no held task, no recorded failure and a calm state folds under one line; anything else
   // stays in view. Only a named calm state folds; anything else (unknown, stalled, waiting, unconfirmed) stays visible.
   const calm = (a: Agent) => foldable(a, d, now, workload(mine(a)).open)

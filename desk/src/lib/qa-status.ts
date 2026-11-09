@@ -16,11 +16,6 @@ export function taskStatusView(status: string | null | undefined, stage: string 
 /** Does this host run Stage C? Only positive evidence from GET /stage-c/state counts: a host acceptance, a preflight,
  *  a Stage C task, or a grant record. Production has none of these, so its Stage C controls hide instead of breaking.
  *  An unreadable grant (undefined) counts as present: its existence is unknown, so the revoke must stay reachable. */
-export function stageCOnHost(s: {
-  runtime: { acceptance: { accepted_at: string | null; source_sha: string | null }; preflight: { checked_at: string | null } }
-  authorizations: { one_task: unknown; standing: unknown }; tasks: unknown[] | null
-}): boolean {
-  const a = s.authorizations
-  return !!s.runtime.acceptance.accepted_at || !!s.runtime.acceptance.source_sha || !!s.runtime.preflight.checked_at
-    || (s.tasks?.length ?? 0) > 0 || a.one_task !== null || a.standing !== null
-}
+// One rule for every page (lib/stage-c-gate.ts): a merely recorded preflight is not evidence, because the watchdog
+// records one on production too; only a PASS counts.
+export { stageCEvidence as stageCOnHost } from "./stage-c-gate.ts"

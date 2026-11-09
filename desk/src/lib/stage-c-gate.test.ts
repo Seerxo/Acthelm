@@ -19,12 +19,19 @@ test("absent: no answer, or production's recorded-but-failing preflight, hides S
   assert.equal(stageCPresent(prod, { runtime: { stage_c_enabled: false } } as DeskState), false)
 })
 
-test("present: acceptance, passing preflight, a task, a grant or the code-write flag shows Stage C", () => {
-  assert.equal(stageCPresent(withRt({ acceptance: { source_sha: SHA, accepted_at: "2026-11-09T09:00:00Z", valid: false } })), true)
+test("history alone hides Stage C: an old acceptance, finished tasks, settled grants (founder rule 2026-11-09)", () => {
+  const old = withRt({ api_sha: "b".repeat(40), acceptance: { source_sha: SHA, accepted_at: "2026-10-23T09:00:00Z", valid: false } })
+  assert.equal(stageCPresent(old), false)                                              // accepted for another commit
+  assert.equal(stageCPresent({ ...prod, tasks: [{ key: "TASK-0077" }] }), false)       // past pilot task
+  for (const status of ["CONSUMED", "EXPIRED", "REVOKED"])
+    assert.equal(stageCPresent({ ...prod, authorizations: { one_task: { status }, standing: null } }), false)
+})
+
+test("current capability shows Stage C: running-code acceptance, passing preflight, live grant, or the flag", () => {
+  assert.equal(stageCPresent(withRt({ api_sha: SHA, acceptance: { source_sha: SHA, accepted_at: "2026-11-09T09:00:00Z", valid: true } })), true)
   assert.equal(stageCPresent(withRt({ preflight: { status: "PASS" } })), true)
-  assert.equal(stageCPresent({ ...prod, tasks: [{ key: "TASK-1" }] }), true)
   assert.equal(stageCPresent({ ...prod, authorizations: { one_task: { status: "ACTIVE" }, standing: null } }), true)
-  assert.equal(stageCPresent({ ...prod, authorizations: { one_task: null, standing: "garbled" } }), true)  // unreadable grant
+  assert.equal(stageCPresent({ ...prod, authorizations: { one_task: null, standing: "garbled" } }), true)  // unreadable: keep Revoke
   assert.equal(stageCPresent(undefined, { runtime: { stage_c_enabled: true } } as DeskState), true)
 })
 
