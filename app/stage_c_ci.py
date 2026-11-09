@@ -28,7 +28,7 @@ from urllib.parse import quote
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import audit, enums, merge_authorization, models, stage_c
+from app import approval_identity, audit, coder_diff, enums, merge_authorization, models, stage_c, stage_c_merge_gate
 from app.commit_statuses import (STATUS_FAILED, STATUS_PAGE, STATUS_QUERY, latest_statuses,
                                  status_checks)
 
@@ -107,7 +107,9 @@ def merge_recovery_block(db: Session, task: models.Task):
         return None
     latest = db.scalar(select(models.AuditLog).where(
         models.AuditLog.entity_type == "task", models.AuditLog.entity_key == task.key,
-        models.AuditLog.task_id == task.id).order_by(models.AuditLog.id.desc()).limit(1))
+        models.AuditLog.task_id == task.id,
+        models.AuditLog.action.notin_(("stage-c.refresh_reconcile.requested",
+                                       "stage-c.refresh_reconcile.dry_run"))).order_by(models.AuditLog.id.desc()).limit(1))
     if (not latest or latest.actor != ACTOR or latest.action != "improvement.blocked"
             or not isinstance(latest.after, dict)):
         return None
@@ -260,6 +262,106 @@ def _record_merge(db: Session, task: models.Task, stage: str, facts: dict, base:
                             "blocked_audit_id": recovered_block.id,
                             "pr_number": base.get("pr_number"), "head_sha": base.get("commit"),
                             "merge_commit": facts["merge_commit"]})
+    return {"outcome": "MERGED"}
+
+
+def reconcile_refreshed(db: Session, task: models.Task, request: models.AuditLog, facts: dict,
+                        chain: dict, mirror, *, repository: str, head_repository: str,
+                        required_statuses: tuple[str, ...], apply: bool = False) -> dict:
+    """Judge one founder request. The caller holds the task lock and commits the whole result."""
+    body = request.after if isinstance(request.after, dict) else {}
+    published = _evidence(task, "PR_OPEN")
+    approval = ((task.context or {}).get("improvement") or {}).get("approval") or {}
+    stage = ((task.context or {}).get("improvement") or {}).get("stage")
+    block = db.scalar(select(models.AuditLog).where(
+        models.AuditLog.task_id == task.id, models.AuditLog.action == "improvement.blocked")
+        .order_by(models.AuditLog.id.desc()).limit(1))
+    reasons = []
+    if (task.status != enums.TaskStatus.BLOCKED or stage != "READY_TO_MERGE"
+            or not (task.error or "").startswith(("PR head moved after READY_TO_MERGE", MERGE_NOT_RECORDED))
+            or not block or request.id <= block.id or request.action != "stage-c.refresh_reconcile.requested"
+            or request.entity_type != "task" or request.entity_key != task.key or request.task_id != task.id
+            or not approval_identity.is_founder_id(request.actor)
+            or (request.occurred_at.replace(tzinfo=timezone.utc) if request.occurred_at.tzinfo is None
+                else request.occurred_at) < datetime.now(timezone.utc) - timedelta(hours=24)
+            or body.get("task_key") != task.key or body.get("pr_number") != pr_number(published.get("pr"))
+            or body.get("final_head") != facts.get("head_sha")
+            or body.get("merge_commit") != facts.get("merge_commit")
+            or not facts.get("merged") or published.get("pr") != f"https://github.com/{repository}/pull/{body.get('pr_number')}"):
+        reasons.append("REQUEST_MISMATCH")
+    if facts.get("merged_by") != stage_c_merge_gate.FOUNDER:
+        reasons.append("NOT_FOUNDER_MERGE")
+    if _merge_problems("READY_TO_MERGE", facts, {"commit": body.get("final_head")},
+                       stage_c_merge_gate.FOUNDER, "main") and "NOT_FOUNDER_MERGE" not in reasons:
+        reasons.append("MERGE_FACTS")
+    if chain.get("published_head") != published.get("commit") or not chain.get("refreshed_heads") or chain["refreshed_heads"][-1] != body.get("final_head"):
+        reasons.append("REQUEST_MISMATCH")
+    fingerprint = None
+    if not reasons:
+        try:
+            fingerprint = stage_c.diff_fingerprint(coder_diff.render_range(
+                mirror, chain["fingerprint_base"], body["final_head"]))
+        except coder_diff.RejectedChange:
+            reasons.append("FINGERPRINT_MISMATCH")
+        except (ValueError, OSError, subprocess.SubprocessError):
+            reasons.append("EVIDENCE_UNAVAILABLE")
+        if fingerprint is not None and fingerprint != approval.get("fingerprint"):
+            reasons.append("FINGERPRINT_MISMATCH")
+    receipts = facts.get("ci_receipts", facts.get("checks")) or []
+    if not (facts.get("checks_complete") and receipts
+            and all(c.get("status") == "completed" and c.get("conclusion") == "success"
+                    and type(c.get("run_id")) is int and c["run_id"] > 0
+                    and (c.get("attempt") is None or type(c.get("attempt")) is int and c["attempt"] > 0)
+                    and _timestamp(c.get("completed_at")) for c in receipts)
+            and facts.get("statuses_complete")
+            and not facts.get("status_problems")
+            and all(facts.get("statuses", {}).get(s) == "success" for s in required_statuses)):
+        reasons.append("CI_NOT_GREEN")
+    completed, merged_at = _timestamp(facts.get("ci_completed_at")), _timestamp(facts.get("merged_at"))
+    if not completed or not merged_at or completed > merged_at:
+        if "CI_NOT_GREEN" not in reasons:
+            reasons.append("CI_AFTER_MERGE")
+    premerge = {**facts, "merged": False, "state": "open"}
+    binding = merge_authorization.binding_reasons(
+        context=task.context or {}, repository=repository, task_key=task.key,
+        target_branch="main", facts=premerge, head_repository=head_repository,
+        refreshed_head=body.get("final_head"), verified_chain=chain)
+    if not _approval_recorded(db, task, task.context or {}):
+        binding.append("review approval does not match its task audit record")
+    review = db.get(models.AuditLog, approval.get("audit_id")) if type(approval.get("audit_id")) is int else None
+    if not review or not merged_at or (review.occurred_at.replace(tzinfo=timezone.utc)
+                                        if review.occurred_at.tzinfo is None else review.occurred_at) > merged_at:
+        binding.append("review approval does not predate the merge")
+    reasons += [f"BINDING:{reason}" for reason in binding]
+    reasons = list(dict.fromkeys(reasons))
+    if reasons:
+        if apply and "EVIDENCE_UNAVAILABLE" not in reasons:
+            audit.record(db, actor=ACTOR, action="improvement.refresh_reconcile_refused", entity_type="task",
+                         entity_key=task.key, task_id=task.id,
+                         after={"request_audit_id": request.id, "reasons": reasons})
+        return {"outcome": "BLOCKED", "reasons": reasons}
+    record = {"request_audit_id": request.id, "pr_number": body["pr_number"],
+              "published_head": published["commit"], "refreshed_heads": chain["refreshed_heads"],
+              "update_merges": chain["update_merges"], "fingerprint": fingerprint,
+              "fingerprint_base": chain["fingerprint_base"],
+              "ci": {"head": body["final_head"], "checks": receipts},
+              "merge_commit": body["merge_commit"], "merged_at": facts["merged_at"],
+              "merged_by": facts["merged_by"], "merge_method": "squash", "context_review": "not_performed"}
+    if not apply:
+        return {"outcome": "DRY_RUN", "record": record}
+    event = audit.record(db, actor=ACTOR, action="improvement.refresh_reconciled", entity_type="task",
+                         entity_key=task.key, task_id=task.id,
+                         before={"status": task.status.value, "error": task.error, "blocked_audit_id": block.id},
+                         after=record)
+    db.flush()
+    stage_c.advance(db, task, "MERGED", f"founder (github:{stage_c_merge_gate.FOUNDER}, via founder_github_refreshed)",
+                    {"pr_number": body["pr_number"], "commit": published["commit"],
+                     "final_head": body["final_head"], "refreshed_heads": chain["refreshed_heads"],
+                     "merged_by": facts["merged_by"], "merge_commit": body["merge_commit"],
+                     "branch": "main", "review_audit_id": approval["audit_id"],
+                     "merge_path": "founder_github_refreshed", "reconciliation_audit_id": event.id,
+                     "merge_authorization_id": None})
+    task.status, task.error = enums.TaskStatus.REVIEW, None
     return {"outcome": "MERGED"}
 
 
@@ -480,7 +582,7 @@ def gh_facts(repository: str, number: int, workflows: set[str], *, publisher: di
     if not re.fullmatch(r"[0-9a-f]{40}", sha or ""):
         raise ValueError("invalid head sha")
     runs = api(f"repos/{repository}/actions/runs?head_sha={quote(sha)}&event=pull_request&per_page=100",
-               "{total_count, workflow_runs: [.workflow_runs[] | {path, name, head_sha, head_branch, event, status, conclusion, run_number, run_attempt, updated_at, run_repo: .repository.full_name, head_repo: .head_repository.full_name}]}") if workflows else {
+               "{total_count, workflow_runs: [.workflow_runs[] | {id, path, name, head_sha, head_branch, event, status, conclusion, run_number, run_attempt, updated_at, run_repo: .repository.full_name, head_repo: .head_repository.full_name}]}") if workflows else {
                    "total_count": 0, "workflow_runs": []}
     latest = {}
     for r in runs["workflow_runs"]:
@@ -498,6 +600,14 @@ def gh_facts(repository: str, number: int, workflows: set[str], *, publisher: di
     statuses = latest_statuses(raw, status_contexts, publisher)
     checks = [{"name": r["name"], "status": r["status"], "conclusion": r["conclusion"]} for r in latest.values()]
     checks += status_checks(statuses["statuses"], status_contexts)
+    ci_receipts = [check | {"run_id": r.get("id"), "attempt": r.get("run_attempt"),
+                            "completed_at": r.get("updated_at")}
+                   for check, r in zip(checks, latest.values())]
+    for check in checks[len(latest):]:
+        status_id = statuses.get("status_ids", {}).get(check["name"])
+        ci_receipts.append(check | {"run_id": status_id, "attempt": None,
+                                    "completed_at": next((s.get("created_at") for s in raw
+                                                          if isinstance(s, dict) and s.get("id") == status_id), None)})
     actions_complete = (type(runs["total_count"]) is int
                         and 0 <= runs["total_count"] == len(runs["workflow_runs"]) < 100
                         and set(latest) == set(workflows))
@@ -513,6 +623,7 @@ def gh_facts(repository: str, number: int, workflows: set[str], *, publisher: di
     return {"state": pr["state"], "merged": bool(pr["merged"]), "head_sha": sha,
             # GitHub returns the canonical casing ("Seerxo/Acthelm"); repository identities here are lowercase.
             "head_ref": pr["head_ref"], "head_repo": (pr["head_repo"] or "").lower() or None, "checks": checks,
+            "ci_receipts": ci_receipts,
             "draft": bool(pr["draft"]), "base_ref": pr["base_ref"], "merged_by": pr["merged_by"],
             "merge_commit": pr["merge_commit"] if pr["merged"] else None,
             "merged_at": pr.get("merged_at") if pr["merged"] else None,

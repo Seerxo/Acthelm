@@ -10,7 +10,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
-from app import enums, models, stage_c, stage_c_ci
+from app import audit, enums, models, stage_c, stage_c_ci
+from tests.test_stage_c_refresh_reconcile import scene  # synthetic local Git history; no network
 
 REQUIRED_CONTEXTS = ("ci/circleci: python-tests", "ci/circleci: frontend-tests")
 GREEN_STATUSES = {context: "success" for context in REQUIRED_CONTEXTS}
@@ -84,3 +85,36 @@ def test_postgres_merge_after_failed_ci_is_blocked_with_history_and_audit(db):
     assert again["outcome"] == "SKIPPED"
     assert len(db.scalars(select(models.AuditLog).where(models.AuditLog.entity_key == "TASK-0080",
                                                         models.AuditLog.action == "improvement.blocked")).all()) == 1
+
+
+def test_postgres_refreshed_merge_is_append_only(db, scene):
+    _, source, _, _, facts, chain, mirror, *_ = scene
+    task = models.Task(key=source.key, title=source.title, success_criteria=source.success_criteria,
+                       priority=source.priority, status=enums.TaskStatus.BLOCKED, error=source.error,
+                       context=source.context)
+    db.add(task)
+    db.flush()
+    approval = dict(task.context["improvement"]["approval"])
+    review = audit.record(db, actor="codex", action="improvement.review_approved", entity_type="task",
+                          entity_key=task.key, task_id=task.id, after=approval)
+    db.flush()
+    approval["audit_id"] = review.id
+    task.context = {**task.context, "improvement": {**task.context["improvement"], "approval": approval}}
+    block = audit.record(db, actor="stage-c-ci", action="improvement.blocked", entity_type="task",
+                         entity_key=task.key, task_id=task.id, after={"head": facts["head_sha"]})
+    db.flush()
+    request = audit.record(db, actor="founder:access:founder@example.invalid",
+                           action="stage-c.refresh_reconcile.requested", entity_type="task",
+                           entity_key=task.key, task_id=task.id,
+                           after={"task_key": task.key, "pr_number": 1, "final_head": facts["head_sha"],
+                                  "merge_commit": facts["merge_commit"]})
+    db.commit()
+    old = list(task.context["improvement"]["history"])
+    assert stage_c_ci.reconcile_refreshed(db, task, request, facts, chain, mirror,
+        repository="seerxo/acthelm", head_repository="seerxo/acthelm",
+        required_statuses=(), apply=True)["outcome"] == "MERGED"
+    db.commit()
+    db.expire_all()
+    assert task.status == enums.TaskStatus.REVIEW and task.context["improvement"]["history"][:-1] == old
+    row = db.scalar(select(models.AuditLog).where(models.AuditLog.action == "improvement.refresh_reconciled"))
+    assert row.before["blocked_audit_id"] == block.id and row.after["request_audit_id"] == request.id
