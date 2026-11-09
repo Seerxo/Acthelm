@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { acceptBody, acceptEvidence, acceptOffer, prLink } from "./accept.ts"
+import { acceptBody, acceptEvidence, acceptOffer, prLink, rowMerged } from "./accept.ts"
 
 const URL = "https://github.com/seerxo/acthelm/pull/77"
 const HEAD = "b11b0aa" + "1".repeat(33), MERGE = "e".repeat(40)
@@ -32,4 +32,12 @@ test("the link is only the backend-verified one", () => {
   assert.equal(prLink(t({ pull_request: pr({ verified: false }) }))!.state, "unverified")
   assert.equal(prLink(t({ pull_request: pr({ url: "javascript:alert(1)" }) }))!.state, "unverified")
   assert.equal(prLink(t({ pull_request: null })), null)
+})
+
+test("a list row reads merged only for a recorded merge on a verified PR in REVIEW", () => {
+  assert.equal(rowMerged("REVIEW", { stage: "MERGED", pr_verified: true }), true)
+  assert.equal(rowMerged("REVIEW", { stage: "VERIFYING", pr_verified: true }), true)
+  for (const [status, i] of [["REVIEW", { stage: "MERGED", pr_verified: false }], ["REVIEW", { stage: "MERGED" }],
+    ["REVIEW", { stage: "READY_TO_MERGE", pr_verified: true }], ["DONE", { stage: "MERGED", pr_verified: true }], ["REVIEW", undefined]] as const)
+    assert.equal(rowMerged(status, i), false, JSON.stringify([status, i]))
 })

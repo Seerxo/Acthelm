@@ -12,6 +12,7 @@ import { parseStageC } from "@/lib/stage-c"
 import { attentionBreakdown, GROUPS, groupOf, nextLine, oldestUpdate, type Group } from "@/lib/task-story"
 import { arrived, closedScope, isOpen, pinned, searchScope, signals } from "@/lib/work-groups"
 import { useReasons } from "@/lib/use-reasons"
+import { rowMerged } from "@/lib/accept"
 import { codeChips, LANES, laneOf, laneSort, type Lane } from "@/lib/task-lanes"
 import { useChange, useChanges, useData, useDesk, useDraft } from "@/state"
 import { homeAfterCreate } from "@/lib/draft"
@@ -225,7 +226,7 @@ function TaskLine({ t, reason, paused }: { t: TaskRow; reason?: string; paused: 
         {t.priority !== "P2" && <Tag tone={priorityTone(t.priority)}>{t.priority}</Tag>}
         {t.risk !== "LOW" && <Tag tone={t.risk === "HIGH" || t.risk === "CRITICAL" ? "warning" : "neutral"} className="max-sm:hidden">{t.risk} risk</Tag>}
       </span>}
-      meta={<><span className="[overflow-wrap:anywhere]"><span className="font-mono text-xs">{t.key}</span> · {nextLine(t, { reason, paused })}</span>
+      meta={<><span className="[overflow-wrap:anywhere]"><span className="font-mono text-xs">{t.key}</span> · {nextLine(t, { reason, paused, merged: rowMerged(t.status, mission) })}</span>
         {/* A code task's PR and CI at a glance; the full evidence is on the task. */}
         {mv && <span className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
           <Status value={mission!.stage} label={mv.label} tone={mv.tone} />

@@ -149,12 +149,14 @@ def test_pr_link_mismatch(env):
         s.commit()
     pr = _desk().get("/tasks/TASK-0101", headers=ASSERT).json()["pull_request"]
     assert pr == {"verified": True, "merged": True, "number": 77, "url": url, "commit": "b" * 40, "merge_commit": "e" * 40}
+    assert _desk().get("/desk/state", headers=ASSERT).json()["improvements"][0]["pr_verified"] is True
     for art in ({"pr": url.replace("77", "78"), "commit": "b" * 40}, {"pr": url, "commit": "c" * 40}):
         with Session(env) as s:
             s.scalar(select(models.Task).where(models.Task.key == "TASK-0101")).artifacts = art
             s.commit()
         pr = _desk().get("/tasks/TASK-0101", headers=ASSERT).json()["pull_request"]
         assert pr["verified"] is False and "url" not in pr and "number" not in pr, art
+        assert _desk().get("/desk/state", headers=ASSERT).json()["improvements"][0]["pr_verified"] is False
     # The fixture's mixed-case URL is not this deployment's upstream (published_pr_number): never a link.
     with Session(env) as s:
         s.scalar(select(models.Task).where(models.Task.key == "TASK-0101")).context = {
@@ -213,6 +215,7 @@ def test_improvement_evidence_drops_containers_but_keeps_scalars(env):
     improvement = _desk().get("/desk/state", headers=ASSERT).json()["improvements"][0]
     assert improvement["risk"] is None and improvement["expected_effect"] is None
     assert improvement["pr_number"] == 7 and improvement["ci_state"] == "failed"
+    assert improvement["pr_verified"] is False   # the fixture's mixed-case URL is not this upstream
 
 
 def test_legacy_learning_lessons_are_redacted_on_both_desk_reads(env):

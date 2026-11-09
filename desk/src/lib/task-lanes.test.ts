@@ -19,6 +19,8 @@ test("stopped work sorts before review inside Needs you", () => {
 test("PR and CI chips come only from recorded facts", () => {
   assert.deepEqual(codeChips(undefined), [])
   assert.deepEqual(codeChips({ pr_number: null, ci_state: null, failed_check: null }), [])
-  assert.deepEqual(codeChips({ pr_number: 77, ci_state: "SUCCESS", failed_check: null }), [{ label: "PR #77", tone: "neutral" }, { label: "CI success", tone: "success" }])
-  assert.equal(codeChips({ pr_number: 7, ci_state: "FAILURE", failed_check: "python" })[1].tone, "danger")
+  assert.deepEqual(codeChips({ pr_number: 77, ci_state: "SUCCESS", failed_check: null, pr_verified: true }), [{ label: "PR #77", tone: "neutral" }, { label: "CI success", tone: "success" }])
+  assert.equal(codeChips({ pr_number: 7, ci_state: "FAILURE", failed_check: "python", pr_verified: true })[1].tone, "danger")
+  for (const pr_verified of [false, undefined])   // unverified or an older API: never a number
+    assert.deepEqual(codeChips({ pr_number: 7, ci_state: null, failed_check: null, pr_verified }), [{ label: "PR unverified", tone: "warning" }])
 })

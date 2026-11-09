@@ -20,6 +20,8 @@ test("every backend task status belongs to exactly one founder group", () => {
 
 test("list lines never promote a state", () => {
   assert.match(nextLine({ status: "REVIEW", agent: "research" }), /Not done until/)
+  assert.match(nextLine({ status: "REVIEW", agent: "research" }, { merged: true }), /^Merged\. Waiting for you to accept/)
+  assert.match(nextLine({ status: "DONE", agent: "research" }, { merged: true }), /Closed as done/)
   assert.match(nextLine({ status: "READY", agent: "ceo" }), /not started/)
   assert.match(nextLine({ status: "READY", agent: null }), /no agent/)
   assert.match(nextLine({ status: "QUEUED", agent: "ceo" }, { paused: true }), /paused/)

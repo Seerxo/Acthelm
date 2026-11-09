@@ -1,6 +1,6 @@
 // The task's PR link and the founder's "Accept as done" (POST /tasks/{key}/status, verified founder only; DONE needs
 // evidence). The link is only the backend's verified publication (app/desk.py _pull_request); the Desk never builds one.
-import type { TaskDetail } from "./api"
+import type { Improvement, TaskDetail } from "./api"
 
 type PR = NonNullable<TaskDetail["pull_request"]>
 const SHA = /^[0-9a-f]{7,40}$/
@@ -38,3 +38,8 @@ export function acceptOffer(t: Pick<TaskDetail, "status" | "pull_request" | "con
 
 /** The exact body sent. No `reason`: the API audits `reason or evidence`, so a reason would hide the evidence. */
 export const acceptBody = (evidence: string) => ({ status: "DONE", actor: "founder", evidence })
+
+/** The list's form of mergedForReview, from a /desk/state improvement row: a recorded merge on a verified PR.
+ *  MEASURED is dropped by the API, so MERGED and VERIFYING are every merged stage the list can see. */
+export const rowMerged = (status: string, i: Pick<Improvement, "stage" | "pr_verified"> | undefined) =>
+  status === "REVIEW" && !!i && i.pr_verified === true && (i.stage === "MERGED" || i.stage === "VERIFYING")

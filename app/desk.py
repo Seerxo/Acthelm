@@ -415,7 +415,10 @@ def improvements(tasks: list) -> list[dict]:
         ev = {}
         for step in imp.get("history", []):
             ev.update(step.get("evidence") or {})
+        pr = _pull_request(t)
         out.append({"task": t.key, "title": _clean(t.title), "stage": _scalar(imp["stage"]),
+                    # The task detail's verified-publication rule, so a list chip never shows an unverified PR number.
+                    "pr_verified": bool(pr and pr["verified"]),
                     "updated_at": imp["history"][-1]["at"] if imp.get("history") else None,
                     **{k: _scalar(ev.get(k))
                        for k in ("repository", "branch", "pr_number", "pr_state",

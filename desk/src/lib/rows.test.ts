@@ -183,7 +183,7 @@ test("the Overview headline comes from lib/operating, never from the API's optim
 test("work rows say what happens next and, for stopped work, the recorded reason", () => {
   const tasks = readFileSync(new URL("../pages/tasks.tsx", import.meta.url), "utf8")
   assert.match(tasks, /const reasons = useReasons\(d\)/)
-  assert.match(tasks, /nextLine\(t, \{ reason, paused \}\)/)
+  assert.match(tasks, /nextLine\(t, \{ reason, paused, merged: rowMerged\(t\.status, mission\) \}\)/)   // a merged PR is not "agent finished"
   assert.match(tasks, /flex min-w-0 items-center gap-2/)   // title and its priority/risk tags stay together
 })
 

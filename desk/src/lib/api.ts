@@ -46,6 +46,8 @@ export interface Improvement {
   pr_state: string | null; ci_state: string | null; failed_check: string | null
   repairs: string | null; review_verdict: string | null; risk: string | null
   expected_effect: string | null; verified_at: string | null
+  /** The PR passes the backend's verified-publication rule (app/desk.py _pull_request). Absent on older APIs. */
+  pr_verified?: boolean
 }
 export interface Worker {
   status: "HEALTHY" | "PAUSED" | "STALE" | "DEGRADED" | "NO_DATA" | string

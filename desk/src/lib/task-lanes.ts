@@ -21,11 +21,13 @@ export function laneSort<T extends { status: string; priority: string; updated_a
 }
 
 /** PR and CI chips for a code task's row; nothing when the mission records neither. */
-export function codeChips(i: Pick<Improvement, "pr_number" | "ci_state" | "failed_check"> | undefined): { label: string; tone: Tone }[] {
+export function codeChips(i: Pick<Improvement, "pr_number" | "ci_state" | "failed_check" | "pr_verified"> | undefined): { label: string; tone: Tone }[] {
   if (!i) return []
   const ci = i.ci_state
   return [
-    i.pr_number != null ? { label: `PR #${i.pr_number}`, tone: "neutral" as Tone } : null,
+    // A number only for a verified publication; otherwise the PR exists but its number is not vouched for.
+    i.pr_number != null ? (i.pr_verified === true ? { label: `PR #${i.pr_number}`, tone: "neutral" as Tone }
+      : { label: "PR unverified", tone: "warning" as Tone }) : null,
     ci ? { label: `CI ${ci.toLowerCase().replaceAll("_", " ")}`,
       tone: (i.failed_check || /fail/i.test(ci) ? "danger" : /success/i.test(ci) ? "success" : "info") as Tone } : null,
   ].filter((x): x is { label: string; tone: Tone } => !!x)
