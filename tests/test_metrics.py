@@ -359,6 +359,23 @@ def test_series_is_oldest_first_regardless_of_insertion_order():
     assert stamps == sorted(stamps)
 
 
+def test_series_only_returns_readings_from_the_requested_source():
+    db = _db()
+    metrics_store.record(db, _views(10, NOW - timedelta(days=1)), now=NOW)
+    other = _views(500, NOW - timedelta(hours=12))
+    other.observations[0].source = "youtube-auto"  # same subject, metric and window, different source
+    metrics_store.record(db, other, now=NOW)
+    assert _rows(db) == 2
+    mine = _series(db, 30)
+    assert mine["source"] == "youtube-data-api" and [p["value"] for p in mine["points"]] == [10.0]
+    theirs = metrics_store.series(db, source="youtube-auto", subject="youtube:abc123", metric="views",
+                                  window="24h", days=30, now=NOW)
+    assert [p["value"] for p in theirs["points"]] == [500.0]
+    nobody = metrics_store.series(db, source="polar-api", subject="youtube:abc123", metric="views",
+                                  window="24h", days=30, now=NOW)
+    assert nobody["points"] == []
+
+
 def test_a_series_with_no_readings_is_empty_never_zero():
     db = _db()
     out = metrics_store.series(db, source="polar-api", subject="polar", metric="mrr", now=NOW)
