@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from "react"
 import {
-  Activity, AlertOctagon, Bot, Brain, Briefcase, CheckSquare, ChevronRight, CornerDownLeft, FileText, Gauge, GitPullRequest, HeartPulse, House,
+  Activity, AlertOctagon, Bot, Brain, Briefcase, CheckSquare, ChevronRight, Cpu, CornerDownLeft, FileText, Gauge, GitPullRequest, HeartPulse, House,
   KanbanSquare, Keyboard, Layers, ListPlus, Monitor, Moon, Plus, Repeat, RefreshCw, Search, Send, ShieldCheck, Sparkles, Sun, TrendingUp,
   Wallet, WifiOff,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ago } from "@/lib/format"
 import { healthSummary, systemChecks } from "@/lib/operating"
+import { shellStatus, type ShellFact } from "@/lib/shell-status"
 import { useTheme, type Theme } from "@/lib/theme"
 import { PAGE_LABEL, SECTIONS, pageTitle, sectionOf, type SectionKey } from "@/lib/nav"
 import { commandLifecycle } from "@/lib/lifecycle"
@@ -14,7 +15,7 @@ import { ErrorBoundary } from "@/components/error-boundary"
 import { useReturnFocus } from "@/lib/return-focus"
 import { DeskProvider, useDesk, useDraft, useLink, useNow, useStale, type Page } from "@/state"
 import { handOff } from "@/lib/draft"
-import { CommandTrack, DOT, Dot, Status } from "@/components/desk"
+import { CommandTrack, DOT, Dot, Status, TEXT } from "@/components/desk"
 import { DetailSheet } from "@/components/detail"
 import { CreateTask } from "@/pages/tasks"
 import { Button } from "@/components/ui/button"
@@ -25,7 +26,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandShortcut } from "@/components/ui/command"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import {
-  Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem,
+  Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem,
   SidebarProvider, SidebarTrigger, useSidebar,
 } from "@/components/ui/sidebar"
 import { Overview } from "@/pages/overview"
@@ -42,6 +43,7 @@ import { ActivityPage, HealthPage } from "@/pages/system"
 import { MemoryPage } from "@/pages/memory"
 
 const SECTION_ICON: Record<SectionKey, typeof Gauge> = { home: House, work: Layers, system: Gauge }
+const GLANCE_ICON: Record<ShellFact["key"], typeof Gauge> = { agents: Bot, worker: Cpu, approvals: CheckSquare }
 const PAGE_ICON: Record<Page, typeof Gauge> = {
   overview: House, approvals: CheckSquare, projects: Briefcase, project: Briefcase, growth: TrendingUp, finance: Wallet,
   tasks: KanbanSquare, agents: Bot, automation: Repeat, "stage-c": GitPullRequest, incidents: AlertOctagon, activity: Activity, health: HeartPulse, memory: Brain,
@@ -71,73 +73,115 @@ function useCounts() {
 function Mark({ className }: { className?: string }) {
   return (
     <span aria-hidden className={cn("relative grid size-7 shrink-0 place-items-center rounded-[8px] bg-foreground text-[12px] font-bold tracking-tight text-background", className)}>
-      S<span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-brand ring-2 ring-sidebar" />
+      A<span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-brand ring-2 ring-sidebar" />
     </span>
   )
 }
 
 function AppSidebar({ onCreate }: { onCreate: () => void }) {
-  const { data, route, go } = useDesk()
+  const { data, route } = useDesk()
   const { setOpenMobile } = useSidebar()
-  const { section: count } = useCounts()
+  const { section: count, tab: tabCount } = useCounts()
   const now = useNow("minute")
-  const nav = (page: Page) => { go(page); setOpenMobile(false) }
+  const close = () => setOpenMobile(false)
+  // A project detail page highlights Portfolio, the list it was opened from.
+  const current = route.page === "project" ? "projects" : route.page
   return (
     <Sidebar collapsible="offcanvas">
       <SidebarHeader className="gap-4 px-3 pt-4 pb-2">
         <div className="flex items-center gap-2.5 px-1.5">
           <Mark />
           <div className="min-w-0 leading-tight">
-            <div className="truncate text-[13px] font-semibold tracking-tight">Seerxo</div>
-            <div className="truncate text-[11px] text-muted-foreground">Company OS</div>
+            <div className="truncate text-[13px] font-semibold tracking-tight">Acthelm</div>
+            <div className="truncate text-[11px] text-muted-foreground">Founder Desk</div>
           </div>
         </div>
         {data && (
-          <Button variant="outline" className="h-10 justify-start gap-2 bg-background px-3 text-[13px] font-medium shadow-xs" onClick={() => { setOpenMobile(false); onCreate() }}>
+          <Button variant="outline" className="h-10 justify-start gap-2 bg-background px-3 text-[13px] font-medium shadow-xs" onClick={() => { close(); onCreate() }}>
             <Plus className="size-4" />New task<Kbd className="ml-auto h-5 text-[10px]">C</Kbd>
           </Button>
         )}
       </SidebarHeader>
-      <SidebarContent className="gap-0 px-2 pt-1">
-        <nav aria-label="Sections" className="grid gap-0.5">
-          <SidebarMenu className="gap-px">
-            {/* Three places; each page inside one is a tab at the top of the page. */}
-            {SECTIONS.map(sec => {
-              const Icon = SECTION_ICON[sec.key]
-              const here = sectionOf(route.page).key === sec.key
-              const [n, hot, what] = count[sec.key] ?? []
-              return (
-                <SidebarMenuItem key={sec.key}>
-                  <SidebarMenuButton asChild isActive={here}
-                    className={cn("h-10 gap-2.5 px-2.5 text-[14px] text-sidebar-foreground/70 transition-colors duration-150 hover:bg-sidebar-accent/70 hover:text-sidebar-foreground",
-                      "data-active:bg-sidebar-accent data-active:font-medium data-active:text-sidebar-foreground")}>
-                    {/* Real links: open in a new tab, copy the address. The hash route does the navigation. */}
-                    <a href={`#/${sec.home}`} onClick={() => setOpenMobile(false)} aria-current={here ? "page" : undefined}>
-                      <Icon className={cn("size-4", here ? "text-brand" : "text-muted-foreground")} /><span>{sec.label}</span>
-                      {!!n && <span className="sr-only">, {n} {what}</span>}
-                    </a>
-                  </SidebarMenuButton>
-                  {!!n && <SidebarMenuBadge aria-hidden className={cn("num top-2.5 rounded-full px-1.5 text-[11px] font-medium text-muted-foreground", hot && "bg-destructive/10 text-destructive")}>{n}</SidebarMenuBadge>}
-                </SidebarMenuItem>
-              )
-            })}
-          </SidebarMenu>
+      <SidebarContent className="gap-0 px-1 pt-1">
+        {/* Every page, grouped under its place (lib/nav.ts). Phones also get the places as a bottom bar and the
+            pages as tabs; on a desktop this list is the navigation. */}
+        <nav aria-label="Pages">
+          {SECTIONS.map(sec => {
+            const [n, hot, what] = count[sec.key] ?? []
+            return (
+              <SidebarGroup key={sec.key} className="py-1.5">
+                <SidebarGroupLabel className="h-7 gap-2 text-[11px] font-semibold tracking-[0.06em] uppercase">
+                  <span>{sec.label}</span>
+                  {!!n && <span className={cn("num ml-auto rounded-full px-1.5 text-[11px] font-medium tracking-normal normal-case", hot ? "bg-destructive/10 text-destructive" : "text-muted-foreground")}>
+                    {n}<span className="sr-only"> {what}</span></span>}
+                </SidebarGroupLabel>
+                <SidebarMenu className="gap-px">
+                  {sec.tabs.map(p => {
+                    const Icon = PAGE_ICON[p]
+                    const here = current === p
+                    const c = tabCount[p]
+                    return (
+                      <SidebarMenuItem key={p}>
+                        <SidebarMenuButton asChild isActive={here}
+                          className={cn("h-9 gap-2.5 px-2.5 text-[13px] text-sidebar-foreground/75 transition-colors duration-150 hover:bg-sidebar-accent/70 hover:text-sidebar-foreground",
+                            "data-active:bg-sidebar-accent data-active:font-medium data-active:text-sidebar-foreground")}>
+                          {/* Real links: open in a new tab, copy the address. The hash route does the navigation. */}
+                          <a href={`#/${p}`} onClick={close} aria-current={here ? "page" : undefined}>
+                            <Icon className={cn("size-4", here ? "text-brand" : "text-muted-foreground")} /><span>{PAGE_LABEL[p]}</span>
+                            {!!c && <span className="sr-only">, {c}</span>}
+                          </a>
+                        </SidebarMenuButton>
+                        {!!c && <SidebarMenuBadge aria-hidden className="num rounded-full px-1.5 text-[11px] font-medium text-muted-foreground">{c}</SidebarMenuBadge>}
+                      </SidebarMenuItem>
+                    )
+                  })}
+                </SidebarMenu>
+              </SidebarGroup>
+            )
+          })}
         </nav>
       </SidebarContent>
       <SidebarFooter className="gap-1 border-t border-sidebar-border px-2 py-3">
-        {/* One line, not four: the sidebar must keep every page visible on a 720 px laptop. Detail is on System status. */}
+        {/* One line: detail is on System status. */}
         {data ? (() => {
           // The same checklist System shows (lib/operating.ts healthSummary): only verified checks count as fine.
           const checks = systemChecks(data, now), h = healthSummary(checks)
-          return <button type="button" onClick={() => nav("health")} aria-label={`Company health: ${h.text}. Open System status`}
-            className="flex h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[13px] transition-colors hover:bg-sidebar-accent/70">
+          return <a href="#/health" onClick={close} aria-label={`Company health: ${h.text}. Open System status`}
+            className="flex min-h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[13px] transition-colors hover:bg-sidebar-accent/70 focus-visible:outline-2 focus-visible:outline-ring">
             <Dot tone={h.tone} />
             <span className="min-w-0 truncate">{h.open.length ? `${h.open.length} of ${checks.length} checks not verified` : h.text}</span>
             <span className="ml-auto text-xs text-muted-foreground">Status</span>
-          </button>
+          </a>
         })() : <Skeleton className="h-9 w-full" />}
       </SidebarFooter>
     </Sidebar>
+  )
+}
+
+/** The shell's at-a-glance line: agents, worker, decisions waiting (lib/shell-status.ts). Each opens its page. Before
+ *  the first read nothing is drawn, so a placeholder never reads as 0. */
+function SystemGlance({ compact }: { compact?: boolean }) {
+  const { data, go } = useDesk()
+  const now = useNow("minute")
+  if (!data) return null
+  const facts = shellStatus(data, now)
+  return (
+    <ul aria-label="System at a glance" className={cn("flex items-center", compact ? "grid grid-cols-3 gap-1.5" : "gap-1")}>
+      {facts.map(f => {
+        const Icon = GLANCE_ICON[f.key]
+        return (
+          <li key={f.key} className="min-w-0">
+            <button type="button" onClick={() => go(f.page)} aria-label={`${f.label}: ${f.value}. Open ${pageTitle(f.page)}`} title={`${f.label}: ${f.value}`}
+              className={cn("num flex w-full min-w-0 items-center gap-1.5 rounded-lg text-xs transition-colors duration-150 hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring",
+                compact ? "h-11 justify-center border bg-card px-2" : "h-9 px-2.5")}>
+              <Icon aria-hidden className={cn("size-3.5 shrink-0", TEXT[f.tone])} />
+              <span className={cn("text-muted-foreground", !compact && "max-xl:hidden")}>{f.label}</span>
+              <span className={cn("min-w-0 truncate font-medium", f.tone === "neutral" ? "text-foreground" : TEXT[f.tone])}>{compact ? f.short : <span className="block max-w-[18ch] truncate">{f.value}</span>}</span>
+            </button>
+          </li>
+        )
+      })}
+    </ul>
   )
 }
 
@@ -387,7 +431,7 @@ function SectionTabs() {
   const tabs = sectionOf(route.page).tabs
   if (!tabs.includes(route.page)) return null
   return (
-    <nav aria-label="Section pages" className="-mx-4 -mt-1 overflow-x-auto border-b px-4 [scrollbar-width:none] md:-mx-8 md:px-8">
+    <nav aria-label="Section pages" className="-mx-4 -mt-1 overflow-x-auto lg:hidden border-b px-4 [scrollbar-width:none] md:-mx-8 md:px-8">
       <ul className="flex gap-5">
         {tabs.map(p => (
           <li key={p}>
@@ -493,7 +537,7 @@ function TopBar({ t, onSearch }: { t: ThemeApi; onSearch: () => void }) {
   const here = project ?? (route.page === section.home ? section.label : PAGE_LABEL[route.page])
   const crumb = section.key !== "home" && (route.page !== section.home || project)
   return (
-    <header className="sticky top-0 z-20 flex min-h-14 items-center gap-2 border-b bg-background/85 px-3 pt-[env(safe-area-inset-top)] backdrop-blur-xl md:px-6">
+    <header className="sticky top-0 z-20 flex min-h-14 flex-wrap items-center gap-x-2 border-b bg-background/85 px-3 pt-[env(safe-area-inset-top)] backdrop-blur-xl md:px-6">
       <SidebarTrigger className="size-10 rounded-lg text-muted-foreground lg:hidden" />
       <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px]">
         {crumb && <>
@@ -503,16 +547,20 @@ function TopBar({ t, onSearch }: { t: ThemeApi; onSearch: () => void }) {
         <span className="truncate font-medium" aria-current="page">{here}</span>
       </nav>
       <div className="ml-auto flex items-center gap-0.5">
+        <div className="max-lg:hidden"><SystemGlance /></div>
+        <span className="mx-1 h-4 w-px bg-border max-lg:hidden" aria-hidden />
         <Freshness />
         <span className="mx-1 h-4 w-px bg-border max-sm:hidden" aria-hidden />
-        <button onClick={onSearch} aria-label="Search or instruct the CEO" className="hidden h-10 min-w-[220px] items-center gap-2 rounded-lg border bg-card px-3 text-[13px] text-muted-foreground shadow-xs transition-colors hover:border-foreground/20 hover:text-foreground lg:flex">
+        <button onClick={onSearch} aria-label="Search or instruct the CEO" className="hidden h-10 min-w-[220px] items-center gap-2 rounded-lg border bg-card px-3 text-[13px] text-muted-foreground shadow-xs transition-colors hover:border-foreground/20 hover:text-foreground xl:flex">
           <Search className="size-3.5" /><span className="flex-1 text-left">Search or command</span><Kbd className="h-5 text-[10px]">{MOD} K</Kbd>
         </button>
-        <button onClick={onSearch} aria-label="Search or instruct the CEO" className="grid size-10 place-items-center rounded-lg text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground lg:hidden">
+        <button onClick={onSearch} aria-label="Search or instruct the CEO" className="grid size-10 place-items-center rounded-lg text-muted-foreground transition-colors duration-150 hover:bg-muted hover:text-foreground xl:hidden">
           <Search className="size-4" />
         </button>
         <ThemeToggle t={t} />
       </div>
+      {/* Phones and tablets: the same three facts as a second row, one tap each. */}
+      <div className="w-full pb-2 empty:hidden lg:hidden"><SystemGlance compact /></div>
     </header>
   )
 }

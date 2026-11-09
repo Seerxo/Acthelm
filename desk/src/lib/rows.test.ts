@@ -124,7 +124,7 @@ test("primary navigation targets are at least 44 px tall on touch screens and th
   const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8")
   const app = read("../App.tsx"), css = read("../index.css")
   assert.match(app, /relative flex h-11 items-center gap-1\.5 text-\[13px\]/)          // section tabs: 44 px
-  assert.match(app, /<a href=\{`#\/\$\{sec\.home\}`\} onClick=\{\(\) => setOpenMobile\(false\)\}/)    // sidebar places are real links
+  assert.match(app, /<a href=\{`#\/\$\{p\}`\} onClick=\{close\}/)    // sidebar pages are real links that close the phone sheet
   assert.match(app, /relative flex h-\[58px\] w-full flex-col/)                         // bottom nav targets
   assert.match(app, /fixed inset-x-0 bottom-0 z-30[^"]*lg:hidden/)                        // bottom nav remains through tablet
   // Dense desktop rows (40 px) grow to 44 px wherever the pointer is coarse, including the sidebar's sub-page links.

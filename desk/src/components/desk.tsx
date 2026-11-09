@@ -1,4 +1,4 @@
-// SEZ Command primitives on top of shadcn/ui. Every page is built from these, so the language stays one.
+// Acthelm Desk primitives on top of shadcn/ui. Every page is built from these, so the language stays one.
 //
 // Type roles (use these, not ad-hoc sizes):
 //   page title 22/600 · section title 13/600 · object title 14/500 · value tabular
