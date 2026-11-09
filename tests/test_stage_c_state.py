@@ -77,6 +77,22 @@ def db(env):
     return Session(env[0])
 
 
+def test_pf_names(env):
+    names = [f"acceptance:{name}" for name in sorted(stage_c_worker.ACCEPTANCE_CHECKS)]
+    cases = [(["acceptance:claude_edit"], ["acceptance:claude_edit"]),
+             (["not_a_check", "acceptance:unknown", {}, 7], ["other"] * 4),
+             (["source_sha"] * 11, ["source_sha"] * 10)]
+    cases += [(names[i:i + 10], names[i:i + 10]) for i in range(0, len(names), 10)]
+    for failed, expected in cases:
+        with db(env) as s:
+            s.merge(models.ControlState(key=stage_c_worker.RUNTIME_READINESS_KEY, updated_by="watchdog",
+                                        value={"ready": False, "source_sha": SHA, "checked_at": NOW.isoformat(),
+                                               "failed": failed}))
+            s.commit()
+        pre = get(env)["runtime"]["preflight"]
+        assert pre["status"] == "FAIL" and pre["failed"] == expected
+
+
 # ---------------------------------------------------------------------------------------------- authorization
 @pytest.mark.parametrize("mode", ["enforce", "log"])
 @pytest.mark.parametrize("label,headers,host,code", [

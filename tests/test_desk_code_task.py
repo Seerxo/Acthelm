@@ -75,5 +75,5 @@ def test_preflight(env):
         s.commit()
     out = _founder().get("/stage-c/state", headers=ASSERT).json()
     pre = out["runtime"]["preflight"]
-    assert pre["failed"] == ["launcher", "egress_proxy"] and pre["checked_at"].startswith("2026-11-09T10:00:00")
+    assert pre["failed"] == ["launcher", "other", "other", "egress_proxy"] and pre["checked_at"].startswith("2026-11-09T10:00:00")
     assert out["code_task_paths"] == stage_c_worker.task_paths()

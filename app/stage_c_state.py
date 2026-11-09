@@ -54,7 +54,14 @@ GRANT_STATUS = {None: "ACTIVE", "stage_c_authorization_consumed": "CONSUMED", "s
 _SHA = re.compile(r"[a-f0-9]{40}")
 _FP = re.compile(r"[a-f0-9]{64}")
 _TASK_KEY = re.compile(r"[A-Z]+-[0-9]{1,6}")
-_CHECK = re.compile(r"[a-z][a-z0-9_]{0,63}")
+PREFLIGHT_CHECKS = {
+    "source_sha", "api_worker_sha_agree", "acceptance_recorded", "acceptance_source_sha", "launcher",
+    "coder_image", "checks_image", "checks_command", "egress_proxy", "coder_logins", "codex_reviewer_volume",
+    "claude_auth", "jobs_directory", "repository_mirror", "github_credential", "independent_providers",
+    "guardian_policy", "allowed_repository", "allowed_branch", "project_profiles", "db_project_repository",
+    "worker_identity", "github_commit_statuses", "github_actions",
+    *(f"acceptance:{name}" for name in stage_c_worker.ACCEPTANCE_CHECKS),
+}
 
 
 def _sha(v):
@@ -149,7 +156,7 @@ def _runtime(db, api_sha, now):
         "preflight": {"status": preflight, "checked_at": _ts(r_value.get("checked_at")),
                       "source_sha": _sha(r_value.get("source_sha")),
                       # The watchdog's failing check names (watchdog.record_stage_c_readiness): fixed codes only.
-                      "failed": [f for f in failed[:10] if isinstance(f, str) and _CHECK.fullmatch(f)]
+                      "failed": [f if isinstance(f, str) and f in PREFLIGHT_CHECKS else "other" for f in failed[:10]]
                       if isinstance(failed, list) else None},
         # No process records the reasoner's deployed source in the database: never guessed.
         "reasoner_sha": None,

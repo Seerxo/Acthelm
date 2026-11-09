@@ -10,6 +10,17 @@ export const CONTRACT_VERSION = 1
 export const BADGES = ["ACTIVE", "READY", "BLOCKED", "FAILED", "EXPIRED", "UNKNOWN", "NOT_VERIFIED"] as const
 export type Badge = (typeof BADGES)[number]
 export const PREFLIGHT = ["PASS", "FAIL", "STALE", "NOT_VERIFIED"] as const
+// app/stage_c_preflight.py check names, including the host acceptance checks.
+const PREFLIGHT_CHECKS = [
+  "source_sha", "api_worker_sha_agree", "acceptance_recorded", "acceptance_source_sha", "launcher",
+  "coder_image", "checks_image", "checks_command", "egress_proxy", "coder_logins", "codex_reviewer_volume",
+  "claude_auth", "jobs_directory", "repository_mirror", "github_credential", "independent_providers",
+  "guardian_policy", "allowed_repository", "allowed_branch", "project_profiles", "db_project_repository",
+  "worker_identity", "github_commit_statuses", "github_actions",
+  ...["image_build", "egress", "launcher", "permissions", "direct_egress_blocked", "github_blocked",
+    "random_hosts_blocked", "provider_hosts", "claude_edit", "codex_review_probe", "offline_checks",
+    "credential_isolation"].map(name => `acceptance:${name}`),
+]
 export const GRANT = ["ACTIVE", "CONSUMED", "EXPIRED", "DAILY_LIMIT", "INVALID", "REVOKED", "SHA_MISMATCH"] as const
 export const CI = ["SUCCESS", "FAILURE", "PENDING", "STALE", "MERGED_OBSERVED"] as const
 export const TASK_STATUS = ["IDEA", "BACKLOG", "READY", "QUEUED", "IN_PROGRESS", "WAITING_EXTERNAL", "WAITING_APPROVAL", "BLOCKED", "REVIEW", "FAILED", "DONE", "CANCELLED"] as const
@@ -148,7 +159,8 @@ export function parseStageC(raw: unknown): StageCState {
       worker_ready: bool(rt.worker_ready), agents_paused: bool(rt.agents_paused),
       acceptance: { source_sha: sha(acc.source_sha), accepted_at: ts(acc.accepted_at), valid: bool(acc.valid) },
       preflight: { status: oneOf(pre.status, PREFLIGHT), checked_at: ts(pre.checked_at), source_sha: sha(pre.source_sha),
-        failed: Array.isArray(pre.failed) ? pre.failed.map(code).filter((c): c is string => c !== null) : null },
+        failed: Array.isArray(pre.failed) ? pre.failed.slice(0, 10).map(f =>
+          typeof f === "string" && PREFLIGHT_CHECKS.includes(f) ? f : "other") : null },
       host_facts: "NOT_VERIFIED",   // the API cannot see host facts; whatever it sends, the Desk does not claim them
     },
     authorizations: { one_task: one, standing },

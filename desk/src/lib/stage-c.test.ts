@@ -394,10 +394,17 @@ test("runtime reasoner SHA and last ready PR use the emitted contract, including
 test("preflight failures and code task paths are codes and plain paths only", () => {
   const s = parseStageC(raw({ code_task_paths: ["app/goals.py", "../etc", "https://x"],
     runtime: { ...raw().runtime, preflight: { status: "FAIL", checked_at: NOW, source_sha: SHA, failed: ["launcher", "bad name", 3] } } }))
-  assert.deepEqual(s.runtime.preflight.failed, ["launcher"])
+  assert.deepEqual(s.runtime.preflight.failed, ["launcher", "other", "other"])
   assert.deepEqual(s.code_task_paths, ["app/goals.py"])
   assert.equal(parseStageC(raw()).runtime.preflight.failed, null)
   assert.equal(parseStageC(raw()).code_task_paths, null)
+})
+
+test("preflight ids", () => {
+  const failed = ["acceptance:claude_edit", "acceptance:codex_review_probe", "acceptance:unknown", "unknown_check"]
+  const parse = (failed: unknown[]) => parseStageC(raw({ runtime: { preflight: { failed } } })).runtime.preflight.failed
+  assert.deepEqual(parse(failed), ["acceptance:claude_edit", "acceptance:codex_review_probe", "other", "other"])
+  assert.deepEqual(parse(Array(11).fill("launcher")), Array(10).fill("launcher"))
 })
 
 test("revoke toasts follow the API's answer; minutes clamp only when sent", async () => {

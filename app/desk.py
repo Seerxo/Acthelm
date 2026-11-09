@@ -2,6 +2,7 @@
 import functools
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from statistics import median
 
@@ -106,16 +107,24 @@ def _artifacts_view(artifacts) -> dict | None:
 def _pull_request(task: models.Task) -> dict | None:
     """The task's PR as the backend verified it (lib/accept.ts): only the latest PR_OPEN publication on this
     deployment's upstream (stage_c_worker.published_pr_number), and only while task.artifacts name the same PR and
-    commit. Anything else is `verified: false` with no link. Merged = a recorded MERGED stage."""
+    commit. Anything else is `verified: false` with no link. Merged binds to that publication's commit."""
     ev = stage_c_ci.publication(task)
     if ev is None:
         return None
     number, art = stage_c_worker.published_pr_number(task), task.artifacts if isinstance(task.artifacts, dict) else {}
-    merge = stage_c_ci._evidence(task, "MERGED")
-    verified = (number is not None and art.get("pr", ev["pr"]) == ev["pr"]
-                and art.get("commit", ev.get("commit")) == ev.get("commit")
-                and merge.get("pr_number", number) == number)
-    out = {"verified": verified, "merged": bool(merge), "commit": _scalar(ev.get("commit")),
+    merge = {}
+    if not ev.get("unreadable_history"):
+        for step in reversed(task.context["improvement"]["history"]):
+            if step.get("stage") == "PR_OPEN":
+                break
+            if step.get("stage") == "MERGED":
+                merge = step.get("evidence") if isinstance(step.get("evidence"), dict) else {}
+                break
+    commit = ev.get("commit")
+    verified = (number is not None and isinstance(commit, str) and re.fullmatch(r"[0-9a-fA-F]{40}", commit) is not None
+                and art.get("pr") == ev["pr"] and art.get("commit") == commit
+                and (not merge or (merge.get("pr_number") == number and merge.get("commit") == commit)))
+    out = {"verified": verified, "merged": verified and bool(merge), "commit": _scalar(commit),
            "merge_commit": _scalar(merge.get("merge_commit"))}
     return {**out, "number": number, "url": ev["pr"]} if verified else out
 
@@ -416,12 +425,18 @@ def improvements(tasks: list) -> list[dict]:
         for step in imp.get("history", []):
             ev.update(step.get("evidence") or {})
         pr = _pull_request(t)
+        verified = bool(pr and pr["verified"]
+                        and ("pr_number" not in ev or ev["pr_number"] == pr["number"])
+                        and ("repository" not in ev or ev["repository"] == stage_c_worker.REPOSITORY)
+                        and (imp["stage"] not in ("MERGED", "VERIFYING") or pr["merged"]))
         out.append({"task": t.key, "title": _clean(t.title), "stage": _scalar(imp["stage"]),
                     # The task detail's verified-publication rule, so a list chip never shows an unverified PR number.
-                    "pr_verified": bool(pr and pr["verified"]),
+                    "pr_verified": verified,
+                    "pr_number": pr.get("number") if pr else None,
+                    "repository": stage_c_worker.REPOSITORY if pr and pr["verified"] else None,
                     "updated_at": imp["history"][-1]["at"] if imp.get("history") else None,
                     **{k: _scalar(ev.get(k))
-                       for k in ("repository", "branch", "pr_number", "pr_state",
+                       for k in ("branch", "pr_state",
                                  "ci_state", "failed_check", "repairs",
                                  "review_verdict", "risk", "expected_effect",
                                  "verified_at")}})

@@ -24,3 +24,10 @@ test("PR and CI chips come only from recorded facts", () => {
   for (const pr_verified of [false, undefined])   // unverified or an older API: never a number
     assert.deepEqual(codeChips({ pr_number: 7, ci_state: null, failed_check: null, pr_verified }), [{ label: "PR unverified", tone: "warning" }])
 })
+
+test("PR id", () => {
+  assert.deepEqual(codeChips({ pr_number: null, pr_verified: true, ci_state: null, failed_check: null }), [])
+  // A later evidence conflict makes the API row unverified, even with a known publication number.
+  assert.deepEqual(codeChips({ pr_number: 77, pr_verified: false, ci_state: null, failed_check: null }),
+    [{ label: "PR unverified", tone: "warning" }])
+})
