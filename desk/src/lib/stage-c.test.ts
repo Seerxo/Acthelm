@@ -399,3 +399,12 @@ test("preflight failures and code task paths are codes and plain paths only", ()
   assert.equal(parseStageC(raw()).runtime.preflight.failed, null)
   assert.equal(parseStageC(raw()).code_task_paths, null)
 })
+
+test("revoke toasts follow the API's answer; minutes clamp only when sent", async () => {
+  const { pilotRevokeMessage, standingRevokeMessage, clampMinutes } = await import("./stage-c.ts")
+  assert.match(pilotRevokeMessage({ revoked: true }), /revoked$/)
+  assert.match(pilotRevokeMessage({ revoked: false }), /nothing was revoked/)
+  assert.match(standingRevokeMessage({ revoked: false }), /nothing was revoked/)
+  for (const bad of [{}, { revoked: "yes" }, null]) assert.throws(() => pilotRevokeMessage(bad))
+  assert.deepEqual(["", " ", "abc", "0", "5", "5.6", "90"].map(clampMinutes), [null, null, null, 1, 5, 6, 60])
+})

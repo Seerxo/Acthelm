@@ -219,6 +219,11 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
 
 export async function apiText(path: string): Promise<string> {
   const response = await fetch(path)
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
+  if (!response.ok) throw new ApiError(response.status, response.statusText)
+  // As api(): an Access login page (HTML after a redirect) is a lost session, and any non-plain-text body is refused,
+  // never shown as the text the founder asked for.
+  if (!response.headers.get("content-type")?.startsWith("text/plain"))
+    throw accessLogin(response) ? new ApiError(0, "Sign in again, then reload", true)
+      : new ApiError(0, "Unexpected (non-text) API response; reload", false)
   return response.text()
 }

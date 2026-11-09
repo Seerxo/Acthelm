@@ -80,7 +80,7 @@ function CodeTaskForm() {
         </div>
         <fieldset className="grid gap-1.5 text-[13px]"><legend className="mb-1.5 font-medium">Files it may change</legend>
           {allowed === null ? <span className="text-muted-foreground">Loading the allowed Stage C files…</span>
-            : allowed.length ? allowed.map(p => <label key={p} className="flex min-h-8 items-center gap-2 font-mono text-xs">
+            : allowed.length ? allowed.map(p => <label key={p} className="flex min-h-11 items-center gap-2 font-mono text-xs break-all">
                 <input type="checkbox" checked={f.paths.includes(p)} onChange={() => toggle(p)} className="size-4" />{p}</label>)
             : <span className="text-warning">No allowed Stage C files are reported, so no code task can be recorded.</span>}
         </fieldset>
@@ -217,6 +217,7 @@ function TaskLine({ t, reason, paused }: { t: TaskRow; reason?: string; paused: 
   const g = groupOf(t.status)
   const tone = GROUPS.find(x => x.key === g)!.tone
   const changed = useChange("task", t.key)
+  const merged = rowMerged(t.status, mission)   // a merged PR reads Merged, never In review (lib/accept.ts)
   return (
     <PanelRow onClick={() => open({ kind: "task", key: t.key })} label={`${t.title}: ${t.status}`} className={changed && "desk-flash"}
       lead={<Dot tone={tone} live={t.status === "IN_PROGRESS"} />}
@@ -226,7 +227,7 @@ function TaskLine({ t, reason, paused }: { t: TaskRow; reason?: string; paused: 
         {t.priority !== "P2" && <Tag tone={priorityTone(t.priority)}>{t.priority}</Tag>}
         {t.risk !== "LOW" && <Tag tone={t.risk === "HIGH" || t.risk === "CRITICAL" ? "warning" : "neutral"} className="max-sm:hidden">{t.risk} risk</Tag>}
       </span>}
-      meta={<><span className="[overflow-wrap:anywhere]"><span className="font-mono text-xs">{t.key}</span> · {nextLine(t, { reason, paused, merged: rowMerged(t.status, mission) })}</span>
+      meta={<><span className="[overflow-wrap:anywhere]"><span className="font-mono text-xs">{t.key}</span> · {nextLine(t, { reason, paused, merged })}</span>
         {/* A code task's PR and CI at a glance; the full evidence is on the task. */}
         {mv && <span className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
           <Status value={mission!.stage} label={mv.label} tone={mv.tone} />
@@ -239,7 +240,7 @@ function TaskLine({ t, reason, paused }: { t: TaskRow; reason?: string; paused: 
         {t.origin && <span className="max-w-[9rem] truncate max-xl:hidden" title={t.origin.reason ?? t.origin.trigger ?? undefined}>
           {t.origin.automatic ? "auto" : "from"} {t.origin.by}</span>}
         <span className="num max-sm:hidden">{ago(t.updated_at)}</span>
-        <Status value={t.status} tone={tone} />
+        <Status value={t.status} tone={tone} label={merged ? "Merged" : undefined} />
         <ChevronRight className="size-4 text-muted-foreground/40 max-sm:hidden" />
       </>} />
   )
@@ -321,22 +322,26 @@ export function TasksPage() {
       const sig = signals(g.tasks)
       // A closed group hides its rows, so a change inside it is marked on the header instead (lib/changes.ts).
       const moved = open ? 0 : g.tasks.filter(t => changes[`task:${t.key}`] && !pinned([t]).length).length
+      const head = cn(moved > 0 && "desk-flash", "flex min-h-11 w-full min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 px-4 py-2.5 text-left")
+      const header = <>
+        {g.key !== "needs" && <ChevronRight aria-hidden className={cn("size-4 shrink-0 text-muted-foreground transition-transform duration-150", open && "rotate-90")} />}
+        <Dot tone={g.tone} />
+        <span className="text-[13px] font-semibold">{g.label}</span>
+        <span className="num rounded-full bg-muted px-1.5 text-[11px] leading-[18px] font-medium text-muted-foreground">{g.tasks.length}</span>
+        {sig.map(x => <Tag key={x} tone={x.endsWith("P0") || x.endsWith("high risk") ? "danger" : "warning"}>{x}</Tag>)}
+        {/* What the counts are made of, from statuses and timestamps only (the facts the old figure strip carried). */}
+        {g.key === "needs" && <span className="text-xs text-muted-foreground">{[attentionBreakdown(g.tasks), reviewCount(g.tasks),
+          reviewOldest && `oldest review untouched ${ago(reviewOldest)}`].filter(Boolean).join(" · ")}</span>}
+        {fresh > 0 && <span className="rounded-full bg-info/10 px-1.5 text-[11px] leading-[18px] font-medium text-info">+{fresh} new</span>}
+        {moved > 0 && <span className="rounded-full bg-info/10 px-1.5 text-[11px] leading-[18px] font-medium text-info">{moved} just changed</span>}
+        {g.key !== "needs" && <span className="ml-auto text-xs text-muted-foreground">{[g.key === "done" && closedScope(closedLoaded, d.tasks_truncated), open ? "Hide" : `Show all ${g.tasks.length}`].filter(Boolean).join(" · ")}</span>}
+      </>
       return (
         <section key={g.key} aria-label={g.label} className="panel min-w-0 divide-y divide-border/70 overflow-hidden">
-          <button type="button" aria-expanded={open} disabled={g.key === "needs"} onClick={() => setManual(m => ({ ...m, [g.key]: !open }))}
-            className={cn(moved > 0 && "desk-flash", "flex min-h-11 w-full min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 px-4 py-2.5 text-left transition-colors enabled:hover:bg-muted/40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring disabled:cursor-default")}>
-            {g.key !== "needs" && <ChevronRight aria-hidden className={cn("size-4 shrink-0 text-muted-foreground transition-transform duration-150", open && "rotate-90")} />}
-            <Dot tone={g.tone} />
-            <span className="text-[13px] font-semibold">{g.label}</span>
-            <span className="num rounded-full bg-muted px-1.5 text-[11px] leading-[18px] font-medium text-muted-foreground">{g.tasks.length}</span>
-            {sig.map(x => <Tag key={x} tone={x.endsWith("P0") || x.endsWith("high risk") ? "danger" : "warning"}>{x}</Tag>)}
-            {/* What the counts are made of, from statuses and timestamps only (the facts the old figure strip carried). */}
-            {g.key === "needs" && <span className="text-xs text-muted-foreground">{[attentionBreakdown(g.tasks), reviewCount(g.tasks),
-              reviewOldest && `oldest review untouched ${ago(reviewOldest)}`].filter(Boolean).join(" · ")}</span>}
-            {fresh > 0 && <span className="rounded-full bg-info/10 px-1.5 text-[11px] leading-[18px] font-medium text-info">+{fresh} new</span>}
-            {moved > 0 && <span className="rounded-full bg-info/10 px-1.5 text-[11px] leading-[18px] font-medium text-info">{moved} just changed</span>}
-            {g.key !== "needs" && <span className="ml-auto text-xs text-muted-foreground">{[g.key === "done" && closedScope(closedLoaded, d.tasks_truncated), open ? "Hide" : `Show all ${g.tasks.length}`].filter(Boolean).join(" · ")}</span>}
-          </button>
+          {/* Needs you never collapses (lib/work-groups.ts), so its header is a heading, not a toggle. */}
+          {g.key === "needs" ? <h2 className={cn(head, "font-normal")}>{header}</h2>
+            : <button type="button" aria-expanded={open} onClick={() => setManual(m => ({ ...m, [g.key]: !open }))}
+                className={cn(head, "transition-colors hover:bg-muted/40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring")}>{header}</button>}
           {(open ? g.tasks : pinned(g.tasks)).map(t => <TaskLine key={t.key} t={t} reason={reasons[t.key]} paused={paused} />)}
         </section>
       )

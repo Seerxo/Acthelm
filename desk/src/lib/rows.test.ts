@@ -183,7 +183,9 @@ test("the Overview headline comes from lib/operating, never from the API's optim
 test("work rows say what happens next and, for stopped work, the recorded reason", () => {
   const tasks = readFileSync(new URL("../pages/tasks.tsx", import.meta.url), "utf8")
   assert.match(tasks, /const reasons = useReasons\(d\)/)
-  assert.match(tasks, /nextLine\(t, \{ reason, paused, merged: rowMerged\(t\.status, mission\) \}\)/)   // a merged PR is not "agent finished"
+  assert.match(tasks, /const merged = rowMerged\(t\.status, mission\)/)   // a merged PR is not "agent finished"...
+  assert.match(tasks, /nextLine\(t, \{ reason, paused, merged \}\)/)
+  assert.match(tasks, /<Status value=\{t\.status\} tone=\{tone\} label=\{merged \? "Merged" : undefined\} \/>/)   // ...nor "In review"
   assert.match(tasks, /flex min-w-0 items-center gap-2/)   // title and its priority/risk tags stay together
 })
 
@@ -244,6 +246,7 @@ test("Work collapses groups in overview filters, but never Needs attention, and 
   // Lanes (lib/task-lanes.ts): Needs you holds Needs attention, so it opens as attention does.
   assert.match(tasks, /const open = isOpen\(g\.key === "needs" \? "attention" : "running", g\.tasks, \{ overview, searching, manual: manual\[g\.key\] \}\)/)
   assert.match(tasks, /const searching = q !== "" \|\| unit !== "all"/)
-  assert.match(tasks, /aria-expanded=\{open\} disabled=\{g\.key === "needs"\}/)
+  assert.match(tasks, /g\.key === "needs" \? <h2/)   // Needs you is a heading, never a disabled toggle
+  assert.match(tasks, /<button type="button" aria-expanded=\{open\}/)
   assert.doesNotMatch(tasks, /slice\(0, CAP\)/)                      // nothing is cut: a closed group opens in full
 })

@@ -1,7 +1,7 @@
 // Task / agent detail in a side sheet, plus the confirmation and result dialogs the controls use.
 // Summary and evidence first; raw context and agent configuration only under "Advanced".
 import { useEffect, useState, type ReactNode } from "react"
-import { Check, ChevronRight, Copy, Play } from "lucide-react"
+import { Check, ChevronRight, Copy, Loader2, Play } from "lucide-react"
 import { toast } from "sonner"
 import { api, type AgentDetail, type Run, type TaskDetail } from "@/lib/api"
 import { ago, duration, humanize, usd, when } from "@/lib/format"
@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { ErrorBoundary } from "@/components/error-boundary"
 import { checkAgentDetail, checkTaskDetail } from "@/lib/validate"
-import { canOfferReady, isCodeWrite, readyBlock, readyNote } from "@/lib/ready"
+import { attendedPlans, canOfferReady, isCodeWrite, readyBlock, readyNote } from "@/lib/ready"
 import { AcceptDone, AuthorizeStageC, MarkReady } from "@/components/controls"
 import { acceptOffer, mergedForReview, prLink } from "@/lib/accept"
 import { taskPipeline, type StepState } from "@/lib/pipeline"
@@ -76,7 +76,7 @@ const Section = ({ title, children }: { title: string; children: ReactNode }) =>
 )
 
 const Text = ({ text, none }: { text: string | null | undefined; none: string }) =>
-  text ? <p className="text-sm leading-relaxed whitespace-pre-wrap">{text}</p> : <p className="text-sm text-muted-foreground">{none}</p>
+  text ? <p className="text-sm leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</p> : <p className="text-sm text-muted-foreground">{none}</p>
 
 const Chips = ({ items }: { items: (string | null | undefined)[] | string | null | undefined }) => {
   const list = (Array.isArray(items) ? items : items ? String(items).split(/[,\s]+/) : []).filter(Boolean) as string[]
@@ -108,10 +108,10 @@ export function Runs({ runs }: { runs: Run[] }) {
             <span className="font-mono text-xs">{r.provider ?? "—"}</span>
             <Muted>{when(r.started_at)}</Muted>
             <span className="font-mono text-xs text-muted-foreground">{duration(r.started_at, r.ended_at)}</span>
-            {r.task && <button className="ml-auto" onClick={() => open({ kind: "task", key: r.task! })}><TaskKey k={r.task} /></button>}
+            {r.task && <button type="button" className="ml-auto max-sm:min-h-11" onClick={() => open({ kind: "task", key: r.task! })}><TaskKey k={r.task} /></button>}
           </div>
-          {r.supervisor_verdict && <div className="text-xs text-muted-foreground">Supervisor <b className="text-foreground">{r.supervisor_verdict}</b>{r.supervisor_notes && ` · ${r.supervisor_notes}`}</div>}
-          {r.error && <div className="text-xs text-destructive">{r.error}</div>}
+          {r.supervisor_verdict && <div className="text-xs text-muted-foreground [overflow-wrap:anywhere]">Supervisor <b className="text-foreground">{r.supervisor_verdict}</b>{r.supervisor_notes && ` · ${r.supervisor_notes}`}</div>}
+          {r.error && <div className="text-xs text-destructive [overflow-wrap:anywhere]">{r.error}</div>}
         </div>
       ))}
     </div>
@@ -136,7 +136,7 @@ function StandsNow({ t }: { t: TaskDetail }) {
         </div>
         <p className="text-[13px] text-muted-foreground"><span className="font-medium text-foreground">Next: </span>{s.next}</p>
         {link?.state === "verified" && <a href={link.pr.url} target="_blank" rel="noopener noreferrer"
-          className="w-fit font-mono text-xs font-medium underline underline-offset-2 hover:text-info">PR #{link.pr.number}{link.pr.commit && ` · ${link.pr.commit.slice(0, 7)}`}</a>}
+          className="w-fit font-mono text-xs font-medium underline underline-offset-2 [overflow-wrap:anywhere] hover:text-info">PR #{link.pr.number}{link.pr.commit && ` · ${link.pr.commit.slice(0, 7)}`}</a>}
         {link?.state === "unverified" && <p className="text-xs text-warning">PR link unverified: the task and its publication record disagree, so no link is shown.</p>}
       </div>
       {s.blocker && (
@@ -144,7 +144,7 @@ function StandsNow({ t }: { t: TaskDetail }) {
           <span className="text-xs font-medium text-muted-foreground">{["BLOCKED", "FAILED"].includes(t.status) ? "Why it stopped" : "Waiting on"}</span>
           <span className="[overflow-wrap:anywhere]">{s.blocker === "unrecorded" ? <Muted>No reason was recorded. The run history below is the only evidence.</Muted> : s.blocker}</span>
           {s.waitingOn.length > 0 && <span className="flex flex-wrap gap-1.5 pt-0.5">{s.waitingOn.map(d => (
-            <button key={d.key} onClick={() => open({ kind: "task", key: d.key })} className="rounded-md border bg-background px-1.5 py-0.5 font-mono text-[11px] hover:bg-muted">{d.key} · {humanize(d.status).toLowerCase()}</button>))}</span>}
+            <button type="button" key={d.key} onClick={() => open({ kind: "task", key: d.key })} className="max-sm:min-h-11 rounded-md border bg-background px-1.5 py-0.5 font-mono text-[11px] hover:bg-muted">{d.key} · {humanize(d.status).toLowerCase()}</button>))}</span>}
         </div>
       )}
       {/* Where the task is, step by step, from recorded facts only (lib/pipeline.ts); updates live while open. */}
@@ -190,7 +190,7 @@ function TaskBody({ t }: { t: TaskDetail }) {
         <Tag tone={priorityTone(t.priority)}>{t.priority}</Tag>
         <span>{t.risk.toLowerCase()} risk</span>
         {t.business_unit && (unit
-          ? <button type="button" className="inline-flex min-h-7 items-center gap-1 font-medium text-foreground underline-offset-2 hover:underline"
+          ? <button type="button" className="inline-flex min-h-7 items-center gap-1 font-medium max-sm:min-h-11 text-foreground underline-offset-2 hover:underline"
               onClick={() => { open(null); go("project", unit.key) }}>· {unit.name}{t.project && ` / ${t.project}`}<ChevronRight className="size-3.5" /></button>
           : <span>· {t.business_unit}{t.project && ` / ${t.project}`}</span>)}
         <span>· {t.assigned_agent ? <>owned by <b className="font-medium text-foreground">{t.assigned_agent}</b></> : "unassigned"}</span>
@@ -200,7 +200,7 @@ function TaskBody({ t }: { t: TaskDetail }) {
         <Section title="Why this task exists">
           <p className="text-sm">{t.origin.automatic ? <>Opened automatically by <b className="font-medium">{t.origin.by}</b></> : <>Requested by <b className="font-medium">{t.origin.by}</b></>}
             {t.origin.trigger && <Muted> · {t.origin.trigger}</Muted>}</p>
-          {t.origin.reason && t.origin.reason !== t.origin.trigger && <Muted className="text-xs">{t.origin.reason}</Muted>}
+          {t.origin.reason && t.origin.reason !== t.origin.trigger && <Muted className="text-xs [overflow-wrap:anywhere]">{t.origin.reason}</Muted>}
           {t.goal && <p className="text-xs"><Muted>Serves goal </Muted>{t.goal.title}{t.goal.status && <Muted> · {t.goal.status.toLowerCase()}</Muted>}</p>}
         </Section>
       )}
@@ -247,9 +247,13 @@ function waitReason(reason: string | null) {
 function AgentBody({ a }: { a: AgentDetail }) {
   const { open } = useDesk()
   const [work, setWork] = useState<string[] | null | "paused">(null)
+  const [busy, setBusy] = useState(false)
+  // One request at a time; a refusal or network error is said, never left as an unhandled rejection.
   const runOnce = async () => {
-    const out = await api<{ paused: boolean; work: { agent: string; next_command: string }[] }>("/dispatch/run", {})
-    setWork(out.paused ? "paused" : out.work.filter(w => w.agent === a.key).map(w => w.next_command))
+    setBusy(true)
+    try { setWork(attendedPlans(await api<unknown>("/dispatch/run", {}), a.key)) }
+    catch (e) { toast.error((e as Error).message) }
+    finally { setBusy(false) }
   }
   return (
     <div className="grid min-w-0 grid-cols-1 gap-5">
@@ -257,14 +261,14 @@ function AgentBody({ a }: { a: AgentDetail }) {
       <Section title="Unattended task eligibility">
         {a.unattended_tasks === undefined ? <Muted>No verified eligibility data from this API.</Muted>
           : a.unattended_tasks.length ? <div className="grid grid-cols-1 gap-2">{a.unattended_tasks.map(t => (
-            <button key={t.task} onClick={() => open({ kind: "task", key: t.task })}
-              className="rounded-lg border px-3 py-2 text-left text-sm hover:bg-muted">
+            <button type="button" key={t.task} onClick={() => open({ kind: "task", key: t.task })}
+              className="max-sm:min-h-11 rounded-lg border px-3 py-2 text-left text-sm hover:bg-muted">
               <TaskKey k={t.task} /> · {waitReason(t.reason)}
               {t.approval_required && <p className="text-xs text-muted-foreground">Founder approval required.</p>}
             </button>))}</div> : <Muted>No open tasks in the recent task window.</Muted>}
         <p className="mt-2 text-xs text-muted-foreground">Task eligibility is separate from provider capacity. No model is called by this view.</p>
       </Section>
-      <div><Button size="sm" onClick={runOnce}><Play />Check attended task plans</Button></div>
+      <div><Button type="button" size="sm" className="max-sm:h-11 max-sm:w-full" disabled={busy} onClick={runOnce}>{busy ? <Loader2 className="animate-spin" /> : <Play />}Check attended task plans</Button></div>
       {work !== null && (work === "paused" ? <Muted>Agent execution is paused. No models were called.</Muted>
         : work.length ? <><p className="text-sm"><b>{work.length}</b> attended task plan(s). Run on the laptop; approval gates still apply:</p><Pre>{work.join("\n")}</Pre></>
         : <Muted>No work for {a.key}. It stays asleep; no model was called.</Muted>)}
@@ -272,17 +276,17 @@ function AgentBody({ a }: { a: AgentDetail }) {
         <Facts items={[["Current task", a.current_task && `${a.current_task.key} · ${a.current_task.title}`],
           ["Last run", a.last_run && when(a.last_run)], ["Last success", a.last_success && when(a.last_success)], ["Cost today", usd(a.cost_today_usd)]]} />
       </Section>
-      {a.last_error && <Section title="Last recorded failure"><p className="text-sm">{a.last_error}</p><Muted>Historical information; current task eligibility is shown above.</Muted></Section>}
+      {a.last_error && <Section title="Last recorded failure"><p className="text-sm [overflow-wrap:anywhere]">{a.last_error}</p><Muted>Historical information; current task eligibility is shown above.</Muted></Section>}
       <Section title="Recent work">
         {a.recent_tasks.length ? <div className="grid grid-cols-1 gap-1.5">{a.recent_tasks.map(t => (
-          <button key={t.key} onClick={() => open({ kind: "task", key: t.key })}
-            className="flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-sm hover:bg-muted">
+          <button type="button" key={t.key} onClick={() => open({ kind: "task", key: t.key })}
+            className="flex items-center max-sm:min-h-11 gap-2 rounded-lg border px-2.5 py-2 text-left text-sm hover:bg-muted">
             <TaskKey k={t.key} /><span className="min-w-0 flex-1 truncate">{t.title}</span><Status value={t.status} />
           </button>))}</div> : <Muted>No task history.</Muted>}
       </Section>
       <Section title="Run history"><Runs runs={a.recent_runs ?? []} /></Section>
       <Section title="Learnings">
-        {a.recent_learnings.length ? a.recent_learnings.map(l => <p key={l.title} className="text-sm"><b>{l.title}</b><br /><Muted>{l.lesson}</Muted></p>) : <Muted>No related learnings.</Muted>}
+        {a.recent_learnings.length ? a.recent_learnings.map(l => <p key={l.title} className="text-sm [overflow-wrap:anywhere]"><b>{l.title}</b><br /><Muted>{l.lesson}</Muted></p>) : <Muted>No related learnings.</Muted>}
       </Section>
       <Section title="Notebook">
         {a.notebook.length ? a.notebook.map(n => <div key={n.note} className="flex gap-2 text-sm"><Tag>×{n.refs}</Tag><span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{n.note}</span><Muted className="shrink-0">{ago(n.last_seen_at)}</Muted></div>) : <Muted>No notebook entries.</Muted>}
@@ -302,7 +306,7 @@ function AgentBody({ a }: { a: AgentDetail }) {
 function CopyKey({ value }: { value: string }) {
   const [done, setDone] = useState(false)
   return (
-    <button aria-label={`Copy ${value}`} title="Copy key" className="grid size-5 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+    <button type="button" aria-label={`Copy ${value}`} title="Copy key" className="grid size-11 sm:size-6 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
       onClick={() => navigator.clipboard.writeText(value).then(() => { setDone(true); setTimeout(() => setDone(false), 1200) }, () => toast.error("Copy failed"))}>
       {done ? <Check className="size-3" /> : <Copy className="size-3" />}
     </button>

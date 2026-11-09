@@ -29,3 +29,13 @@ export function readyBlock(t: Pick<TaskDetail, "context" | "stage_c_authorizatio
   return isCodeWrite(t) && typeof why === "string"
     ? `Authorize Stage C first: no valid authorization covers this task yet (${why}).` : null
 }
+
+/** The agent sheet's "Check attended task plans" (POST /dispatch/run): "paused", or this agent's next commands.
+ *  A response without that shape throws, so the caller shows an error instead of an empty plan list. */
+export function attendedPlans(out: unknown, agent: string): string[] | "paused" {
+  const o = out as { paused?: unknown; work?: unknown } | null
+  if (!o || typeof o.paused !== "boolean" || !Array.isArray(o.work)) throw new Error("Unexpected /dispatch/run response")
+  if (o.paused) return "paused"
+  return (o.work as { agent?: unknown; next_command?: unknown }[])
+    .filter(w => w && w.agent === agent && typeof w.next_command === "string").map(w => w.next_command as string)
+}

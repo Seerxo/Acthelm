@@ -215,6 +215,20 @@ export function standingRevokeMessage(result: unknown): string {
   return revoked ? "Standing authorization revoked" : "No live standing grant — nothing was revoked"
 }
 
+/** The one-task revoke's toast, from the API's {revoked: bool} (mirrors standingRevokeMessage). */
+export function pilotRevokeMessage(result: unknown): string {
+  const revoked = obj(result).revoked
+  if (typeof revoked !== "boolean") throw new Error("Invalid one-task revoke response")
+  return revoked ? "One-task Stage C authorization revoked" : "No live one-task authorization — nothing was revoked"
+}
+
+/** Authorize Stage C minutes: the input keeps what was typed; the request gets 1–60 whole minutes, or nothing
+ *  (null) when the field does not hold a number. */
+export function clampMinutes(raw: string): number | null {
+  const n = Number(raw)
+  return raw.trim() === "" || !Number.isFinite(n) ? null : Math.max(1, Math.min(60, Math.round(n)))
+}
+
 export type CiKind = "passed" | "failed" | "running" | "outdated" | "observed" | "none" | "unknown"
 /** CI is success only when it ran on the PR's published head. Any disagreement reads "CI on outdated SHA". */
 export function ciView(t: Pick<Task, "pr" | "ci">): { kind: CiKind; label: string; tone: Tone; sha: string | null } {

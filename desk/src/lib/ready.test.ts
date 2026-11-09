@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { canOfferReady, readyBlock, readyNote } from "./ready.ts"
+import { attendedPlans, canOfferReady, readyBlock, readyNote } from "./ready.ts"
 
 const run = (status: string) => ({ id: 1, task: "T", status, provider: "claude", started_at: "x", ended_at: null, error: null, supervisor_verdict: null, supervisor_notes: null })
 
@@ -27,4 +27,10 @@ test("a code task waits for its Stage C authorization", () => {
   assert.equal(readyBlock({ ...code, stage_c_authorization: null }), null)
   assert.equal(readyBlock(code), null)   // older API: the server's refusal still applies
   assert.equal(readyBlock({ context: null, stage_c_authorization: "x" }), null)
+})
+
+test("attended plans: paused, this agent's commands only, and a malformed answer is an error", () => {
+  assert.equal(attendedPlans({ paused: true, work: [] }, "dev"), "paused")
+  assert.deepEqual(attendedPlans({ paused: false, work: [{ agent: "dev", next_command: "a" }, { agent: "ceo", next_command: "b" }] }, "dev"), ["a"])
+  for (const bad of [null, {}, { paused: false }, { paused: "no", work: [] }]) assert.throws(() => attendedPlans(bad, "dev"))
 })
