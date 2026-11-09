@@ -1,0 +1,12 @@
+# Runs scripts/stage-c-arm once: arms the Stage C worker only while the founder's one-task authorization
+# (Desk Start Pilot) exists, disarms it otherwise. Root, because it recreates the worker container.
+# flock keeps a manual run and the timer from acting at the same time; a busy lock skips this tick.
+[Unit]
+Description=Company OS Stage C worker arm/disarm (founder authorization bound)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/flock -n /run/stage-c-arm.lock /opt/company-os/scripts/stage-c-arm
+TimeoutStartSec=300

@@ -17,11 +17,12 @@ export interface DeliveryView {
   evidence: string[]          // short recorded facts: PR, CI, failed check, repairs, review verdict
 }
 
-export function deliveryView(i: Improvement): DeliveryView {
+/** `pr_verified` (app/desk.py): the PR number is proven to be this task's own PR. Missing = unverified, so no number. */
+export function deliveryView(i: Improvement & { pr_verified?: boolean }): DeliveryView {
   const index = DELIVERY_STAGES.findIndex(([k]) => k === i.stage)
   const ci = i.ci_state
   const evidence = [
-    i.pr_number != null ? `PR #${i.pr_number}` : null,
+    i.pr_number != null ? (i.pr_verified === true ? `PR #${i.pr_number}` : "PR unverified") : null,
     ci ? `CI ${ci.toLowerCase()}` : null,
     i.failed_check ? `failed: ${i.failed_check}` : null,
     i.repairs ? `${i.repairs} ${i.repairs === "1" ? "repair" : "repairs"}` : null,

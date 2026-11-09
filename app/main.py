@@ -1115,6 +1115,23 @@ def stage_c_authorize(body: schemas.StageCAuthorize, request: Request, db: Sessi
     return {k: value[k] for k in ("task_key", "source_sha", "expires_at", "issued_by", "action")}
 
 
+@app.post("/stage-c/tasks", status_code=201)
+def stage_c_task(body: schemas.StageCTask, request: Request, db: Session = Depends(get_db)) -> dict:
+    """The founder's code task: BACKLOG, LOW risk, developer, company-os, writing only allowed Stage C files.
+    Founder only, from the verified principal. It runs nothing: Authorize Stage C and Mark READY still decide."""
+    approval_identity.require_founder(request)
+    scope = {"paths": body.paths, "context": body.context}
+    if stage_c_worker.scope_refused(scope, set(stage_c_worker.task_paths())):
+        raise HTTPException(422, "paths must be distinct allowed Stage C files; context must be other app/ or tests/ "
+                                 ".py files (at most 10, 20 files in all)")
+    task = create_task(schemas.TaskCreate(
+        title=" ".join(body.title.split()), objective=body.objective, success_criteria=body.success_criteria,
+        status=enums.TaskStatus.BACKLOG, assigned_agent="developer", project="company-os",
+        risk_level=enums.RiskLevel.LOW, created_by="founder", reason="founder desk code task",
+        context={"autonomous": True, "write": True, "stage_c": scope}), db, request)
+    return {"key": task.key, "status": task.status.value}
+
+
 @app.post("/stage-c/reconcile-refresh", status_code=202)
 def stage_c_reconcile_refresh(body: schemas.StageCRefreshReconcile, request: Request,
                               db: Session = Depends(get_db)) -> dict:

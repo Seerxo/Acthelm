@@ -2,7 +2,7 @@
 // READY task for the CEO and nothing more; each later step is read from that task's own status (lib/lifecycle.ts), so
 // "sent" is never shown as "done". Search lives in ⌘K and never submits from here.
 import { useEffect, useRef, useState } from "react"
-import { ArrowUp, Loader2, SlidersHorizontal } from "lucide-react"
+import { ArrowUp, Loader2, SlidersHorizontal, Sparkles } from "lucide-react"
 import { commandLifecycle } from "@/lib/lifecycle"
 import { draftAfterSend } from "@/lib/draft"
 import { useData, useDesk, useDraft } from "@/state"
@@ -16,6 +16,9 @@ export function CommandComposer() {
   const { command, sent, compose, open } = useDesk()
   const { draft, setDraft, takeFocus, focusTick } = useDraft()
   const [busy, setBusy] = useState(false)
+  // One line until used: it opens on focus or while it holds a draft, so the field never takes half of Home.
+  const [focused, setFocused] = useState(false)
+  const wide = focused || draft.length > 0 || busy
   const area = useRef<HTMLTextAreaElement>(null)
   // A hand-off from search focuses the composer once it is on screen (here, not on a timer), caret at the end.
   useEffect(() => {
@@ -37,31 +40,36 @@ export function CommandComposer() {
   const status = (key: string) => d.tasks.find(t => t.key === key)?.status
   return (
     <section aria-label="Instruct the CEO" className="grid gap-3">
-      <form className="panel grid gap-2 p-3 focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30 sm:p-4" onSubmit={e => { e.preventDefault(); void send() }}>
-        <label htmlFor="ceo-command" className="sr-only">What should the company do?</label>
-        <textarea id="ceo-command" ref={area} value={draft} onChange={e => setDraft(e.target.value)} rows={2} maxLength={2000}
-          placeholder={`Tell the CEO what you want done, e.g. “${EXAMPLE}”`}
-          onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send() } }}
-          className="min-h-[4.5rem] w-full resize-none sm:min-h-14 bg-transparent text-[15px] leading-6 outline-none placeholder:text-muted-foreground/80" />
-        <div className="flex flex-wrap items-center justify-between gap-2">
+      <form className="panel grid gap-3 px-4 py-2.5 transition-shadow focus-within:border-ring focus-within:ring-4 focus-within:ring-ring/15"
+        onFocus={() => setFocused(true)} onBlur={e => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocused(false) }}
+        onSubmit={e => { e.preventDefault(); void send() }}>
+        <div className="flex min-w-0 items-start gap-3">
+          <Sparkles aria-hidden className="mt-2.5 size-4 shrink-0 text-muted-foreground" />
+          <label htmlFor="ceo-command" className="sr-only">What should the company do?</label>
+          <textarea id="ceo-command" ref={area} value={draft} onChange={e => setDraft(e.target.value)} rows={wide ? 3 : 1} maxLength={2000}
+            placeholder={wide ? `e.g. “${EXAMPLE}”` : "Tell the CEO what you want done…"}
+            onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send() } }}
+            className="min-h-9 w-full min-w-0 flex-1 resize-none bg-transparent py-1.5 text-sm leading-6 outline-none placeholder:text-muted-foreground" />
+        </div>
+        {wide && <div className="flex flex-wrap items-center justify-between gap-2 border-t pt-2.5">
           {/* POST /desk/command always records READY for the chosen agent (app/main.py); a pause is said, not hidden. */}
           <span className="text-xs text-muted-foreground">{d.control.agents_paused
             ? <>Recorded as a READY task for the CEO. <span className="text-warning">Agents are paused: it waits until you resume them.</span></>
             : "Recorded as a READY task for the CEO. Nothing runs until an agent picks it up."}</span>
           <span className="flex items-center gap-1.5">
-            <Button type="button" variant="ghost" size="sm" className="h-9 text-muted-foreground" disabled={busy} onClick={() => compose(true, draft)}>
+            <Button type="button" variant="ghost" size="sm" className="h-11 text-muted-foreground sm:h-9" disabled={busy} onClick={() => compose(true, draft)}>
               <SlidersHorizontal />More options</Button>
-            <Button type="submit" size="sm" className="h-9" disabled={busy || text.length < 3} aria-label="Send to the CEO">
+            <Button type="submit" size="sm" className="h-11 sm:h-9" disabled={busy || text.length < 3} aria-label="Send to the CEO">
               {busy ? <Loader2 className="animate-spin" /> : <ArrowUp />}Send<kbd className="ml-1 hidden text-[10px] opacity-70 sm:inline">⌘↵</kbd></Button>
           </span>
-        </div>
+        </div>}
       </form>
       {sent.length > 0 && (
         <ul aria-label="What you asked for" className="grid gap-1">
           {sent.slice(0, 3).map(c => (
             <li key={c.key}>
               <button type="button" onClick={() => open({ kind: "task", key: c.key })}
-                className="flex w-full min-w-0 items-center gap-3 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-ring">
+                className="flex min-h-11 w-full min-w-0 items-center gap-3 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-muted/50 focus-visible:outline-2 focus-visible:outline-ring">
                 <span className="min-w-0 flex-1 truncate">{c.text}</span>
                 <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{c.key}</span>
                 <CommandTrack l={commandLifecycle(status(c.key), true)} compact />

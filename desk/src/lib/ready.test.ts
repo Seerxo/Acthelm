@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { canOfferReady, readyNote } from "./ready.ts"
+import { attendedPlans, canOfferReady, readyBlock, readyNote } from "./ready.ts"
 
 const run = (status: string) => ({ id: 1, task: "T", status, provider: "claude", started_at: "x", ended_at: null, error: null, supervisor_verdict: null, supervisor_notes: null })
 
@@ -19,4 +19,18 @@ test("the dialog says when READY will not make the worker run it", () => {
   assert.match(readyNote({ context: null })!, /Not opted in/)
   assert.equal(readyNote({ context: { autonomous: true }, retry_count: 1, max_attempts: 3 }), null)
   assert.equal(readyNote({ context: { autonomous: true } }), null)   // older API: no counts, no claim
+})
+
+test("a code task waits for its Stage C authorization", () => {
+  const code = { context: { write: true } }
+  assert.match(readyBlock({ ...code, stage_c_authorization: "stage_c_authorization_missing" })!, /Authorize Stage C first.*missing/)
+  assert.equal(readyBlock({ ...code, stage_c_authorization: null }), null)
+  assert.equal(readyBlock(code), null)   // older API: the server's refusal still applies
+  assert.equal(readyBlock({ context: null, stage_c_authorization: "x" }), null)
+})
+
+test("attended plans: paused, this agent's commands only, and a malformed answer is an error", () => {
+  assert.equal(attendedPlans({ paused: true, work: [] }, "dev"), "paused")
+  assert.deepEqual(attendedPlans({ paused: false, work: [{ agent: "dev", next_command: "a" }, { agent: "ceo", next_command: "b" }] }, "dev"), ["a"])
+  for (const bad of [null, {}, { paused: false }, { paused: "no", work: [] }]) assert.throws(() => attendedPlans(bad, "dev"))
 })

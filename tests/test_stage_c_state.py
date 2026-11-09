@@ -77,13 +77,29 @@ def db(env):
     return Session(env[0])
 
 
+def test_pf_names(env):
+    names = [f"acceptance:{name}" for name in sorted(stage_c_worker.ACCEPTANCE_CHECKS)]
+    cases = [(["acceptance:claude_edit"], ["acceptance:claude_edit"]),
+             (["not_a_check", "acceptance:unknown", {}, 7], ["other"] * 4),
+             (["source_sha"] * 11, ["source_sha"] * 10)]
+    cases += [(names[i:i + 10], names[i:i + 10]) for i in range(0, len(names), 10)]
+    for failed, expected in cases:
+        with db(env) as s:
+            s.merge(models.ControlState(key=stage_c_worker.RUNTIME_READINESS_KEY, updated_by="watchdog",
+                                        value={"ready": False, "source_sha": SHA, "checked_at": NOW.isoformat(),
+                                               "failed": failed}))
+            s.commit()
+        pre = get(env)["runtime"]["preflight"]
+        assert pre["status"] == "FAIL" and pre["failed"] == expected
+
+
 # ---------------------------------------------------------------------------------------------- authorization
 @pytest.mark.parametrize("mode", ["enforce", "log"])
 @pytest.mark.parametrize("label,headers,host,code", [
     ("anonymous", {}, "172.18.0.5", 401), ("youtube", _bearer(YT), "172.18.0.5", 403),
     ("desk token", _bearer(DESK), "172.18.0.5", 403), ("admin", _bearer(ADMIN), "172.18.0.5", 403),
     ("local", {}, "127.0.0.1", 403), ("host", {}, "10.0.6.1", 403)])
-def test_only_the_verified_founder_reads_the_stage_c_state(env, monkeypatch, mode, label, headers, host, code):
+def test_founder_only_read(env, monkeypatch, mode, label, headers, host, code):
     monkeypatch.setenv("API_AUTH_MODE", mode)
     r = _c(host).get("/stage-c/state", headers=headers)
     assert r.status_code == code, (label, mode, r.text)
@@ -106,7 +122,7 @@ def test_the_contract_has_exactly_these_keys(env, monkeypatch):
         task(s, history=hist, approval=approval)
     out = get(env)
     assert set(out) == {"version", "generated_at", "state", "blockers", "next_action", "last_ready_pr", "runtime",
-                        "authorizations", "tasks", "metrics"}
+                        "authorizations", "tasks", "metrics", "code_task_paths"}
     assert out["version"] == 1
     assert set(out["runtime"]) == {"api_sha", "worker_sha", "sha_agree", "worker_heartbeat", "write_enabled",
                                    "worker_ready", "agents_paused", "acceptance", "preflight", "reasoner_sha",
@@ -116,7 +132,7 @@ def test_the_contract_has_exactly_these_keys(env, monkeypatch):
                                               "api_sha": "RECORDED", "worker_sha": "RECORDED"}
     assert set(out["last_ready_pr"]) == {"task_key", "number", "head_sha", "stage"}
     assert set(out["runtime"]["acceptance"]) == {"source_sha", "accepted_at", "valid"}
-    assert set(out["runtime"]["preflight"]) == {"status", "checked_at", "source_sha"}
+    assert set(out["runtime"]["preflight"]) == {"status", "checked_at", "source_sha", "failed"}
     assert set(out["authorizations"]) == {"one_task", "standing"}
     assert set(out["authorizations"]["one_task"]) == {"task_key", "source_sha", "expires_at", "revoked", "issuer", "status"}
     assert set(out["authorizations"]["standing"]) == {"source_sha", "paths", "expires_at", "max_per_day", "used_today",
@@ -379,7 +395,8 @@ def test_runtime_gates(env, monkeypatch, label, kw, state, blocker):
 def test_no_watchdog_preflight_is_not_verified_and_no_acceptance_is_null_not_false(env, monkeypatch):
     heartbeat(monkeypatch)
     out = get(env)
-    assert out["runtime"]["preflight"] == {"status": "NOT_VERIFIED", "checked_at": None, "source_sha": None}
+    assert out["runtime"]["preflight"] == {"status": "NOT_VERIFIED", "checked_at": None, "source_sha": None,
+                                         "failed": None}
     assert out["runtime"]["acceptance"] == {"source_sha": None, "accepted_at": None, "valid": None}
     assert out["state"] == "BLOCKED" and "host_not_accepted" in out["blockers"]
 
@@ -391,7 +408,8 @@ def test_an_extreme_readiness_timestamp_is_stale(env, monkeypatch):
         row = s.get(models.ControlState, stage_c_worker.RUNTIME_READINESS_KEY)
         row.value = {**row.value, "checked_at": "0001-01-01T00:00:00+23:00"}
         s.commit()
-    assert get(env)["runtime"]["preflight"] == {"status": "STALE", "checked_at": None, "source_sha": SHA}
+    assert get(env)["runtime"]["preflight"] == {"status": "STALE", "checked_at": None, "source_sha": SHA,
+                                                       "failed": None}
 
 
 @pytest.mark.parametrize("source", ["readiness", "heartbeat"])
@@ -727,7 +745,7 @@ def test_task_counts_do_not_count_attempts_and_unrecorded_model_splits_are_absen
     ([], "none"), (["sha_mismatch", "no_authorization"], "redeploy_one_sha"),
     (["preflight_stale", "task_needs_founder"], "run_preflight"), (["standing_expired"], "issue_authorization"),
     (["one_task_consumed", "standing_daily_limit"], "wait_daily_reset")])
-def test_next_action_is_a_fixed_code_from_the_blockers(blockers, action):
+def test_next_action_code(blockers, action):
     from app import stage_c_state
     assert stage_c_state._next_action(blockers) == action
 

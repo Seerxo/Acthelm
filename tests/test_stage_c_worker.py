@@ -1684,9 +1684,10 @@ def test_a_takeover_between_the_claim_and_the_coder_never_reaches_the_coder(monk
     assert task.assigned_agent_id == db.query(models.Agent).filter_by(key="ceo").one().id
 
 
-@pytest.mark.parametrize("role", [("FAIL", "the token can write seerxo/acthelm (push)"),
-                                  ("UNKNOWN", "GitHub refused or failed the role read")])
-def test_write_granted_after_admission_stops_the_push(monkeypatch, tmp_path, role):
+@pytest.mark.parametrize("role,code", [(("FAIL", "the token can write seerxo/acthelm (push)"), "upstream_role_not_read_only"),
+                                       (("UNKNOWN", "GitHub refused or failed the role read"), "upstream_role_unverified")],
+                         ids=["fail", "unknown"])
+def test_write_granted_after_admission_stops_the_push(monkeypatch, tmp_path, role, code):
     # Break caught (#192): admission trusts a preflight up to 15 min old; Write granted to the agent account in
     # that window let the attempt push upstream-capable credentials. The role is re-read at the push itself.
     hooks = {}
@@ -1700,9 +1701,9 @@ def test_write_granted_after_admission_stops_the_push(monkeypatch, tmp_path, rol
     assert pushed.returncode != 0                                                # nothing reached the remote
     attempt = db.query(models.AgentRun).filter_by(task_id=task.id).order_by(models.AgentRun.id.desc()).first()
     assert attempt.tool_calls.get("outcome") == "PUBLISHED_PR_REFUSED"
-    assert attempt.error == "upstream_role_not_read_only"
-    # A security event, not capacity: no silent READY loop; the founder sees why on the Desk.
-    assert task.status == enums.TaskStatus.BLOCKED and task.error.startswith("upstream_role_not_read_only")
+    assert attempt.error == code
+    # Not capacity: no silent READY loop; the founder sees the actual cause (unsafe token vs unreadable token).
+    assert task.status == enums.TaskStatus.BLOCKED and task.error.startswith(code)
 
 
 def test_takeover_after_the_pr_guard_but_before_publication_prevents_the_push(monkeypatch, tmp_path):
@@ -2267,3 +2268,29 @@ def test_closed_pr_without_head_data_does_not_abandon():
 def test_repair_stage_without_history_is_unreadable():
     task = SimpleNamespace(context={"improvement": {"stage": "IMPLEMENTING"}})
     assert stage_c_worker.published_pr(task) == {"pr": None, "unreadable_history": True}
+
+
+def test_retry_after_push_refused(monkeypatch, tmp_path):
+    """TASK-0007 (2026-11-09): the push was refused (403) after the commit; the retry took the recovery path, found no
+    remote branch and stopped PR_FAILED forever. An unpushed commit is undone, so the retry pushes normally."""
+    remote = pipeline(monkeypatch, tmp_path)
+    real, refused = stage_c_runner._git, []
+
+    def git(repo, *args, **kw):
+        if "push" in args and not refused:
+            refused.append(1)
+            raise subprocess.CalledProcessError(128, ["git", "push"], b"", b"403")
+        return real(repo, *args, **kw)
+    monkeypatch.setattr(stage_c_runner, "_git", git)
+    db = _db()
+    task = write_task(db)
+    ps = {n: Reviewer(n) for n in ("claude", "codex")}
+    worker.run_once(db, ps, SPECS)
+    assert refused and task.context["improvement"]["stage"] != "PR_OPEN"
+    task.status = enums.TaskStatus.READY
+    db.commit()
+    out = worker.run_once(db, ps, SPECS)
+    assert task.context["improvement"]["stage"] == "PR_OPEN", out
+    head = subprocess.run(["git", "--git-dir", str(remote), "rev-parse", f"refs/heads/task/{task.key}"],
+                          capture_output=True, text=True)
+    assert head.returncode == 0

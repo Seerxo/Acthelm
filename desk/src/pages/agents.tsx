@@ -1,35 +1,41 @@
 // The autonomous workforce. Identity and reporting come from the registry; status, current task and failures from runtime
 // evidence; each agent's workload is counted from the task list (task.agent). Nothing here predicts an agent's next task:
 // the API does not report one, so a lane shows what is held and what is recorded, never what might come next.
-import { ArrowUpRight, ChevronRight } from "lucide-react"
+import { ChevronRight } from "lucide-react"
 import type { Agent, TaskRow } from "@/lib/api"
 import { ago, capacity } from "@/lib/format"
 import { GROUPS, groupOf, type Group } from "@/lib/task-story"
 import { useChange, useData, useDesk, useNow } from "@/state"
 import { agentState, foldable } from "@/lib/agent-state"
 import { cn } from "@/lib/utils"
-import { Calm, ChangeMark, DOT, Expandable, FigureStrip, Muted, PageHeader, Status, TaskKey } from "@/components/desk"
+import { mergedAwaitingAcceptance } from "@/lib/qa-status"
+import { Calm, ChangeMark, Disclosure, DOT, Expandable, FigureStrip, Muted, PageHeader, Status, TaskKey } from "@/components/desk"
+import { AgentsSwitch } from "@/components/controls"
 
 const short = (name: string) => name.replace(/ Agent$/, "")
 const LANE: Group[] = ["attention", "running", "review", "next", "waiting"]   // open work, in the order it needs attention
 const LABEL: Partial<Record<Group, string>> = { attention: "stopped", running: "running", review: "in review", next: "queued", waiting: "waiting outside" }
 
 /** One agent's own tasks by group. Failed and blocked are named separately because they need different action. */
-function workload(tasks: TaskRow[], done = tasks.filter(t => t.status === "DONE").length) {
-  const by = (g: Group) => tasks.filter(t => groupOf(t.status) === g).length
+function workload(tasks: TaskRow[], done = tasks.filter(t => t.status === "DONE").length, merged: Set<string> = new Set()) {
+  // A REVIEW task whose PR is merged is named as merged, not "in review" (lib/qa-status.ts).
+  const by = (g: Group) => tasks.filter(t => groupOf(t.status) === g && !(g === "review" && merged.has(t.key))).length
+  const mergedN = tasks.filter(t => groupOf(t.status) === "review" && merged.has(t.key)).length
   const failed = tasks.filter(t => t.status === "FAILED").length, blocked = tasks.filter(t => t.status === "BLOCKED").length
   const approval = tasks.filter(t => t.status === "WAITING_APPROVAL").length
   const parts = [failed && `${failed} failed`, blocked && `${blocked} blocked`, approval && `${approval} awaiting approval`,
-    ...LANE.filter(g => g !== "attention").map(g => by(g) && `${by(g)} ${LABEL[g]}`), done && `${done} done`].filter(Boolean) as string[]
-  return { open: LANE.reduce((n, g) => n + by(g), 0), segments: LANE.map(g => ({ g, n: by(g) })).filter(s => s.n), parts }
+    ...LANE.filter(g => g !== "attention").map(g => by(g) && `${by(g)} ${LABEL[g]}`), mergedN && `${mergedN} merged, awaiting acceptance`, done && `${done} done`].filter(Boolean) as string[]
+  const open = LANE.reduce((n, g) => n + by(g), 0) + mergedN
+  const segments = LANE.map(g => ({ g, n: by(g) + (g === "review" ? mergedN : 0) })).filter(s => s.n)
+  return { open, segments, parts }
 }
 
-function AgentLane({ agent, tasks, reportsTo }: { agent: Agent; tasks: TaskRow[]; reportsTo: string }) {
+function AgentLane({ agent, tasks, reportsTo, merged }: { agent: Agent; tasks: TaskRow[]; reportsTo: string; merged: Set<string> }) {
   const { open } = useDesk()
   const title = agent.current_task?.title
   const st = agentState(agent, useData(), useNow("minute"))
   const availability = st.value
-  const w = workload(tasks, agent.tasks_done)
+  const w = workload(tasks, agent.tasks_done, merged)
   const changed = useChange("agent", agent.key)
   return (
     <button type="button" onClick={() => open({ kind: "agent", key: agent.key })}
@@ -46,7 +52,7 @@ function AgentLane({ agent, tasks, reportsTo }: { agent: Agent; tasks: TaskRow[]
       </span>
       {/* current work */}
       <span className="grid min-w-0 content-start gap-1.5">
-        <span className="eyebrow">Current work</span>
+        <span className="eyebrow lg:sr-only">Current work</span>
         {agent.current_task
           ? <span className="min-w-0 text-[13px] leading-5 [overflow-wrap:anywhere]"><TaskKey k={agent.current_task.key} /> <span className="font-medium">{agent.current_task.title}</span>
               <span className="text-muted-foreground"> · task {agent.current_task.status.toLowerCase().replaceAll("_", " ")}</span></span>
@@ -56,7 +62,7 @@ function AgentLane({ agent, tasks, reportsTo }: { agent: Agent; tasks: TaskRow[]
       </span>
       {/* workload */}
       <span className="grid min-w-0 content-start gap-1.5">
-        <span className="eyebrow">Workload · {w.open} open</span>
+        <span className="eyebrow"><span className="lg:sr-only">Workload · </span>{w.open} open</span>
         {w.segments.length
           ? <span className="flex h-1.5 overflow-hidden rounded-full bg-border" role="img" aria-label={w.parts.join(", ")}>
               {w.segments.map(s => <i key={s.g} className={DOT[GROUPS.find(x => x.key === s.g)!.tone]} style={{ width: `${(s.n / w.open) * 100}%` }} />)}
@@ -68,7 +74,6 @@ function AgentLane({ agent, tasks, reportsTo }: { agent: Agent; tasks: TaskRow[]
         <span><span className="text-foreground/80">Last run</span> {agent.last_run ? `${ago(agent.last_run)} ago` : "not recorded"}</span>
         <span><span className="text-foreground/80">Last success</span> {agent.last_success ? `${ago(agent.last_success)} ago` : "not recorded"}</span>
         <span className="truncate"><span className="text-foreground/80">Reports to</span> {reportsTo}</span>
-        <span className="mt-1 flex items-center gap-1 text-muted-foreground transition-colors group-hover:text-foreground">Open<ArrowUpRight className="size-3" /></span>
       </span>
     </button>
   )
@@ -81,7 +86,7 @@ function Organisation({ agents }: { agents: Agent[] }) {
   const under = (k: string) => agents.filter(a => a.reports_to === k)
   const loose = agents.filter(a => a.reports_to !== "founder" && !agents.some(m => m.key === a.reports_to))
   return (
-    <section aria-label="Reporting lines" className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl border bg-card px-4 py-2.5 text-[13px]">
+    <section aria-label="Reporting lines" className="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
       <span className="eyebrow mr-1">Reporting</span>
       <span className="font-medium">Founder</span>
       {top.map(t => <span key={t.key} className="contents">
@@ -98,9 +103,9 @@ function Organisation({ agents }: { agents: Agent[] }) {
 function Providers() {
   const d = useData()
   const w = d.worker
-  if (!w?.providers || !Object.keys(w.providers).length) return <p className="text-xs text-muted-foreground">Provider capacity is not reported by this API.</p>
+  if (!w?.providers || !Object.keys(w.providers).length) return <p className="text-xs text-muted-foreground">Providers: not reported</p>
   return (
-    <section aria-label="Model providers" className="flex flex-wrap items-center gap-x-5 gap-y-1.5 rounded-xl border bg-card px-4 py-2.5 text-[13px]">
+    <section aria-label="Model providers" className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[13px]">
       <span className="eyebrow">Providers</span>
       {Object.keys(w.providers).sort().map(name => {
         const c = capacity(name, w)
@@ -123,17 +128,20 @@ export function AgentsPage() {
   const n = (s: string) => d.agents.filter(a => (s === "RUNNING" ? agentState(a, d, now).running : a.status === s)).length
   const name = (key: string | null) => key ? short(d.agents.find(a => a.key === key)?.name ?? key) : "—"
   const mine = (a: Agent) => d.tasks.filter(t => t.agent === a.key)
+  const merged = new Set((d.improvements ?? []).filter(i => mergedAwaitingAcceptance("REVIEW", i.stage) && (i as { pr_verified?: unknown }).pr_verified === true).map(i => i.task))
   // An agent with no open task, no held task, no recorded failure and a calm state folds under one line; anything else
   // stays in view. Only a named calm state folds; anything else (unknown, stalled, waiting, unconfirmed) stays visible.
   const calm = (a: Agent) => foldable(a, d, now, workload(mine(a)).open)
   const busy = d.agents.filter(a => !calm(a)), quiet = d.agents.filter(calm)
   const lanes = (list: Agent[], label: string) => (
     <section aria-label={label} className="panel grid min-w-0 grid-cols-1 divide-y divide-border/70">
-      {list.map(agent => <AgentLane key={agent.key} agent={agent} tasks={mine(agent)}
+      <div aria-hidden className="grid gap-x-6 rounded-t-[inherit] bg-muted/30 px-5 py-2 text-xs font-medium text-muted-foreground max-lg:hidden lg:grid-cols-[minmax(0,13rem)_minmax(0,1fr)_minmax(0,15rem)_minmax(0,9rem)]">
+        <span>Agent</span><span>Current work</span><span>Workload</span><span>Activity</span></div>
+      {list.map(agent => <AgentLane key={agent.key} agent={agent} tasks={mine(agent)} merged={merged}
         reportsTo={agent.reports_to === "founder" ? "Founder" : name(agent.reports_to)} />)}
     </section>)
   return <>
-    <PageHeader title="Agents" description="The autonomous workforce: what each agent holds, its workload and what last failed." />
+    <PageHeader title="Agents"><AgentsSwitch /></PageHeader>
     {d.agents.length > 0 && <FigureStrip label="Agents at a glance" items={[
       // Zero running is a count, not a verdict: idle agents with READY work can be the problem (lib/operating.ts decides health).
       { label: "Running now", value: String(n("RUNNING")), sub: n("RUNNING") ? "executing a task" : "none executing; not a health signal" },
@@ -143,12 +151,12 @@ export function AgentsPage() {
       { label: "Idle with work", value: String(d.agents.filter(a => ["SLEEPING", "IDLE"].includes(a.status) && a.current_task).length),
         tone: d.agents.some(a => ["SLEEPING", "IDLE"].includes(a.status) && a.current_task) ? "warning" : undefined, sub: "holds a task but is not running it" },
     ]} />}
-    {d.agents.length > 0 && <div className="grid min-w-0 grid-cols-1 gap-2 xl:grid-cols-2"><Organisation agents={d.agents} /><Providers /></div>}
     {!d.agents.length ? <Calm title="No agents synced">The registry has not been synced to the database yet.</Calm> : (
       <div className="grid min-w-0 gap-3">
         {busy.length > 0 ? lanes(busy, "Agents with work") : <p className="text-sm text-muted-foreground">No agent holds open work or has a recorded failure.</p>}
         {quiet.length > 0 && <Expandable summary={<span className="text-[13px]"><span className="font-medium">{quiet.length} {quiet.length === 1 ? "agent" : "agents"} with nothing open</span>
           <Muted> · {quiet.map(a => short(a.name)).join(", ")}</Muted></span>}>{lanes(quiet, "Agents with nothing open")}</Expandable>}
+        <Disclosure title="Details" hint="reporting lines · model providers"><Organisation agents={d.agents} /><Providers /></Disclosure>
       </div>
     )}
   </>

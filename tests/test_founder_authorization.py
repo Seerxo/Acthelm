@@ -408,6 +408,32 @@ def test_only_the_verified_founder_can_resume_agents(env, monkeypatch, mode, lab
     assert r.status_code in (401, 403) and _paused(engine) == before, (label, mode)
 
 
+def test_accept_done_founder_only(env, monkeypatch):
+    """The Desk's "Accept as done" (POST /tasks/{key}/status DONE + evidence): every other caller is refused."""
+    engine, _ = env
+
+    def status():
+        with Session(engine) as s:
+            return s.scalar(select(models.Task.status).where(models.Task.key == "TASK-0045"))
+    with Session(engine) as s:
+        s.scalar(select(models.Task).where(models.Task.key == "TASK-0045")).status = enums.TaskStatus.REVIEW
+        s.commit()
+    body = {"status": "DONE", "actor": "founder", "evidence": "https://github.com/seerxo/acthelm/pull/77 merge " + "e" * 40}
+    for mode in ("enforce", "log"):
+        monkeypatch.setenv("API_AUTH_MODE", mode)
+        for label, headers, host in CALLERS:
+            r = _c(host).post("/tasks/TASK-0045/status", json=body, headers=headers)
+            assert r.status_code in (401, 403) and status() == enums.TaskStatus.REVIEW, (label, mode)
+    monkeypatch.setenv("API_AUTH_MODE", "enforce")
+    no_evidence = {k: v for k, v in body.items() if k != "evidence"}
+    assert _founder().post("/tasks/TASK-0045/status", json=no_evidence, headers=ASSERT).status_code == 422
+    r = _founder().post("/tasks/TASK-0045/status", json=body, headers=ASSERT)
+    assert r.status_code == 200 and r.json()["status"] == "DONE" and status() == enums.TaskStatus.DONE
+    with Session(engine) as s:
+        row = s.scalar(select(models.AuditLog).where(models.AuditLog.action == "task.status"))
+        assert row.actor == FID and row.reason == body["evidence"]
+
+
 def test_pause_stays_an_operator_emergency_stop_and_resume_names_the_founder(env):
     engine, _ = env
     r = _c("127.0.0.1").post("/control/agents", json={"paused": True, "actor": "founder", "reason": "runaway"})

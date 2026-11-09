@@ -58,6 +58,7 @@ The Access founder can reach the two routes through `api_auth.FOUNDER_SCOPE`; th
 | `POST /approvals/{key}` granting HIGH/CRITICAL | Founder-only | verified founder; operators may reject, and decide LOW/MEDIUM as themselves |
 | `POST /learnings/{id}/approve` | Founder-only, enforce-always | `require_founder`; locks the row; audit actor = `Principal.id` |
 | `POST /stage-c/authorization` | Founder-only, enforce-always | `require_founder`; SHA is the deployed SHA (API and worker must agree); task, repository, action, TTL <= 60 min bound and audited |
+| `POST /stage-c/tasks` | Founder-only, enforce-always | `require_founder`; creates a BACKLOG LOW-risk developer task in `company-os` whose write paths must be allowed Stage C files (422 otherwise); it runs nothing until authorized and made READY |
 | `POST /control/agents` resume | Founder-only | `require_founder`; pausing (emergency stop) stays open to every authorized caller and records the real principal |
 | `POST /stage-c/authorization/revoke` | Founder or host operator, enforce-always | withdrawing authority is the safe direction; audit names who |
 | `POST /experiments...` founder steps (approve, accept, reject) | Founder-only, enforce-always | route layer is Agent 3's; contract below |

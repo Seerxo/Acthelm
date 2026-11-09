@@ -10,6 +10,17 @@ export const CONTRACT_VERSION = 1
 export const BADGES = ["ACTIVE", "READY", "BLOCKED", "FAILED", "EXPIRED", "UNKNOWN", "NOT_VERIFIED"] as const
 export type Badge = (typeof BADGES)[number]
 export const PREFLIGHT = ["PASS", "FAIL", "STALE", "NOT_VERIFIED"] as const
+// app/stage_c_preflight.py check names, including the host acceptance checks.
+const PREFLIGHT_CHECKS = [
+  "source_sha", "api_worker_sha_agree", "acceptance_recorded", "acceptance_source_sha", "launcher",
+  "coder_image", "checks_image", "checks_command", "egress_proxy", "coder_logins", "codex_reviewer_volume",
+  "claude_auth", "jobs_directory", "repository_mirror", "github_credential", "independent_providers",
+  "guardian_policy", "allowed_repository", "allowed_branch", "project_profiles", "db_project_repository",
+  "worker_identity", "github_commit_statuses", "github_actions",
+  ...["image_build", "egress", "launcher", "permissions", "direct_egress_blocked", "github_blocked",
+    "random_hosts_blocked", "provider_hosts", "claude_edit", "codex_review_probe", "offline_checks",
+    "credential_isolation"].map(name => `acceptance:${name}`),
+]
 export const GRANT = ["ACTIVE", "CONSUMED", "EXPIRED", "DAILY_LIMIT", "INVALID", "REVOKED", "SHA_MISMATCH"] as const
 export const CI = ["SUCCESS", "FAILURE", "PENDING", "STALE", "MERGED_OBSERVED"] as const
 export const TASK_STATUS = ["IDEA", "BACKLOG", "READY", "QUEUED", "IN_PROGRESS", "WAITING_EXTERNAL", "WAITING_APPROVAL", "BLOCKED", "REVIEW", "FAILED", "DONE", "CANCELLED"] as const
@@ -63,13 +74,15 @@ export interface StageCState {
     worker_heartbeat: (typeof HEARTBEAT)[number] | U; write_enabled: boolean | null; worker_ready: boolean | null
     agents_paused: boolean | null
     acceptance: { source_sha: string | null; accepted_at: string | null; valid: boolean | null }
-    preflight: { status: (typeof PREFLIGHT)[number] | U; checked_at: string | null; source_sha: string | null }
+    preflight: { status: (typeof PREFLIGHT)[number] | U; checked_at: string | null; source_sha: string | null; failed: string[] | null }
     host_facts: "NOT_VERIFIED"
   }
   /** null = explicitly absent; undefined = missing or malformed, existence unknown. */
   authorizations: { one_task: OneTask | null | undefined; standing: Standing | null | undefined }
   tasks: Task[] | null
   metrics: Metrics
+  /** The files a new code task may change (POST /stage-c/tasks re-checks); null = not reported. */
+  code_task_paths: string[] | null
 }
 
 // --------------------------------------------------------------------------- primitives
@@ -145,7 +158,9 @@ export function parseStageC(raw: unknown): StageCState {
       worker_heartbeat: oneOf(rt.worker_heartbeat, HEARTBEAT), write_enabled: bool(rt.write_enabled),
       worker_ready: bool(rt.worker_ready), agents_paused: bool(rt.agents_paused),
       acceptance: { source_sha: sha(acc.source_sha), accepted_at: ts(acc.accepted_at), valid: bool(acc.valid) },
-      preflight: { status: oneOf(pre.status, PREFLIGHT), checked_at: ts(pre.checked_at), source_sha: sha(pre.source_sha) },
+      preflight: { status: oneOf(pre.status, PREFLIGHT), checked_at: ts(pre.checked_at), source_sha: sha(pre.source_sha),
+        failed: Array.isArray(pre.failed) ? pre.failed.slice(0, 10).map(f =>
+          typeof f === "string" && PREFLIGHT_CHECKS.includes(f) ? f : "other") : null },
       host_facts: "NOT_VERIFIED",   // the API cannot see host facts; whatever it sends, the Desk does not claim them
     },
     authorizations: { one_task: one, standing },
@@ -157,6 +172,7 @@ export function parseStageC(raw: unknown): StageCState {
       model_calls: count(calls), minutes: num(m.minutes), tokens: count(m.tokens), usd_recorded: num(m.usd_recorded),
       quota_stops: count(m.quota_stops), truncated: bool(m.truncated),
     },
+    code_task_paths: Array.isArray(r.code_task_paths) ? r.code_task_paths.map(path).filter((p): p is string => p !== null) : null,
   }
 }
 
@@ -209,6 +225,20 @@ export function standingRevokeMessage(result: unknown): string {
   const revoked = obj(result).revoked
   if (typeof revoked !== "boolean") throw new Error("Invalid standing revoke response")
   return revoked ? "Standing authorization revoked" : "No live standing grant — nothing was revoked"
+}
+
+/** The one-task revoke's toast, from the API's {revoked: bool} (mirrors standingRevokeMessage). */
+export function pilotRevokeMessage(result: unknown): string {
+  const revoked = obj(result).revoked
+  if (typeof revoked !== "boolean") throw new Error("Invalid one-task revoke response")
+  return revoked ? "One-task Stage C authorization revoked" : "No live one-task authorization — nothing was revoked"
+}
+
+/** Authorize Stage C minutes: the input keeps what was typed; the request gets 1–60 whole minutes, or nothing
+ *  (null) when the field does not hold a number. */
+export function clampMinutes(raw: string): number | null {
+  const n = Number(raw)
+  return raw.trim() === "" || !Number.isFinite(n) ? null : Math.max(1, Math.min(60, Math.round(n)))
 }
 
 export type CiKind = "passed" | "failed" | "running" | "outdated" | "observed" | "none" | "unknown"

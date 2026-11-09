@@ -43,11 +43,17 @@ test("a blocked task stops at its first unfinished step with the error; later st
 test("a code mission follows its recorded Stage C history; an unrecorded past stage is not claimed done", () => {
   const history = [{ stage: "DETECTED", at: "2026-10-20T10:00:00Z" }, { stage: "PLANNED", at: "2026-10-20T10:01:00Z" },
     { stage: "PR_OPEN", at: "2026-10-20T10:30:00Z", evidence: { pr: "https://github.com/Seerxo/os/pull/371", commit: "abcdef1234567" } }]
-  const steps = taskPipeline(task({ status: "REVIEW", context: { improvement: { stage: "PR_OPEN", history } } }))
+  const pull_request = { verified: true, merged: false, number: 371, url: "https://github.com/Seerxo/os/pull/371", commit: "abcdef1234567", merge_commit: null }
+  const steps = taskPipeline(task({ status: "REVIEW", pull_request, context: { improvement: { stage: "PR_OPEN", history } } }))
   const by = Object.fromEntries(steps.map(s => [s.key, s]))
   assert.equal(by.DETECTED.state, "done"); assert.equal(by.IMPLEMENTING.state, "pending")   // no record
   assert.equal(by.PR_OPEN.state, "current"); assert.match(by.PR_OPEN.detail!, /PR #371 · abcdef1/)
   assert.equal(by.PR_OPEN.href, "https://github.com/Seerxo/os/pull/371")
+  // Without the backend's verified publication there is no link; a disagreement says so.
+  const bare = taskPipeline(task({ status: "REVIEW", context: { improvement: { stage: "PR_OPEN", history } } })).find(s => s.key === "PR_OPEN")!
+  assert.equal(bare.href, undefined)
+  const off = taskPipeline(task({ status: "REVIEW", pull_request: { ...pull_request, verified: false }, context: { improvement: { stage: "PR_OPEN", history } } }))
+  assert.equal(off.find(s => s.key === "PR_OPEN")!.href, undefined); assert.match(off.find(s => s.key === "PR_OPEN")!.detail!, /PR link unverified/)
   assert.equal(by.DETECTED.href, undefined)                                     // no recorded URL, no link
   assert.equal(by.CI.state, "pending"); assert.equal(by.MERGED.state, "pending")
 })

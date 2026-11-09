@@ -2,6 +2,7 @@
 import functools
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from statistics import median
 
@@ -13,7 +14,8 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from pathlib import Path
 
-from app import business_reconciler, enums, goals, metrics_store, models, reconciler_heartbeat, watchdog, worker
+from app import (business_reconciler, control, enums, goals, metrics_store, models, reconciler_heartbeat, stage_c_ci,
+                 stage_c_worker, watchdog, worker)
 from app.notify import NotificationService
 from app.redact import MAX_SCAN_CHARS, redact
 
@@ -100,6 +102,31 @@ def _artifacts_view(artifacts) -> dict | None:
         view["actions"] = [_clean(a, worker.MAX_ACTION_CHARS) for a in artifacts["actions"][:worker.MAX_ACTIONS]
                            if isinstance(a, str)]
     return view or None
+
+
+def _pull_request(task: models.Task) -> dict | None:
+    """The task's PR as the backend verified it (lib/accept.ts): only the latest PR_OPEN publication on this
+    deployment's upstream (stage_c_worker.published_pr_number), and only while task.artifacts name the same PR and
+    commit. Anything else is `verified: false` with no link. Merged binds to that publication's commit."""
+    ev = stage_c_ci.publication(task)
+    if ev is None:
+        return None
+    number, art = stage_c_worker.published_pr_number(task), task.artifacts if isinstance(task.artifacts, dict) else {}
+    merge = {}
+    if not ev.get("unreadable_history"):
+        for step in reversed(task.context["improvement"]["history"]):
+            if step.get("stage") == "PR_OPEN":
+                break
+            if step.get("stage") == "MERGED":
+                merge = step.get("evidence") if isinstance(step.get("evidence"), dict) else {}
+                break
+    commit = ev.get("commit")
+    verified = (number is not None and isinstance(commit, str) and re.fullmatch(r"[0-9a-fA-F]{40}", commit) is not None
+                and art.get("pr") == ev["pr"] and art.get("commit") == commit
+                and (not merge or (merge.get("pr_number") == number and merge.get("commit") == commit)))
+    out = {"verified": verified, "merged": verified and bool(merge), "commit": _scalar(commit),
+           "merge_commit": _scalar(merge.get("merge_commit"))}
+    return {**out, "number": number, "url": ev["pr"]} if verified else out
 
 
 def origin(task: models.Task) -> dict:
@@ -397,10 +424,22 @@ def improvements(tasks: list) -> list[dict]:
         ev = {}
         for step in imp.get("history", []):
             ev.update(step.get("evidence") or {})
+        pr = _pull_request(t)
+        verified = bool(pr and pr["verified"]
+                        and ("pr_number" not in ev or ev["pr_number"] == pr["number"])
+                        and ("repository" not in ev or ev["repository"] == stage_c_worker.REPOSITORY)
+                        and (imp["stage"] not in ("MERGED", "VERIFYING") or pr["merged"]))
         out.append({"task": t.key, "title": _clean(t.title), "stage": _scalar(imp["stage"]),
+                    # The task detail's verified-publication rule, so a list chip never shows an unverified PR number.
+                    "pr_verified": verified,
+                    "pr_number": pr.get("number") if pr else None,
+                    # Once a PR is published, its identity is the publication's (this deployment's upstream; later
+                    # evidence naming another repository only refuses pr_verified above). Before any PR, the
+                    # improvement's own target repository is shown, so unpublished rows keep where they will land.
+                    "repository": stage_c_worker.REPOSITORY if pr else _scalar(ev.get("repository")),
                     "updated_at": imp["history"][-1]["at"] if imp.get("history") else None,
                     **{k: _scalar(ev.get(k))
-                       for k in ("repository", "branch", "pr_number", "pr_state",
+                       for k in ("branch", "pr_state",
                                  "ci_state", "failed_check", "repairs",
                                  "review_verdict", "risk", "expected_effect",
                                  "verified_at")}})
@@ -821,8 +860,12 @@ def task_detail(db: Session, task: models.Task) -> dict:
         "approval_required": task.approval_required,
         # Attempts used and allowed: the worker stops retrying at the limit (the Desk says so before Mark READY).
         "retry_count": task.retry_count, "max_attempts": task.max_attempts,
+        # A code task's Stage C authorization as Mark READY will check it: null when one covers it, else a fixed code.
+        "stage_c_authorization": control.write_authorization_denial(db, task, os.environ.get("COMPANY_OS_GIT_SHA", ""))
+        if isinstance(task.context, dict) and task.context.get("write") is True else None,
         "dependencies": [{"key": d.key, "status": d.status.value} for d in dependencies],
         "runs": [_run(r, task.key) for r in run_rows],
+        "pull_request": _pull_request(task),
         "artifacts": _artifacts_view(task.artifacts), "result": _clean(task.result), "error": _clean(task.error),
         "supervisor": ({"verdict": verdict.supervisor_verdict.value,
                         "notes": _clean(verdict.supervisor_notes)} if verdict else None),

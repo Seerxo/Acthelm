@@ -76,6 +76,7 @@ def test_the_coder_reads_the_module_it_tests_and_is_told_it_is_read_only(monkeyp
     assert "return sum(values)" in seen["context"]
     assert f"reading only; never change them: {CONTEXT}" in seen["prompt"]
     assert "You may edit only: tests/test_metrics.py" in seen["prompt"]
+    assert "never copy phrases from them" in seen["prompt"]   # task text is private to the privacy gate
 
 
 def test_an_edit_to_a_read_only_file_is_refused(monkeypatch, tmp_path):

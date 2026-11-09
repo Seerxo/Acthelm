@@ -101,22 +101,33 @@ def admission(db, task):
         return "stage_c_repository_refused"
     if policy["branches"].get(repository) != profile["target_branch"]:
         return "stage_c_branch_refused"
-    scope = ctx.get("stage_c")
+    return "stage_c_scope_refused" if scope_refused(ctx.get("stage_c"), profile_paths) else None
+
+
+def scope_refused(scope, profile_paths) -> bool:
+    """A task's `context.stage_c` is refused: write paths outside the profile, or read-only context that is not."""
     paths = scope.get("paths") if isinstance(scope, dict) else None
     if (not isinstance(paths, list) or not 1 <= len(paths) <= 20
             or not all(isinstance(p, str) and coder_source._safe_path(p) and p in profile_paths
                        for p in paths) or len(set(paths)) != len(paths)
             or not {"paths"} <= set(scope) <= {"paths", "context"}):
-        return "stage_c_scope_refused"
+        return True
     # Read-only context: any safe repository file the coder may read; never write scope (run() refuses edits).
     context = scope.get("context", [])
-    if (not isinstance(context, list) or len(context) > stage_c_runner.MAX_CONTEXT_FILES
+    return (not isinstance(context, list) or len(context) > stage_c_runner.MAX_CONTEXT_FILES
             or len(paths) + len(context) > 20     # coder_source exports at most 20 files in all
             or not all(isinstance(p, str) and coder_source._safe_path(p) and p not in paths
                        and p.startswith(("app/", "tests/")) and p.endswith(".py") for p in context)
-            or len(set(context)) != len(context)):
-        return "stage_c_scope_refused"
-    return None
+            or len(set(context)) != len(context))
+
+
+def task_paths() -> list[str]:
+    """The files a founder may name as a new code task's write scope: the current executor profile ∩ SAFE_FILES."""
+    try:
+        executor = project_profiles.current_executor(project_profiles.load(), REPOSITORY, "sez-company")
+    except Exception:
+        return []
+    return sorted(set(executor["allowed_paths"]) & SAFE_FILES) if executor else []
 
 
 def publication_role() -> tuple[str, str]:
@@ -406,7 +417,10 @@ def execute(db, task, spec, usable):
                             role, _ = publication_role()
                             if role != "PASS":
                                 db.commit()
-                                raise PublishedPRRefused("upstream_role_not_read_only")
+                                # FAIL = GitHub says the token can write upstream; anything else = GitHub did not
+                                # answer (expired/revoked token, network). Both stop the push; the cause differs.
+                                raise PublishedPRRefused("upstream_role_not_read_only" if role == "FAIL"
+                                                         else "upstream_role_unverified")
                         out = stage_c_runner.publish(db, task, job, diff, worktree,
                                 f"https://github.com/{head_repository}.git",
                                 stage_c_runner.gh_pr_opener(REPOSITORY, "main", head_repository),
@@ -501,8 +515,14 @@ def execute(db, task, spec, usable):
                 # A token that can write upstream is a security event, not capacity: stop retrying and
                 # leave it on the founder's Desk until the agent account is back to Read.
                 task.status = enums.TaskStatus.BLOCKED
-                task.error = ("upstream_role_not_read_only: the worker token is not verified read-only on "
+                task.error = ("upstream_role_not_read_only: GitHub reports a worker token can write "
                               f"{REPOSITORY}; restore the agent account to Read, then set READY")
+            elif out["reason"] == "upstream_role_unverified":
+                # Unconfirmed is not unsafe: usually an expired or revoked token. Still no push, still the founder's.
+                task.status = enums.TaskStatus.BLOCKED
+                task.error = ("upstream_role_unverified: GitHub did not confirm a worker token's role on "
+                              f"{REPOSITORY} (expired, revoked or unreadable token); renew it on the Stage C host, "
+                              "then set READY")
         run.status = enums.AgentRunStatus.FAILED
         run.error = out["reason"]
         run.tool_calls = {**run.tool_calls, "attempts": [{"health": "DISABLED"}], "capacity_failure": True}

@@ -4,7 +4,8 @@
 import { useState } from "react"
 import { AlertTriangle, Check, Loader2, Pause, Play, RotateCw, ShieldCheck, ShieldOff, X } from "lucide-react"
 import type { Approval } from "@/lib/api"
-import { standingRevokeMessage } from "@/lib/stage-c"
+import { clampMinutes, pilotRevokeMessage, standingRevokeMessage } from "@/lib/stage-c"
+import { acceptBody } from "@/lib/accept"
 import { cn } from "@/lib/utils"
 import { useData, useDesk } from "@/state"
 import { Facts, Status } from "@/components/desk"
@@ -39,7 +40,7 @@ function HighRiskApprove({ a, onConfirm, trigger }: { a: Approval; onConfirm: ()
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction className="min-h-10" disabled={typed.trim() !== a.key} onClick={onConfirm}>Approve {a.key}</AlertDialogAction>
+          <AlertDialogAction className="min-h-10 max-sm:h-11" disabled={typed.trim() !== a.key} onClick={onConfirm}>Approve {a.key}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
@@ -55,7 +56,7 @@ export function ApprovalDecision({ a, compact }: { a: Approval; compact?: boolea
     await act(`/approvals/${encodeURIComponent(a.key)}`, { granted, decided_by: "founder", notes: "decided from Founder Desk" }, `${a.key} ${granted ? "approved" : "rejected"}`)
     setBusy(null)
   }
-  const size = compact ? "h-8 px-2.5 text-xs" : "h-10 px-4"
+  const size = compact ? "h-8 px-2.5 text-xs max-sm:h-11" : "h-10 px-4 max-sm:h-11"
   const spin = <Loader2 className="animate-spin" />
   const approve = <Button className={size} disabled={!!busy} aria-label={compact ? `Approve ${a.key}` : undefined}>
     {busy === "approve" ? spin : <Check />}Approve</Button>
@@ -92,8 +93,8 @@ export function AgentsSwitch({ className, iconOnPhone }: { className?: string; i
     <Confirm title={`${paused ? "Resume" : "Pause"} autonomous agents?`} action={paused ? "Resume agents" : "Pause agents"} destructive={!paused}
       description={<p>{paused ? "Agents may pick up READY work again. Resuming needs your verified founder sign-in." : "Autonomous execution stops; queued work waits."} Production services keep running either way.</p>}
       onConfirm={() => void flip()}>
-      <Button variant={paused ? "default" : "outline"} disabled={busy} aria-label={iconOnPhone ? label : undefined}
-        className={cn("h-10", !paused && "text-destructive hover:text-destructive", iconOnPhone && "max-sm:w-10 max-sm:px-0", className)}>
+      <Button variant="outline" disabled={busy} aria-label={iconOnPhone ? label : undefined}
+        className={cn("h-10 max-sm:h-11", !paused && "text-destructive hover:text-destructive", iconOnPhone && "max-sm:w-10 max-sm:px-0", className)}>
         {busy ? <Loader2 className="animate-spin" /> : paused ? <Play /> : <Pause />}<span className={cn(iconOnPhone && "max-sm:sr-only")}>{label}</span></Button>
     </Confirm>
   )
@@ -108,7 +109,7 @@ export function RetryDelivery({ eventId, compact }: { eventId: number; compact?:
     <Confirm title={`Retry delivery of event ${eventId}?`} action="Retry delivery"
       description={<p>Telegram may already have received this alert; a retry can send it twice. Check Telegram first, then retry only if it did not arrive.</p>}
       onConfirm={() => { setBusy(true); void act(`/notifications/${eventId}/retry`, {}, `Delivery of event ${eventId} retried`).finally(() => setBusy(false)) }}>
-      <Button variant="outline" disabled={busy} className={compact ? "h-8 px-2.5 text-xs" : "h-10"}>
+      <Button variant="outline" disabled={busy} className={compact ? "h-8 px-2.5 text-xs max-sm:h-11" : "h-10 max-sm:h-11"}>
         {busy ? <Loader2 className="animate-spin" /> : <RotateCw />}Retry delivery</Button>
     </Confirm>
   )
@@ -124,7 +125,7 @@ export function ApproveLearning({ id, title, lesson, onDone }: { id: number; tit
       description={<><p className="font-medium text-foreground">{title}</p><p>{lesson}</p><p>Agents load approved learnings as instructions.</p></>}
       onConfirm={() => { setBusy(true); void act(`/learnings/${id}/approve`, { actor: "founder", reason: "approved from Founder Desk" }, "Learning approved")
         .then(ok => { if (ok) onDone() }).finally(() => setBusy(false)) }}>
-      <Button size="sm" disabled={busy} className="w-fit">{busy ? <Loader2 className="animate-spin" /> : <Check />}Approve</Button>
+      <Button size="sm" disabled={busy} className="w-fit max-sm:h-11">{busy ? <Loader2 className="animate-spin" /> : <Check />}Approve</Button>
     </Confirm>
   )
 }
@@ -132,22 +133,23 @@ export function ApproveLearning({ id, title, lesson, onDone }: { id: number; tit
 /** Authorize one Stage C attempt for one task (POST /stage-c/authorization): high risk, so the task key is typed. The
  *  server binds it to the deployed SHA, caps it at 60 minutes and refuses if API and worker disagree. It enables
  *  nothing by itself: the global flag, host acceptance and readiness still apply. The answer is shown as returned. */
-export function AuthorizeStageC({ taskKey }: { taskKey: string }) {
+export function AuthorizeStageC({ taskKey, primary }: { taskKey: string; primary?: boolean }) {
   const { act } = useDesk()
   const [typed, setTyped] = useState("")
-  const [minutes, setMinutes] = useState(30)
+  const [raw, setRaw] = useState("30")   // what was typed; clamped only when sent (lib/stage-c.ts clampMinutes)
+  const minutes = clampMinutes(raw)
   const [busy, setBusy] = useState(false)
   return (
     <AlertDialog onOpenChange={() => setTyped("")}>
-      <AlertDialogTrigger asChild><Button variant="outline" disabled={busy} className="h-9">{busy ? <Loader2 className="animate-spin" /> : <ShieldCheck />}Authorize Stage C</Button></AlertDialogTrigger>
+      <AlertDialogTrigger asChild><Button variant={primary ? "default" : "outline"} disabled={busy} className="h-9 max-sm:h-11">{busy ? <Loader2 className="animate-spin" /> : <ShieldCheck />}Authorize Stage C</Button></AlertDialogTrigger>
       <AlertDialogContent className="border-warning/40">
         <AlertDialogHeader>
           <AlertDialogTitle className="flex items-center gap-2"><AlertTriangle className="size-4 text-warning" />Authorize one autonomous coding attempt</AlertDialogTitle>
           <AlertDialogDescription asChild>
             <div className="grid gap-3 text-sm">
-              <p>One attempt on <span className="font-mono text-foreground">{taskKey}</span>, bound to the deployed commit, for at most {minutes} minutes. It enables nothing on its own: the Stage C flag, host acceptance and readiness still decide.</p>
+              <p>One attempt on <span className="font-mono text-foreground">{taskKey}</span>, bound to the deployed commit, for at most {minutes ?? "1–60"} minutes. It enables nothing on its own: the Stage C flag, host acceptance and readiness still decide.</p>
               <label className="grid gap-1.5 text-muted-foreground"><span>Minutes (1–60)</span>
-                <Input type="number" min={1} max={60} value={minutes} onChange={e => setMinutes(Math.max(1, Math.min(60, Number(e.target.value) || 30)))} aria-label="Minutes" /></label>
+                <Input type="number" inputMode="numeric" min={1} max={60} value={raw} onChange={e => setRaw(e.target.value)} aria-label="Minutes" /></label>
               <label className="grid gap-1.5 text-muted-foreground"><span>Type <span className="font-mono text-foreground">{taskKey}</span> to authorize</span>
                 <Input value={typed} onChange={e => setTyped(e.target.value)} autoComplete="off" spellCheck={false} aria-label={`Type ${taskKey} to authorize`} /></label>
             </div>
@@ -155,8 +157,9 @@ export function AuthorizeStageC({ taskKey }: { taskKey: string }) {
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction disabled={typed.trim() !== taskKey}
-            onClick={() => { setBusy(true); void act("/stage-c/authorization", { task_key: taskKey, minutes }, `Stage C authorized for ${taskKey} (${minutes} min)`).finally(() => setBusy(false)) }}>
+          <AlertDialogAction className="max-sm:h-11" disabled={typed.trim() !== taskKey || minutes === null}
+            onClick={() => { if (minutes === null) return; setRaw(String(minutes)); setBusy(true)
+              void act("/stage-c/authorization", { task_key: taskKey, minutes }, `Stage C authorized for ${taskKey} (${minutes} min)`).finally(() => setBusy(false)) }}>
             Authorize {taskKey}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
@@ -170,8 +173,10 @@ export function RevokeStageC() {
   const [busy, setBusy] = useState(false)
   const revoke = async () => {
     setBusy(true)
-    const a = await act("/stage-c/authorization/revoke", { reason: "revoked from Founder Desk" }, "One-task Stage C authorization revoked")
-    const b = await act("/stage-c/standing/revoke", { reason: "revoked from Founder Desk" }, "Standing Stage C authorization revoked")
+    // Each call reports its own answer; a failed or empty first revoke is never shown as success, and the standing
+    // revoke still runs, since withdrawing authority is always safe.
+    const a = await act("/stage-c/authorization/revoke", { reason: "revoked from Founder Desk" }, pilotRevokeMessage)
+    const b = await act("/stage-c/standing/revoke", { reason: "revoked from Founder Desk" }, standingRevokeMessage)
     setBusy(false)
     return a && b
   }
@@ -179,7 +184,7 @@ export function RevokeStageC() {
     <Confirm title="Revoke all Stage C authority?" action="Revoke" destructive
       description={<p>Withdraws the one-task and the standing Stage C authorizations, so no new autonomous coding attempt can start under them.</p>}
       onConfirm={() => void revoke()}>
-      <Button variant="outline" disabled={busy} className="h-9 text-destructive hover:text-destructive">{busy ? <Loader2 className="animate-spin" /> : <ShieldOff />}Revoke Stage C authority</Button>
+      <Button variant="outline" disabled={busy} className="h-9 text-destructive hover:text-destructive max-sm:h-11">{busy ? <Loader2 className="animate-spin" /> : <ShieldOff />}Revoke Stage C authority</Button>
     </Confirm>
   )
 }
@@ -204,7 +209,7 @@ export function RevokeStanding({ onDone }: { onDone: () => void }) {
 /** "Mark READY": hand a stopped or not-yet-released task to the worker (POST /tasks/{key}/status, verified founder
  *  only; lib/ready.ts decides when it is offered). The dialog names the task, its current status and what READY does;
  *  the API's refusal (an open run, or for code writes a missing Stage C condition) is shown as returned, never as done. */
-export function MarkReady({ taskKey, status, codeWrite, note }: { taskKey: string; status: string; codeWrite: boolean; note?: string | null }) {
+export function MarkReady({ taskKey, status, codeWrite, note, blocked, primary }: { taskKey: string; status: string; codeWrite: boolean; note?: string | null; blocked?: boolean; primary?: boolean }) {
   const { act } = useDesk()
   const [busy, setBusy] = useState(false)
   return (
@@ -215,7 +220,28 @@ export function MarkReady({ taskKey, status, codeWrite, note }: { taskKey: strin
         {codeWrite && <p>This task writes code. The API makes it READY only if agents are running, autonomous code writing is on, the host acceptance and preflight are current for the deployed commit, an unexpired Stage C authorization covers it, and no published pull request owns it. Otherwise it refuses and says why.</p>}
       </>}
       onConfirm={() => { setBusy(true); void act(`/tasks/${encodeURIComponent(taskKey)}/status`, { status: "READY", actor: "founder", reason: "Marked READY from Founder Desk" }, `${taskKey} is READY`).finally(() => setBusy(false)) }}>
-      <Button size="sm" className="h-9" disabled={busy}>{busy ? <Loader2 className="animate-spin" /> : <Play />}Mark READY</Button>
+      <Button size="sm" variant={primary ? "default" : "outline"} className="h-9 max-sm:h-11" disabled={busy || blocked}>{busy ? <Loader2 className="animate-spin" /> : <Play />}Mark READY</Button>
+    </Confirm>
+  )
+}
+
+/** "Accept as done": the founder closes a REVIEW task as DONE (POST /tasks/{key}/status, verified founder only; the API
+ *  requires evidence). lib/accept.ts decides when it is offered and builds the evidence; the API's answer is shown as
+ *  returned, and nothing is shown as done before it. */
+/** `primary` marks it as the screen's one primary action (the detail sheet decides which control that is). */
+export function AcceptDone({ taskKey, evidence, merged, primary }: { taskKey: string; evidence: string; merged: boolean; primary?: boolean }) {
+  const { act } = useDesk()
+  const [busy, setBusy] = useState(false)
+  return (
+    <Confirm title={`Accept ${taskKey} as done?`} action="Accept as done"
+      description={<>
+        <Facts items={[["Task", <span key="k" className="font-mono">{taskKey}</span>], ["Now", <Status key="s" value="REVIEW" />], ["After", "DONE: closed; the agent does nothing further"]]} />
+        <p>{merged ? "The pull request is merged. This records it as done with this evidence:" : "No pull request: you accept the recorded result yourself. The evidence recorded is:"}</p>
+        <p className="font-mono text-xs text-foreground [overflow-wrap:anywhere]">{evidence}</p>
+      </>}
+      onConfirm={() => { setBusy(true); void act(`/tasks/${encodeURIComponent(taskKey)}/status`, acceptBody(evidence),
+        r => `${taskKey} is ${(r as { status?: string } | null)?.status ?? "updated"}`).finally(() => setBusy(false)) }}>
+      <Button size="sm" variant={primary ? "default" : "outline"} className="h-9 max-sm:h-11" disabled={busy}>{busy ? <Loader2 className="animate-spin" /> : <Check />}Accept as done</Button>
     </Confirm>
   )
 }
