@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type ComponentProps } from "react"
 import { ChevronRight, Code2, Plus, Search, Sparkles } from "lucide-react"
 import { deliveryView } from "@/lib/delivery"
 import { pageTitle } from "@/lib/nav"
-import { ago } from "@/lib/format"
+import { ago, humanize } from "@/lib/format"
 import { api, type TaskRow } from "@/lib/api"
 import { codeTaskBody } from "@/lib/founder-forms"
 import { parseStageC } from "@/lib/stage-c"
@@ -217,7 +217,7 @@ function TaskLine({ t, reason, paused }: { t: TaskRow; reason?: string; paused: 
   const changed = useChange("task", t.key)
   const merged = rowMerged(t.status, mission)   // a merged PR reads Merged, never In review (lib/accept.ts)
   return (
-    <PanelRow onClick={() => open({ kind: "task", key: t.key })} label={`${t.title}: ${t.status}`} className={changed && "desk-flash"}
+    <PanelRow onClick={() => open({ kind: "task", key: t.key })} label={`${t.title}, ${merged ? "Merged" : humanize(t.status)}`} className={changed && "desk-flash"}
       lead={<Dot tone={tone} live={t.status === "IN_PROGRESS"} />}
       title={<span className="flex min-w-0 items-center gap-2">
         <span className="truncate">{t.title}</span>

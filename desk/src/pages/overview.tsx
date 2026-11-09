@@ -90,12 +90,10 @@ export function Overview() {
   const now = useNow("minute")
   const read = useStageC()
   const sc = stageCOnHost(read.state)   // null on hosts without Stage C (production): its parts are hidden, not broken
-  const base = operating(d, { stale, now })
-  // operating() does not count PRs to merge, results to accept or Stage C blockers; never say "normal" above them.
+  // One list for the header, the "Decisions for you" vital and the panel below, so their counts always agree.
   const needs = needsYou(d, sc)
   const n = needs.items.length
-  const op = base.level === "normal" && n ? { ...base, tone: "warning" as const, headline: `${n} ${n === 1 ? "item needs" : "items need"} you`,
-    primary: { label: "See what needs you", target: { page: "needs-you" } } } : base
+  const op = operating(d, { stale, now, decisions: needs.items })
 
   // The status strip: the same sources as System, Agents and the cards below, so nothing disagrees.
   const checks = systemChecks(d, now), health = healthSummary(systemChecks(d, now))

@@ -176,7 +176,7 @@ test("a long current task wraps in full on agent cards; it is never truncated", 
 test("the Overview headline comes from lib/operating, never from the API's optimistic system_health", () => {
   // overview.system_health is HEALTHY unless a SEV0/1 or failing service exists; it ignores a stopped worker and backups.
   const overview = readFileSync(new URL("../pages/overview.tsx", import.meta.url), "utf8")
-  assert.match(overview, /operating\(d, \{ stale, now \}\)/)
+  assert.match(overview, /operating\(d, \{ stale, now, decisions: needs\.items \}\)/)
   assert.doesNotMatch(overview, /system_health/)
 })
 
@@ -186,6 +186,8 @@ test("work rows say what happens next and, for stopped work, the recorded reason
   assert.match(tasks, /const merged = rowMerged\(t\.status, mission\)/)   // a merged PR is not "agent finished"...
   assert.match(tasks, /nextLine\(t, \{ reason, paused, merged \}\)/)
   assert.match(tasks, /<Status value=\{t\.status\} tone=\{tone\} label=\{merged \? "Merged" : undefined\} \/>/)   // ...nor "In review"
+  // The row's accessible name reads the same words as its visible status, never a raw code like IN_PROGRESS.
+  assert.match(tasks, /label=\{`\$\{t\.title\}, \$\{merged \? "Merged" : humanize\(t\.status\)\}`\}/)
   assert.match(tasks, /flex min-w-0 items-center gap-2/)   // title and its priority/risk tags stay together
 })
 
