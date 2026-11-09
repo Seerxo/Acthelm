@@ -67,6 +67,51 @@ def readable(argv, **kwargs):
     return SimpleNamespace(returncode=0, stdout='{"workflow_runs": []}' if "/actions/" in argv[-1] else "[]")
 
 
+@pytest.mark.parametrize("actions", [True, False], ids=["a", "s"])
+@pytest.mark.parametrize("recovers", [True, False], ids=["ok", "bad"])
+@pytest.mark.parametrize("first", [
+    pf.subprocess.TimeoutExpired(["gh"], 10, stderr="secret"),
+    OSError("secret"), pf.subprocess.SubprocessError("secret"),
+    SimpleNamespace(returncode=1, stdout="", stderr="network secret"),
+    SimpleNamespace(returncode=1, stdout="", stderr="HTTP 502 secret"),
+    SimpleNamespace(returncode=0, stdout="not json: secret"),
+    SimpleNamespace(returncode=0, stdout='{"message": "secret"}'),
+], ids=["time", "os", "proc", "net", "502", "json", "body"])
+def test_retry(actions, recovers, first):
+    calls, delays = [], []
+    path = "repos/seerxo/acthelm/" + ("actions/runs?per_page=1" if actions else "commits/a/statuses?per_page=1")
+    env = {"GH_TOKEN": "read", "GH_PR_TOKEN": "other"}
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        result = readable(argv) if recovers and len(calls) == 2 else first
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    state, detail = pf._github_read(path, actions=actions, env=env, run=run, sleep=delays.append)
+    assert state == ("PASS" if recovers else "UNKNOWN")
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert calls[0] == (["gh", "api", "--method", "GET", path],
+                        {"env": env, "capture_output": True, "text": True, "timeout": 10})
+    assert calls[0][1]["env"] is env and delays == [2]
+    assert "secret" not in detail
+
+
+@pytest.mark.parametrize("code", [401, 403, 404])
+@pytest.mark.parametrize("prefix", ["", "HTTP 502\n"], ids=["one", "mix"])
+def test_denied(code, prefix):
+    calls, delays = [], []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=1, stdout="", stderr=f"{prefix}HTTP {code} secret")
+
+    state, detail = pf._github_read("actions", actions=True, env={}, run=run, sleep=delays.append)
+    assert state == "FAIL" and len(calls) == 1 and delays == []
+    assert "secret" not in detail
+
+
 def status(report, name):
     return next(c["status"] for c in report["checks"] if c["name"] == name)
 
