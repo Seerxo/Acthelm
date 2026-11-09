@@ -129,7 +129,7 @@ def test_desk_lists_improvements_in_flight_with_latest_evidence():
     rows = desk.improvements([live, done, plain])
     assert [r["task"] for r in rows] == ["TASK-0050"]
     assert rows[0] | {"updated_at": None} == {
-        "task": "TASK-0050", "title": "fix ci", "stage": "PLANNED", "updated_at": None,
+        "task": "TASK-0050", "title": "fix ci", "stage": "PLANNED", "updated_at": None, "pr_verified": False,
         "repository": "o/r", "branch": "task/TASK-0050", "pr_number": None, "pr_state": None,
         "ci_state": None, "failed_check": None, "repairs": None, "review_verdict": None,
         "risk": "MEDIUM", "expected_effect": None, "verified_at": None}

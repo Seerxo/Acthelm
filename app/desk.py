@@ -433,7 +433,10 @@ def improvements(tasks: list) -> list[dict]:
                     # The task detail's verified-publication rule, so a list chip never shows an unverified PR number.
                     "pr_verified": verified,
                     "pr_number": pr.get("number") if pr else None,
-                    "repository": stage_c_worker.REPOSITORY if pr and pr["verified"] else None,
+                    # Once a PR is published, its identity is the publication's (this deployment's upstream; later
+                    # evidence naming another repository only refuses pr_verified above). Before any PR, the
+                    # improvement's own target repository is shown, so unpublished rows keep where they will land.
+                    "repository": stage_c_worker.REPOSITORY if pr else _scalar(ev.get("repository")),
                     "updated_at": imp["history"][-1]["at"] if imp.get("history") else None,
                     **{k: _scalar(ev.get(k))
                        for k in ("branch", "pr_state",
