@@ -5,6 +5,7 @@ import { useState } from "react"
 import { AlertTriangle, Check, Loader2, Pause, Play, RotateCw, ShieldCheck, ShieldOff, X } from "lucide-react"
 import type { Approval } from "@/lib/api"
 import { standingRevokeMessage } from "@/lib/stage-c"
+import { acceptBody } from "@/lib/accept"
 import { cn } from "@/lib/utils"
 import { useData, useDesk } from "@/state"
 import { Facts, Status } from "@/components/desk"
@@ -216,6 +217,26 @@ export function MarkReady({ taskKey, status, codeWrite, note, blocked }: { taskK
       </>}
       onConfirm={() => { setBusy(true); void act(`/tasks/${encodeURIComponent(taskKey)}/status`, { status: "READY", actor: "founder", reason: "Marked READY from Founder Desk" }, `${taskKey} is READY`).finally(() => setBusy(false)) }}>
       <Button size="sm" className="h-9" disabled={busy || blocked}>{busy ? <Loader2 className="animate-spin" /> : <Play />}Mark READY</Button>
+    </Confirm>
+  )
+}
+
+/** "Accept as done": the founder closes a REVIEW task as DONE (POST /tasks/{key}/status, verified founder only; the API
+ *  requires evidence). lib/accept.ts decides when it is offered and builds the evidence; the API's answer is shown as
+ *  returned, and nothing is shown as done before it. */
+export function AcceptDone({ taskKey, evidence, merged }: { taskKey: string; evidence: string; merged: boolean }) {
+  const { act } = useDesk()
+  const [busy, setBusy] = useState(false)
+  return (
+    <Confirm title={`Accept ${taskKey} as done?`} action="Accept as done"
+      description={<>
+        <Facts items={[["Task", <span key="k" className="font-mono">{taskKey}</span>], ["Now", <Status key="s" value="REVIEW" />], ["After", "DONE: closed; the agent does nothing further"]]} />
+        <p>{merged ? "The pull request is merged. This records it as done with this evidence:" : "No pull request: you accept the recorded result yourself. The evidence recorded is:"}</p>
+        <p className="font-mono text-xs text-foreground [overflow-wrap:anywhere]">{evidence}</p>
+      </>}
+      onConfirm={() => { setBusy(true); void act(`/tasks/${encodeURIComponent(taskKey)}/status`, acceptBody(evidence),
+        r => `${taskKey} is ${(r as { status?: string } | null)?.status ?? "updated"}`).finally(() => setBusy(false)) }}>
+      <Button size="sm" variant={merged ? "default" : "outline"} className="h-9" disabled={busy}>{busy ? <Loader2 className="animate-spin" /> : <Check />}Accept as done</Button>
     </Confirm>
   )
 }

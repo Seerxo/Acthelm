@@ -2,6 +2,7 @@
 // status, owner, timestamps, error, supervisor verdict and dependencies; nothing is invented and nothing is promoted
 // (REVIEW is never "done", queued is never "running", a missing reason says it is missing).
 import type { TaskDetail, TaskRow, Tone } from "./api"
+import { mergedForReview } from "./accept.ts"
 
 /** Founder-facing groups, in the order the Work page shows them. */
 export type Group = "attention" | "running" | "review" | "next" | "waiting" | "backlog" | "closed"
@@ -74,10 +75,13 @@ export function story(t: TaskDetail, opts: { paused?: boolean } = {}): Story {
     : null
   const tone: Tone = stopped ? "danger" : ["WAITING_APPROVAL", "WAITING_EXTERNAL", "REVIEW"].includes(t.status) ? "warning"
     : t.status === "IN_PROGRESS" ? "info" : "neutral"
-  const now = t.status === "BLOCKED" ? "Stopped. It will not continue on its own"
+  // A merged PR is not "agent finished": only the founder's acceptance is left (DONE is founder-only).
+  const merged = mergedForReview(t)
+  const now = merged ? "Merged. Waiting for you to accept it as done"
+    : t.status === "BLOCKED" ? "Stopped. It will not continue on its own"
     : t.status === "FAILED" ? "Failed. It will not retry on its own"
     : nextLine({ status: t.status, agent: t.assigned_agent }, { paused: opts.paused })
-  const next = ({
+  const next = merged ? "Accept as done." : ({
     WAITING_APPROVAL: "It continues after the approval is granted in Approvals.",
     BLOCKED: "It stays blocked until the cause is fixed, then it can be re-queued.",
     FAILED: "It will not retry on its own. Reassign it or create a follow-up task.",

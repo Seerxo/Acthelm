@@ -241,8 +241,9 @@ test("task and agent sheets give their content an explicit shrinkable column", (
 // Live data (2026-10-16): 27 tasks in review made the Work page 3,700 px and buried Up next and Waiting outside.
 test("Work collapses groups in overview filters, but never Needs attention, and a search opens what it finds", () => {
   const tasks = readFileSync(new URL("../pages/tasks.tsx", import.meta.url), "utf8")
-  assert.match(tasks, /const open = isOpen\(g\.key, g\.tasks, \{ overview, searching, manual: manual\[g\.key\] \}\)/)
+  // Lanes (lib/task-lanes.ts): Needs you holds Needs attention, so it opens as attention does.
+  assert.match(tasks, /const open = isOpen\(g\.key === "needs" \? "attention" : "running", g\.tasks, \{ overview, searching, manual: manual\[g\.key\] \}\)/)
   assert.match(tasks, /const searching = q !== "" \|\| unit !== "all"/)
-  assert.match(tasks, /aria-expanded=\{open\} disabled=\{g\.key === "attention"\}/)
+  assert.match(tasks, /aria-expanded=\{open\} disabled=\{g\.key === "needs"\}/)
   assert.doesNotMatch(tasks, /slice\(0, CAP\)/)                      // nothing is cut: a closed group opens in full
 })

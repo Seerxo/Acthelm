@@ -21,7 +21,8 @@ import {
 import { ErrorBoundary } from "@/components/error-boundary"
 import { checkAgentDetail, checkTaskDetail } from "@/lib/validate"
 import { canOfferReady, isCodeWrite, readyBlock, readyNote } from "@/lib/ready"
-import { AuthorizeStageC, MarkReady } from "@/components/controls"
+import { AcceptDone, AuthorizeStageC, MarkReady } from "@/components/controls"
+import { acceptOffer, mergedForReview, prLink } from "@/lib/accept"
 import { taskPipeline, type StepState } from "@/lib/pipeline"
 import { deliverableItems } from "@/lib/deliverable"
 import { useReturnFocus } from "@/lib/return-focus"
@@ -124,11 +125,19 @@ function StandsNow({ t }: { t: TaskDetail }) {
   const s = story(t, { paused: data?.control.agents_paused })
   const [agent, setAgent] = useState(t.assigned_agent ?? "")
   const agents = (data?.agents ?? []).filter(a => a.enabled !== false)
+  const accept = acceptOffer(t), link = prLink(t)
   return (
-    <section aria-label="Where this task stands" className="grid gap-4 rounded-xl border bg-surface/60 p-4">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-        <Status value={t.status} pill tone={s.tone} />
-        <span className="text-sm font-medium">{s.now}</span>
+    <section aria-label="Where this task stands" className="grid min-w-0 gap-4 rounded-xl border bg-surface/60 p-4">
+      {/* Header: status, where it stands, the next action and the verified PR link (lib/accept.ts). */}
+      <div className="grid min-w-0 gap-1.5">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <Status value={t.status} pill tone={s.tone} label={mergedForReview(t) ? "Merged" : undefined} />
+          <span className="min-w-0 text-sm font-medium [overflow-wrap:anywhere]">{s.now}</span>
+        </div>
+        <p className="text-[13px] text-muted-foreground"><span className="font-medium text-foreground">Next: </span>{s.next}</p>
+        {link?.state === "verified" && <a href={link.pr.url} target="_blank" rel="noopener noreferrer"
+          className="w-fit font-mono text-xs font-medium underline underline-offset-2 hover:text-info">PR #{link.pr.number}{link.pr.commit && ` · ${link.pr.commit.slice(0, 7)}`}</a>}
+        {link?.state === "unverified" && <p className="text-xs text-warning">PR link unverified: the task and its publication record disagree, so no link is shown.</p>}
       </div>
       {s.blocker && (
         <div className={cn("grid gap-1 rounded-lg border-l-2 py-1.5 pl-3 text-sm", s.tone === "danger" ? "border-destructive" : "border-warning")}>
@@ -138,17 +147,18 @@ function StandsNow({ t }: { t: TaskDetail }) {
             <button key={d.key} onClick={() => open({ kind: "task", key: d.key })} className="rounded-md border bg-background px-1.5 py-0.5 font-mono text-[11px] hover:bg-muted">{d.key} · {humanize(d.status).toLowerCase()}</button>))}</span>}
         </div>
       )}
-      <p className="text-[13px] text-muted-foreground"><span className="font-medium text-foreground">Next: </span>{s.next}</p>
       {/* Where the task is, step by step, from recorded facts only (lib/pipeline.ts); updates live while open. */}
       <Pipeline t={t} />
-      {(s.founder.length > 0 || canOfferReady(t) || isCodeWrite(t)) && (
-        <div className="grid gap-2 border-t border-border/70 pt-3">
+      {(s.founder.length > 0 || canOfferReady(t) || isCodeWrite(t) || accept) && (
+        <div className="grid min-w-0 gap-2 border-t border-border/70 pt-3">
           <span className="text-xs font-medium text-muted-foreground">What you can do</span>
-          <div className="flex flex-wrap items-center gap-2">
+          {/* Phones: one full-width button per row. */}
+          <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center max-sm:[&_button]:w-full">
+            {accept && <AcceptDone taskKey={t.key} evidence={accept.evidence} merged={accept.merged} />}
             {s.founder.includes("approve") && <Button size="sm" className="h-9" onClick={() => { open(null); go("approvals") }}>Decide in Approvals</Button>}
             {s.founder.includes("assign") && <>
               <Select value={agent} onValueChange={setAgent}>
-                <SelectTrigger className="h-9 w-48" aria-label="Agent to assign"><SelectValue placeholder="Choose agent" /></SelectTrigger>
+                <SelectTrigger className="h-9 w-full sm:w-48" aria-label="Agent to assign"><SelectValue placeholder="Choose agent" /></SelectTrigger>
                 <SelectContent>{agents.map(a => <SelectItem key={a.key} value={a.key}>{a.name}</SelectItem>)}</SelectContent>
               </Select>
               <Button size="sm" variant="outline" className="h-9" disabled={!agent || agent === t.assigned_agent}
@@ -157,12 +167,12 @@ function StandsNow({ t }: { t: TaskDetail }) {
               </Button>
             </>}
             {/* A code task's order is explicit: Authorize Stage C, then Mark READY (the API refuses READY without it). */}
-            {isCodeWrite(t) && !["DONE", "CANCELLED"].includes(t.status) && <AuthorizeStageC taskKey={t.key} />}
+            {isCodeWrite(t) && !["DONE", "CANCELLED"].includes(t.status) && !mergedForReview(t) && <AuthorizeStageC taskKey={t.key} />}
             {canOfferReady(t) && <MarkReady taskKey={t.key} status={t.status} codeWrite={isCodeWrite(t)} note={readyNote(t)} blocked={!!readyBlock(t)} />}
             {s.founder.includes("follow-up") && <Button size="sm" variant="outline" className="h-9" onClick={() => { open(null); compose(true) }}>New follow-up task</Button>}
           </div>
           {canOfferReady(t) && readyBlock(t) && <p className="text-xs text-warning">{readyBlock(t)}</p>}
-          <p className="text-[11px] text-muted-foreground">Closing or cancelling a task is not available in the Desk yet.</p>
+          <p className="text-[11px] text-muted-foreground">Cancelling a task is not available in the Desk yet.</p>
         </div>
       )}
     </section>

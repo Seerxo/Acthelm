@@ -152,6 +152,9 @@ export interface TaskDetail {
   retry_count?: number; max_attempts?: number
   /** Code tasks only: null when a Stage C authorization covers it, else the API's fixed denial code. */
   stage_c_authorization?: string | null
+  /** The backend-verified PR (app/desk.py _pull_request); url and number only when verified. Absent on older APIs. */
+  pull_request?: { verified: boolean; merged: boolean; commit: string | null; merge_commit: string | null
+    number?: number; url?: string } | null
   artifacts: unknown; result: string | null; error: string | null
   supervisor: { verdict: string; notes: string | null } | null
   created_at: string; started_at: string | null; completed_at: string | null

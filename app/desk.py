@@ -13,7 +13,8 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from pathlib import Path
 
-from app import business_reconciler, control, enums, goals, metrics_store, models, reconciler_heartbeat, watchdog, worker
+from app import (business_reconciler, control, enums, goals, metrics_store, models, reconciler_heartbeat, stage_c_ci,
+                 stage_c_worker, watchdog, worker)
 from app.notify import NotificationService
 from app.redact import MAX_SCAN_CHARS, redact
 
@@ -100,6 +101,23 @@ def _artifacts_view(artifacts) -> dict | None:
         view["actions"] = [_clean(a, worker.MAX_ACTION_CHARS) for a in artifacts["actions"][:worker.MAX_ACTIONS]
                            if isinstance(a, str)]
     return view or None
+
+
+def _pull_request(task: models.Task) -> dict | None:
+    """The task's PR as the backend verified it (lib/accept.ts): only the latest PR_OPEN publication on this
+    deployment's upstream (stage_c_worker.published_pr_number), and only while task.artifacts name the same PR and
+    commit. Anything else is `verified: false` with no link. Merged = a recorded MERGED stage."""
+    ev = stage_c_ci.publication(task)
+    if ev is None:
+        return None
+    number, art = stage_c_worker.published_pr_number(task), task.artifacts if isinstance(task.artifacts, dict) else {}
+    merge = stage_c_ci._evidence(task, "MERGED")
+    verified = (number is not None and art.get("pr", ev["pr"]) == ev["pr"]
+                and art.get("commit", ev.get("commit")) == ev.get("commit")
+                and merge.get("pr_number", number) == number)
+    out = {"verified": verified, "merged": bool(merge), "commit": _scalar(ev.get("commit")),
+           "merge_commit": _scalar(merge.get("merge_commit"))}
+    return {**out, "number": number, "url": ev["pr"]} if verified else out
 
 
 def origin(task: models.Task) -> dict:
@@ -826,6 +844,7 @@ def task_detail(db: Session, task: models.Task) -> dict:
         if isinstance(task.context, dict) and task.context.get("write") is True else None,
         "dependencies": [{"key": d.key, "status": d.status.value} for d in dependencies],
         "runs": [_run(r, task.key) for r in run_rows],
+        "pull_request": _pull_request(task),
         "artifacts": _artifacts_view(task.artifacts), "result": _clean(task.result), "error": _clean(task.error),
         "supervisor": ({"verdict": verdict.supervisor_verdict.value,
                         "notes": _clean(verdict.supervisor_notes)} if verdict else None),

@@ -1,4 +1,4 @@
-// Work: every task grouped by what it means for the founder (lib/task-story.ts), each row saying what happens next and,
+// Work: every task in a founder lane (lib/task-lanes.ts: Needs you, Running, Not scheduled, Done), each row saying what happens next and,
 // for stopped work, the recorded reason. Filters are routes (#/tasks/attention) so Overview links land on the right list.
 import { useEffect, useRef, useState, type ComponentProps } from "react"
 import { ChevronRight, Code2, Search, Sparkles } from "lucide-react"
@@ -12,6 +12,7 @@ import { parseStageC } from "@/lib/stage-c"
 import { attentionBreakdown, GROUPS, groupOf, nextLine, oldestUpdate, type Group } from "@/lib/task-story"
 import { arrived, closedScope, isOpen, pinned, searchScope, signals } from "@/lib/work-groups"
 import { useReasons } from "@/lib/use-reasons"
+import { codeChips, LANES, laneOf, laneSort, type Lane } from "@/lib/task-lanes"
 import { useChange, useChanges, useData, useDesk, useDraft } from "@/state"
 import { homeAfterCreate } from "@/lib/draft"
 import { ChangeMark, Dot, PageHeader, PanelEmpty, PanelRow, Status, Tag, priorityTone } from "@/components/desk"
@@ -204,6 +205,7 @@ const ACTIVE: Group[] = ["attention", "running", "review", "next", "waiting"]
 const FILTERS: { key: Filter; label: string }[] = [
   { key: "active", label: "Active" }, ...GROUPS.map(g => ({ key: g.key as Filter, label: g.label })), { key: "all", label: "All" },
 ]
+const reviewCount = (tasks: TaskRow[]) => { const n = tasks.filter(t => t.status === "REVIEW").length; return n ? `${n} to review` : null }
 const asFilter = (k: string | undefined): Filter => (FILTERS.some(f => f.key === k) ? k as Filter : "active")
 
 function TaskLine({ t, reason, paused }: { t: TaskRow; reason?: string; paused: boolean }) {
@@ -223,10 +225,12 @@ function TaskLine({ t, reason, paused }: { t: TaskRow; reason?: string; paused: 
         {t.priority !== "P2" && <Tag tone={priorityTone(t.priority)}>{t.priority}</Tag>}
         {t.risk !== "LOW" && <Tag tone={t.risk === "HIGH" || t.risk === "CRITICAL" ? "warning" : "neutral"} className="max-sm:hidden">{t.risk} risk</Tag>}
       </span>}
-      meta={<><span className="font-mono text-xs">{t.key}</span> · {nextLine(t, { reason, paused })}
-        {mv && <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-          <span className="font-medium text-foreground/80">Code mission</span><Status value={mission!.stage} label={mv.label} tone={mv.tone} />
-          {mv.evidence.length > 0 && <span>{mv.evidence.join(" · ")}</span>}<DeliveryTrack v={mv} className="w-28 max-sm:hidden" /></span>}</>}
+      meta={<><span className="[overflow-wrap:anywhere]"><span className="font-mono text-xs">{t.key}</span> · {nextLine(t, { reason, paused })}</span>
+        {/* A code task's PR and CI at a glance; the full evidence is on the task. */}
+        {mv && <span className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+          <Status value={mission!.stage} label={mv.label} tone={mv.tone} />
+          {codeChips(mission).map(c => <Tag key={c.label} tone={c.tone}>{c.label}</Tag>)}
+          <DeliveryTrack v={mv} className="w-28 max-sm:hidden" /></span>}</>}
       tone={g === "attention" ? "danger" : undefined}
       trail={<>
         <span className="max-lg:hidden">{[t.agent ?? "unassigned", t.business_unit].filter(Boolean).join(" · ")}</span>
@@ -246,7 +250,7 @@ export function TasksPage() {
   const filter = asFilter(route.key)
   const [query, setQuery] = useState("")
   const [unit, setUnit] = useState("all")
-  const [manual, setManual] = useState<Partial<Record<Group, boolean>>>({})
+  const [manual, setManual] = useState<Partial<Record<Lane, boolean>>>({})
   // Keys present when the page first had data: a task that arrives later is announced as "+N new" on its group.
   const seen = useRef<Set<string> | null>(null)
   if (seen.current === null && d.tasks.length) seen.current = new Set(d.tasks.map(t => t.key))
@@ -262,8 +266,8 @@ export function TasksPage() {
     : d.tasks.filter(t => inFilter(t.status, f)).length
   const tasks = d.tasks.filter(t => inFilter(t.status, filter) && matches(t))
     .sort((a, b) => a.priority.localeCompare(b.priority) || b.updated_at.localeCompare(a.updated_at))
-  const groups = GROUPS.filter(g => filter === "all" || filter === "active" ? (filter === "all" || ACTIVE.includes(g.key)) : g.key === filter)
-    .map(g => ({ ...g, tasks: tasks.filter(t => groupOf(t.status) === g.key) })).filter(g => g.tasks.length)
+  // Shown as lanes: Needs you, Running, Not scheduled, Done (lib/task-lanes.ts); the filters still narrow by group.
+  const groups = LANES.map(l => ({ ...l, tasks: laneSort(tasks.filter(t => laneOf(t.status) === l.key)) })).filter(l => l.tasks.length)
   // Overview filters show at most CAP rows per group so a long queue (live: 27 in review) does not bury the groups below it.
   // Needs attention is never capped, a search shows every match, and a group's own filter shows all of it.
   // Overview filters (Active, All) collapse every group but Needs attention; a search or a business unit narrows and opens.
@@ -310,26 +314,27 @@ export function TasksPage() {
         {` · ${lead.sample_size} completed · ${lead.review_pending} awaiting review`}</p>}
     </div>
     {groups.length ? groups.map(g => {
-      const open = isOpen(g.key, g.tasks, { overview, searching, manual: manual[g.key] })
+      // Needs you holds the attention group: never collapsed (lib/work-groups.ts).
+      const open = isOpen(g.key === "needs" ? "attention" : "running", g.tasks, { overview, searching, manual: manual[g.key] })
       const fresh = seen.current ? arrived(g.tasks, seen.current) : 0
       const sig = signals(g.tasks)
       // A closed group hides its rows, so a change inside it is marked on the header instead (lib/changes.ts).
       const moved = open ? 0 : g.tasks.filter(t => changes[`task:${t.key}`] && !pinned([t]).length).length
       return (
         <section key={g.key} aria-label={g.label} className="panel min-w-0 divide-y divide-border/70 overflow-hidden">
-          <button type="button" aria-expanded={open} disabled={g.key === "attention"} onClick={() => setManual(m => ({ ...m, [g.key]: !open }))}
+          <button type="button" aria-expanded={open} disabled={g.key === "needs"} onClick={() => setManual(m => ({ ...m, [g.key]: !open }))}
             className={cn(moved > 0 && "desk-flash", "flex min-h-11 w-full min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1 px-4 py-2.5 text-left transition-colors enabled:hover:bg-muted/40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring disabled:cursor-default")}>
-            {g.key !== "attention" && <ChevronRight aria-hidden className={cn("size-4 shrink-0 text-muted-foreground transition-transform duration-150", open && "rotate-90")} />}
+            {g.key !== "needs" && <ChevronRight aria-hidden className={cn("size-4 shrink-0 text-muted-foreground transition-transform duration-150", open && "rotate-90")} />}
             <Dot tone={g.tone} />
             <span className="text-[13px] font-semibold">{g.label}</span>
             <span className="num rounded-full bg-muted px-1.5 text-[11px] leading-[18px] font-medium text-muted-foreground">{g.tasks.length}</span>
             {sig.map(x => <Tag key={x} tone={x.endsWith("P0") || x.endsWith("high risk") ? "danger" : "warning"}>{x}</Tag>)}
             {/* What the counts are made of, from statuses and timestamps only (the facts the old figure strip carried). */}
-            {g.key === "attention" && attentionBreakdown(g.tasks) && <span className="text-xs text-muted-foreground">{attentionBreakdown(g.tasks)}</span>}
-            {g.key === "review" && reviewOldest && <span className="text-xs text-muted-foreground">oldest untouched {ago(reviewOldest)}</span>}
+            {g.key === "needs" && <span className="text-xs text-muted-foreground">{[attentionBreakdown(g.tasks), reviewCount(g.tasks),
+              reviewOldest && `oldest review untouched ${ago(reviewOldest)}`].filter(Boolean).join(" · ")}</span>}
             {fresh > 0 && <span className="rounded-full bg-info/10 px-1.5 text-[11px] leading-[18px] font-medium text-info">+{fresh} new</span>}
             {moved > 0 && <span className="rounded-full bg-info/10 px-1.5 text-[11px] leading-[18px] font-medium text-info">{moved} just changed</span>}
-            {g.key !== "attention" && <span className="ml-auto text-xs text-muted-foreground">{[g.key === "closed" && closedScope(closedLoaded, d.tasks_truncated), open ? "Hide" : `Show all ${g.tasks.length}`].filter(Boolean).join(" · ")}</span>}
+            {g.key !== "needs" && <span className="ml-auto text-xs text-muted-foreground">{[g.key === "done" && closedScope(closedLoaded, d.tasks_truncated), open ? "Hide" : `Show all ${g.tasks.length}`].filter(Boolean).join(" · ")}</span>}
           </button>
           {(open ? g.tasks : pinned(g.tasks)).map(t => <TaskLine key={t.key} t={t} reason={reasons[t.key]} paused={paused} />)}
         </section>

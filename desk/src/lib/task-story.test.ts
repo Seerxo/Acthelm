@@ -52,3 +52,11 @@ test("the attention breakdown and the oldest untouched review come from statuses
   assert.equal(oldestUpdate([t("REVIEW", "2026-10-10T00:00:00Z"), t("REVIEW", "2026-10-01T00:00:00Z"), t("DONE", "2026-09-01T00:00:00Z")], "REVIEW"), "2026-10-01T00:00:00Z")
   assert.equal(oldestUpdate([t("DONE")], "REVIEW"), null)
 })
+
+test("a merged PR in REVIEW reads as merged, waiting for the founder's acceptance", () => {
+  const pull_request = { verified: true, merged: true, number: 77, url: "https://github.com/seerxo/acthelm/pull/77", commit: "b11b0aa", merge_commit: null }
+  const s = story(detail({ status: "REVIEW", pull_request }))
+  assert.match(s.now, /^Merged\. Waiting for you to accept it as done/); assert.equal(s.next, "Accept as done.")
+  assert.match(story(detail({ status: "REVIEW", pull_request: { ...pull_request, merged: false } })).now, /Agent finished/)
+  assert.match(story(detail({ status: "REVIEW", pull_request: { ...pull_request, verified: false } })).now, /Agent finished/)
+})

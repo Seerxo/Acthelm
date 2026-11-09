@@ -137,6 +137,32 @@ def test_task_detail_serves_only_the_fields_the_desk_reads(env):
     assert "context_policy" not in a and a["last_error"] and a["errors"]
 
 
+def test_pr_link_mismatch(env):
+    """The task-PR link is only the verified publication: this upstream and task.artifacts agreeing with it."""
+    url = "https://github.com/seerxo/acthelm/pull/77"
+    with Session(env) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0101"))
+        history = [{"stage": "PR_OPEN", "at": "x", "evidence": {"pr": url, "commit": "b" * 40}},
+                   {"stage": "MERGED", "at": "y", "evidence": {"pr_number": 77, "merge_commit": "e" * 40}}]
+        task.context = {**task.context, "improvement": {"stage": "MERGED", "history": history}}
+        task.artifacts = {"pr": url, "commit": "b" * 40}
+        s.commit()
+    pr = _desk().get("/tasks/TASK-0101", headers=ASSERT).json()["pull_request"]
+    assert pr == {"verified": True, "merged": True, "number": 77, "url": url, "commit": "b" * 40, "merge_commit": "e" * 40}
+    for art in ({"pr": url.replace("77", "78"), "commit": "b" * 40}, {"pr": url, "commit": "c" * 40}):
+        with Session(env) as s:
+            s.scalar(select(models.Task).where(models.Task.key == "TASK-0101")).artifacts = art
+            s.commit()
+        pr = _desk().get("/tasks/TASK-0101", headers=ASSERT).json()["pull_request"]
+        assert pr["verified"] is False and "url" not in pr and "number" not in pr, art
+    # The fixture's mixed-case URL is not this deployment's upstream (published_pr_number): never a link.
+    with Session(env) as s:
+        s.scalar(select(models.Task).where(models.Task.key == "TASK-0101")).context = {
+            "improvement": {"stage": "PR_OPEN", "history": [{"stage": "PR_OPEN", "evidence": {"pr": PR}}]}}
+        s.commit()
+    assert _desk().get("/tasks/TASK-0101", headers=ASSERT).json()["pull_request"]["verified"] is False
+
+
 def test_provider_error_is_redacted_before_it_is_bounded():
     # The URL's `@` falls past the 500-character cut: truncating first would keep the password unmatched.
     stderr = "x" * 475 + f" https://u:{PASSWORD}@git.example " + "y" * 40
