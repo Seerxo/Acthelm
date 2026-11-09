@@ -33,7 +33,7 @@ export function EventList({ events, grouped, onTask }: { events: Event[]; groupe
           )}
           <div className={cn("grid grid-cols-[48px_10px_minmax(0,1fr)] items-baseline gap-x-3 rounded-md py-1.5", changes[`event:${e.id}`] && "desk-flash")}>
             <span className="num text-xs text-muted-foreground">{new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}</span>
-            <span className={cn("size-1.5 translate-y-[-1px] self-center rounded-full",
+            <span role="img" aria-label={`${e.severity.toLowerCase()} severity`} title={e.severity} className={cn("size-1.5 translate-y-[-1px] self-center rounded-full",
               ["CRITICAL", "HIGH"].includes(e.severity) ? "bg-destructive" : e.severity === "MEDIUM" ? "bg-warning" : "bg-muted-foreground/40")} />
             <div className="min-w-0">
               <div className="text-sm leading-snug [overflow-wrap:anywhere]">{e.title} <ChangeMark c={changes[`event:${e.id}`]} className="align-[1px]" /></div>
@@ -84,7 +84,7 @@ export function ActivityPage() {
       <nav aria-label="Filter by severity" className="task-filters-scroll -mx-1 flex flex-nowrap gap-1 px-1">
         {(["all", "high", "medium", "other"] as const).map(f => (
           <button key={f} type="button" aria-current={sev === f ? "true" : undefined} onClick={() => setSev(f)}
-            className={cn("inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-[13px] transition-colors duration-150",
+            className={cn("inline-flex h-11 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-[13px] transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-ring sm:h-9",
               sev === f ? "border-foreground/15 bg-foreground text-background" : "border-border bg-card text-muted-foreground hover:text-foreground", !n(f) && sev !== f && "border-dashed")}>
             {({ all: "All", high: "High+", medium: "Medium", other: "Other" })[f]}<span className={cn("num text-xs", sev === f ? "text-background/70" : "text-muted-foreground")}>{n(f)}</span>
           </button>))}
@@ -105,7 +105,7 @@ export function ActivityPage() {
               : `${shown.length}${filtered ? ` of ${events.length}` : ""} recent events, newest first`}</span>
             <div role="group" aria-label="Activity view" className="inline-flex rounded-md border bg-card p-0.5">
               {(["grouped", "timeline"] as const).map(v => <button key={v} type="button" aria-pressed={mode === v} onClick={() => setView(v)}
-                className={cn("h-7 rounded-[5px] px-2.5 text-xs font-medium transition-colors", mode === v ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground")}>
+                className={cn("h-10 rounded-[5px] px-2.5 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-ring sm:h-7", mode === v ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground")}>
                 {v === "grouped" ? "Grouped" : "Timeline"}</button>)}
             </div>
           </div>}
@@ -143,7 +143,7 @@ function InstallApp() {
     if (serviceWorker) void serviceWorker.then(() => setReady(true)).catch(() => setError("Service worker registration failed. Reload while online, then try again."))
   }, [])
   return <Section title="Install on your phone">
-    {standalone ? <p className="text-sm">SEZ Company is running as an installed app.</p>
+    {standalone ? <p className="text-sm">Acthelm Desk is running as an installed app.</p>
       : !serviceWorker ? <p className="text-sm text-muted-foreground">Installation is unavailable here. Open this site over HTTPS in a browser that supports service workers.</p>
         : <div className="grid gap-2 text-sm">
             <p>{ios ? "In Safari, tap Share, then Add to Home Screen, then Add." : "Open your browser menu and choose Install app or Add to Home Screen."}</p>
@@ -235,6 +235,7 @@ export function HealthPage() {
     </Section>
     <div className="grid grid-cols-1 gap-10 lg:grid-cols-[1.4fr_1fr]">
       <Section title="Services">
+        {!services.length && <Calm title="No services registered">Nothing is verified here until the registry lists a service.</Calm>}
         {services.map(s => <ServiceRow key={s.key} name={s.name} sub={`${s.key} · ${s.last_verified ? `verified ${ago(s.last_verified)} ago` : "not verified yet"}`} risk={s.risk} status={s.last_verified ? <Status value={s.status} /> : <Status value="UNKNOWN" label="Registered, not verified" />} />)}
       </Section>
       <Section title="Active watchdog conditions" action={<span className={cn("num text-xs", watchdog.reported ? "text-muted-foreground" : "text-warning")}>{watchdog.count}</span>}>
@@ -242,7 +243,7 @@ export function HealthPage() {
           {watchdogConditions.map(condition => <div key={`${condition.event_id}:${condition.episode}`} className="grid gap-1 border-b border-border/70 py-3 last:border-0">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0"><div className="text-sm font-medium [overflow-wrap:anywhere]">{condition.title}</div>
-                <div className="text-xs text-muted-foreground">{condition.type} · episode {condition.episode} · {condition.delivery_status}</div></div>
+                <div className="text-xs [overflow-wrap:anywhere] text-muted-foreground">{condition.type} · episode {condition.episode} · {condition.delivery_status}</div></div>
               <Status value={condition.severity} />
             </div>
             {condition.detail && <div className="text-xs text-muted-foreground [overflow-wrap:anywhere]">{condition.detail}</div>}
@@ -262,7 +263,7 @@ export function HealthPage() {
           {b ? <Facts items={[["Target", b.target], ["Last run", `${when(b.at)} · ${ago(b.at)} ago`],
             ["Run succeeded", b.ok ? "Yes" : "No"], ["Uploaded off-site", b.uploaded == null ? "Unknown" : b.uploaded ? "Yes" : "No"],
             ["Integrity reported", b.integrity_verified ? "Yes" : "No"],
-            ["Verified event linked", b.verified === true ? "Yes" : "No"]]} />
+            ["Verified event linked", b.verified == null ? "Unknown" : b.verified ? "Yes" : "No"]]} />
             : <Calm title="No backup recorded">Nothing proves a restorable copy exists.</Calm>}
         </Section>
         <Section title="Restore test" action={restore ? <Status
@@ -276,7 +277,7 @@ export function HealthPage() {
         </Section>
       </div>
     </div>
-    <p className="text-sm text-muted-foreground">Worker, providers and loops: <button className="inline-flex min-h-6 items-center underline-offset-2 hover:text-foreground hover:underline" onClick={() => go("automation")}>Automation</button> · Costs: <button className="inline-flex min-h-6 items-center underline-offset-2 hover:text-foreground hover:underline" onClick={() => go("finance")}>Finance</button></p>
+    <p className="text-sm text-muted-foreground">Worker, providers and loops: <button type="button" className="inline-flex min-h-11 items-center underline-offset-2 hover:text-foreground hover:underline focus-visible:underline sm:min-h-6" onClick={() => go("automation")}>Automation</button> · Costs: <button type="button" className="inline-flex min-h-11 items-center underline-offset-2 hover:text-foreground hover:underline focus-visible:underline sm:min-h-6" onClick={() => go("finance")}>Finance</button></p>
     <InstallApp />
     </Disclosure>
   </>

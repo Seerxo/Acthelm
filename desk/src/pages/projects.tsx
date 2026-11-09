@@ -144,16 +144,17 @@ export function ProjectsPage() {
   return <>
     <PageHeader title={pageTitle("projects")} description="Each business, its verified numbers and its work."
       />
-    <FigureStrip label="Portfolio at a glance" items={[
+    {Array.isArray(d.portfolio) && <FigureStrip label="Portfolio at a glance" items={[
       { label: "Live", value: String(live.length), sub: "active business units" },
-      { label: "Need attention", value: String(attention), tone: attention ? "warning" : undefined, sub: attention ? "stale or missing data" : "data is current" },
+      { label: "Need attention", value: String(attention), tone: attention ? "warning" : undefined, sub: attention ? "open incidents or stopped work" : "no incident or stopped work" },
       { label: "Not active", value: String(rest.length), sub: "ideas and paused units" },
-    ]} />
+    ]} />}
     {c && (
       <section className="panel grid gap-1.5 px-4 py-3.5" aria-label="Current priority">
         <span className="eyebrow">Current priority · {c.kind === "goal" ? "goal" : "highest-priority open work"}</span>
-        <button type="button" className="text-left text-[15px] font-semibold tracking-tight hover:underline disabled:no-underline"
-          disabled={c.kind !== "task"} onClick={() => c.kind === "task" && c.key && open({ kind: "task", key: c.key })}>{c.title}</button>
+        {c.kind === "task" && c.key
+          ? <button type="button" className="min-h-11 text-left text-[15px] font-semibold tracking-tight underline-offset-2 hover:underline focus-visible:underline sm:min-h-0" onClick={() => open({ kind: "task", key: c.key! })}>{c.title}</button>
+          : <span className="text-[15px] font-semibold tracking-tight [overflow-wrap:anywhere]">{c.title}</span>}
         {c.why && <p className="text-[13px] text-muted-foreground">{c.why}</p>}
         {c.kind === "goal" && (c.metric || c.target || c.open_tasks === 0 || (c.measure && !c.measure.latest)) && <p className="text-xs text-muted-foreground">{c.metric && c.target && <>{c.metric}: {c.baseline || "—"} → {c.target}</>}
           {c.measure && !c.measure.latest && <span className="text-warning"> · no verified observation yet</span>}
@@ -224,7 +225,7 @@ function NewGoal({ projects }: { projects: { key: string; name: string }[] }) {
   }
   return (
     <Dialog open={open} onOpenChange={o => { if (!busy) setOpen(o) }}>
-      <DialogTrigger asChild><Button size="sm" variant="outline" className="h-8"><Plus />New goal</Button></DialogTrigger>
+      <DialogTrigger asChild><Button size="sm" variant="outline" className="h-11 sm:h-8"><Plus />New goal</Button></DialogTrigger>
       <DialogContent className="sm:max-w-md">
         <form onSubmit={submit} className="grid gap-4">
           <DialogHeader><DialogTitle>New goal</DialogTitle>
@@ -238,7 +239,7 @@ function NewGoal({ projects }: { projects: { key: string; name: string }[] }) {
             </div>
             {projects.length > 1 && <label className="grid gap-1.5 text-[13px] font-medium">Project
               <select value={f.project} onChange={e => setF(x => ({ ...x, project: e.target.value }))}
-                className="h-9 rounded-md border bg-transparent px-2 font-normal">{projects.map(p => <option key={p.key} value={p.key}>{p.name}</option>)}</select></label>}
+                className="h-11 rounded-md border bg-transparent px-2 font-normal focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none sm:h-9">{projects.map(p => <option key={p.key} value={p.key}>{p.name}</option>)}</select></label>}
           </fieldset>
           <DialogFooter><Button type="submit" disabled={busy || !built.body} className="h-10 px-4">{busy ? "Recording…" : "Record goal"}</Button></DialogFooter>
         </form>
@@ -260,7 +261,7 @@ function UnitGoals({ u }: { u: Unit }) {
         {goals.length ? <ul className="grid grid-cols-1 divide-y divide-border/70" aria-label="Goals">{goals.map(g => (
           <li key={g.id} className="flex items-start justify-between gap-3 py-2 text-sm first:pt-0">
             <span className="min-w-0 break-words">{g.title}</span><Status value={g.status} />
-          </li>))}</ul> : <Calm title="No open goal">Set a goal so work for this unit is measured against an outcome.</Calm>}
+          </li>))}</ul> : <Calm title="No goal recorded">Set a goal so work for this unit is measured against an outcome.</Calm>}
       </Section>
       <Section title="Projects" action={<span className="num">{projects.length}</span>}>
         {projects.length ? <ul className="grid grid-cols-1 divide-y divide-border/70" aria-label="Projects">{projects.map(p => (
@@ -313,7 +314,7 @@ export function ProjectDetail({ unitKey }: { unitKey: string }) {
       <Section title="Incidents">
         {f.incidents.length ? f.incidents.map(i => (
           <div key={i.key} className="flex items-center justify-between gap-3 border-b border-border/70 py-2 text-sm last:border-0">
-            <span className="min-w-0"><span className="font-medium">{i.title}</span><span className="block text-xs text-muted-foreground"><span className="font-mono">{i.key}</span> · open {ago(i.started_at)}</span></span>
+            <span className="min-w-0"><span className="font-medium">{i.title}</span><span className="block text-xs text-muted-foreground [overflow-wrap:anywhere]"><span className="font-mono">{i.key}</span> · open {ago(i.started_at)}</span></span>
             <Status value={i.severity} />
           </div>)) : <Calm title="No open incidents" />}
       </Section>

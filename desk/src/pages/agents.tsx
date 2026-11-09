@@ -8,6 +8,7 @@ import { GROUPS, groupOf, type Group } from "@/lib/task-story"
 import { useChange, useData, useDesk, useNow } from "@/state"
 import { agentState, foldable } from "@/lib/agent-state"
 import { cn } from "@/lib/utils"
+import { mergedAwaitingAcceptance } from "@/lib/qa-status"
 import { Calm, ChangeMark, DOT, Expandable, FigureStrip, Muted, PageHeader, Status, TaskKey } from "@/components/desk"
 
 const short = (name: string) => name.replace(/ Agent$/, "")
@@ -15,21 +16,25 @@ const LANE: Group[] = ["attention", "running", "review", "next", "waiting"]   //
 const LABEL: Partial<Record<Group, string>> = { attention: "stopped", running: "running", review: "in review", next: "queued", waiting: "waiting outside" }
 
 /** One agent's own tasks by group. Failed and blocked are named separately because they need different action. */
-function workload(tasks: TaskRow[], done = tasks.filter(t => t.status === "DONE").length) {
-  const by = (g: Group) => tasks.filter(t => groupOf(t.status) === g).length
+function workload(tasks: TaskRow[], done = tasks.filter(t => t.status === "DONE").length, merged: Set<string> = new Set()) {
+  // A REVIEW task whose PR is merged is named as merged, not "in review" (lib/qa-status.ts).
+  const by = (g: Group) => tasks.filter(t => groupOf(t.status) === g && !(g === "review" && merged.has(t.key))).length
+  const mergedN = tasks.filter(t => groupOf(t.status) === "review" && merged.has(t.key)).length
   const failed = tasks.filter(t => t.status === "FAILED").length, blocked = tasks.filter(t => t.status === "BLOCKED").length
   const approval = tasks.filter(t => t.status === "WAITING_APPROVAL").length
   const parts = [failed && `${failed} failed`, blocked && `${blocked} blocked`, approval && `${approval} awaiting approval`,
-    ...LANE.filter(g => g !== "attention").map(g => by(g) && `${by(g)} ${LABEL[g]}`), done && `${done} done`].filter(Boolean) as string[]
-  return { open: LANE.reduce((n, g) => n + by(g), 0), segments: LANE.map(g => ({ g, n: by(g) })).filter(s => s.n), parts }
+    ...LANE.filter(g => g !== "attention").map(g => by(g) && `${by(g)} ${LABEL[g]}`), mergedN && `${mergedN} merged, awaiting acceptance`, done && `${done} done`].filter(Boolean) as string[]
+  const open = LANE.reduce((n, g) => n + by(g), 0) + mergedN
+  const segments = LANE.map(g => ({ g, n: by(g) + (g === "review" ? mergedN : 0) })).filter(s => s.n)
+  return { open, segments, parts }
 }
 
-function AgentLane({ agent, tasks, reportsTo }: { agent: Agent; tasks: TaskRow[]; reportsTo: string }) {
+function AgentLane({ agent, tasks, reportsTo, merged }: { agent: Agent; tasks: TaskRow[]; reportsTo: string; merged: Set<string> }) {
   const { open } = useDesk()
   const title = agent.current_task?.title
   const st = agentState(agent, useData(), useNow("minute"))
   const availability = st.value
-  const w = workload(tasks, agent.tasks_done)
+  const w = workload(tasks, agent.tasks_done, merged)
   const changed = useChange("agent", agent.key)
   return (
     <button type="button" onClick={() => open({ kind: "agent", key: agent.key })}
@@ -123,13 +128,14 @@ export function AgentsPage() {
   const n = (s: string) => d.agents.filter(a => (s === "RUNNING" ? agentState(a, d, now).running : a.status === s)).length
   const name = (key: string | null) => key ? short(d.agents.find(a => a.key === key)?.name ?? key) : "—"
   const mine = (a: Agent) => d.tasks.filter(t => t.agent === a.key)
+  const merged = new Set((d.improvements ?? []).filter(i => mergedAwaitingAcceptance("REVIEW", i.stage)).map(i => i.task))
   // An agent with no open task, no held task, no recorded failure and a calm state folds under one line; anything else
   // stays in view. Only a named calm state folds; anything else (unknown, stalled, waiting, unconfirmed) stays visible.
   const calm = (a: Agent) => foldable(a, d, now, workload(mine(a)).open)
   const busy = d.agents.filter(a => !calm(a)), quiet = d.agents.filter(calm)
   const lanes = (list: Agent[], label: string) => (
     <section aria-label={label} className="panel grid min-w-0 grid-cols-1 divide-y divide-border/70">
-      {list.map(agent => <AgentLane key={agent.key} agent={agent} tasks={mine(agent)}
+      {list.map(agent => <AgentLane key={agent.key} agent={agent} tasks={mine(agent)} merged={merged}
         reportsTo={agent.reports_to === "founder" ? "Founder" : name(agent.reports_to)} />)}
     </section>)
   return <>

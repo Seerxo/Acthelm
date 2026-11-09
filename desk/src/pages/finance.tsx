@@ -14,10 +14,10 @@ const money = (v: number | null | undefined) => (v == null ? "—" : usd(v))
 
 export function Stat({ label, value, sub, warn }: { label: string; value: ReactNode; sub?: ReactNode; warn?: boolean }) {
   return (
-    <div className="grid content-start gap-1 bg-card px-4 py-3.5">
+    <div className="grid min-w-0 content-start gap-1 bg-card px-4 py-3.5">
       <span className="eyebrow">{label}</span>
-      <span className={cn("num text-2xl leading-8 font-semibold tracking-[-0.035em]", warn && "text-warning")}>{value}</span>
-      {sub && <span className="truncate text-xs text-muted-foreground">{sub}</span>}
+      <span className={cn("num text-2xl leading-8 font-semibold tracking-[-0.035em] [overflow-wrap:anywhere]", warn && "text-warning")}>{value}</span>
+      {sub && <span className="text-xs [overflow-wrap:anywhere] text-muted-foreground">{sub}</span>}
     </div>
   )
 }

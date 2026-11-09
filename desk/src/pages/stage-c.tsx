@@ -12,6 +12,7 @@ import {
   type LoadError, type StageCState, type StepState, type Task, type View,
 } from "@/lib/stage-c"
 import { cn } from "@/lib/utils"
+import { stageCOnHost, taskStatusView } from "@/lib/qa-status"
 import { useDesk, useNow } from "@/state"
 import { EmptyState, Facts, FigureStrip, Muted, PageHeader, Panel, PanelEmpty, Section, Status, TaskKey } from "@/components/desk"
 import { RevokeStanding } from "@/components/controls"
@@ -93,6 +94,12 @@ export function StageCPage() {
             : `${failure.message}. Nothing is shown until the API answers; no value is guessed.`}</EmptyState></div>}
   </>
 
+  // Production runs the same Desk with no Stage C: say so once instead of a page of unknowns and controls.
+  if (!stageCOnHost(state)) return <>
+    {header}
+    <EmptyState title="Stage C is not on this host">This API reports no Stage C host acceptance, preflight, task or grant. Autonomous coding runs on the Stage C host only.</EmptyState>
+  </>
+
   return <>
     {header}
     {failure && <p role="alert" className="text-[13px] text-warning">Refresh failed ({failure.message}); showing the last read, marked stale.</p>}
@@ -110,7 +117,7 @@ function Overview({ s }: { s: StageCState }) {
   const last = lastReadyPr(s)
   const next = nextAction(s)
   const mode = rt.agents_paused === true ? "Agents paused" : rt.agents_paused === null ? "Not reported"
-    : rt.write_enabled === true ? "Agents running · code-write flag on" : rt.write_enabled === false ? "Agents running · code-write flag off" : "Agents running · code-write flag not reported"
+    : rt.write_enabled === true ? "Agents not paused · code-write flag on" : rt.write_enabled === false ? "Agents not paused · code-write flag off" : "Agents not paused · code-write flag not reported"
   const grant = (g: Parameters<typeof grantView>[0]) => <Badge v={grantView(g)} />
   return (
     <Section title="Autonomy overview" description="Every value as reported; the code-write flag is a permission, not readiness."
@@ -143,7 +150,7 @@ function Overview({ s }: { s: StageCState }) {
             {rt.preflight.checked_at && <Muted>checked {ago(rt.preflight.checked_at)} ago</Muted>}<Sha s={rt.preflight.source_sha} /></span>],
           // Why the worker is not ready: the watchdog's failing checks, as recorded (fixed check names only).
           ...(rt.preflight.failed?.length ? [["Failing checks", <span key="f" className="flex flex-wrap gap-1.5">
-            {rt.preflight.failed.map(c => <code key={c} className="rounded bg-muted px-1.5 font-mono text-xs">{c}</code>)}</span>] as [string, ReactNode]] : []),
+            {rt.preflight.failed.map(c => <code key={c} className="rounded bg-muted px-1.5 font-mono text-xs break-all">{c}</code>)}</span>] as [string, ReactNode]] : []),
           ["Host facts", <Badge key="hf" v={{ badge: "NOT_VERIFIED", label: "Not verified by the API" }} />],
         ]} />
       </div>
@@ -171,7 +178,7 @@ function StandingPanel({ s, onRevoked }: { s: StageCState; onRevoked: () => void
           ["Revoked", g.revoked === null ? <Muted key="r">Not reported</Muted> : revoked ? "Yes" : "No"],
           ["Source commit", <Sha key="sha" s={g.source_sha} />],
           ["Paths", g.paths === null ? <Muted key="p">Not reported</Muted> : g.paths.length
-            ? <ul key="p" className="grid gap-0.5 font-mono text-xs">{g.paths.map(p => <li key={p}>{p}</li>)}</ul> : <Muted key="p">None</Muted>],
+            ? <ul key="p" className="grid gap-0.5 font-mono text-xs break-all">{g.paths.map(p => <li key={p}>{p}</li>)}</ul> : <Muted key="p">None</Muted>],
           ["Expires", <At key="e" t={g.expires_at} />],
           ["Per-day cap", na(g.max_per_day)],
           ["Used today", na(g.used_today)],
@@ -196,7 +203,7 @@ function TaskCard({ t }: { t: Task }) {
   const ci = ciView(t)
   return (
     <Panel title={<span className="flex flex-wrap items-center gap-2">{t.key ? <TaskKey k={t.key} /> : <Muted>Unknown key</Muted>}
-      <Status value={t.status} />{t.needs_founder && <Status value="NEEDS_FOUNDER" label="Needs you" tone="warning" />}</span>}
+      <Status {...taskStatusView(t.status, t.stage)} />{t.needs_founder && <Status value="NEEDS_FOUNDER" label="Needs you" tone="warning" />}</span>}
       description={t.stage === "ABANDONED" ? "Abandoned" : t.stage === null ? "No lifecycle recorded" : undefined}>
       <div className="grid gap-4 p-4">
         <ol className="flex flex-wrap gap-x-4 gap-y-2" aria-label={`Pipeline of ${t.key ?? "task"}`}>
@@ -208,7 +215,7 @@ function TaskCard({ t }: { t: Task }) {
           ["Attempts", na(t.attempts)], ["Repairs", na(t.repairs)],
           ["Tests", <Badge key="t" v={testView(t)} />],
           ["Independent review", <Badge key="r" v={reviewView(t)} />],
-          ["Fingerprint", <span key="f" className="font-mono text-xs" title={[t.tested_fingerprint, t.reviewed_fingerprint].filter(Boolean).join(" / ") || undefined}>
+          ["Fingerprint", <span key="f" className="font-mono text-xs [overflow-wrap:anywhere]" title={[t.tested_fingerprint, t.reviewed_fingerprint].filter(Boolean).join(" / ") || undefined}>
             tested {short(t.tested_fingerprint, 12) ?? "n/a"} · reviewed {short(t.reviewed_fingerprint, 12) ?? "n/a"}</span>],
           ["Pull request", t.pr ? <span key="pr" className="flex flex-wrap items-center gap-2"><PrLink number={t.pr.number} /><Muted>head</Muted><Sha s={t.pr.head_sha} /></span> : <Muted key="pr">Not opened</Muted>],
           ["CI", <span key="ci" className="flex flex-wrap items-center gap-2"><Status value={ci.kind} label={ci.label} tone={ci.tone} />

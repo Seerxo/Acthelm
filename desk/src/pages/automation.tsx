@@ -155,7 +155,10 @@ export function AutomationPage() {
       <DataRows label="Runtime" headless descColumn rows={runtime} rowKey={x => x.name} title={x => x.name} desc={x => x.what}
         aside={{ head: "State", cell: x => x.state }} />
     </Section>
-    <Section title="Autonomy gates" description="Permission flags reported by the runtime; this page cannot change them. Stage C authority can be withdrawn here; it is granted per task, from the task." action={<RevokeStageC />}>
+    <Section title="Autonomy gates" description={r?.stage_c_enabled === true ? "Permission flags reported by the runtime; this page cannot change them. Stage C authority can be withdrawn here; it is granted per task, from the task."
+        : "Permission flags reported by the runtime; this page cannot change them."}
+      // Stage C runs on its own host only; where the runtime does not report it on, there is nothing here to withdraw.
+      action={r?.stage_c_enabled === true ? <RevokeStageC /> : undefined}>
       <DataRows label="Autonomy gates" headless descColumn rows={gates} rowKey={x => x.name} title={x => x.name} desc={x => x.what}
         aside={{ head: "State", cell: x => x.state }} />
       <p className="mt-3 max-w-3xl rounded-lg border border-border/70 bg-surface/70 px-3.5 py-3 text-[13px] leading-5 text-muted-foreground">
@@ -204,17 +207,17 @@ function Intervention({ loops }: { loops: { name: string; tone: Tone }[] }) {
   const failed = d.tasks.filter(t => t.status === "FAILED").length, blocked = d.tasks.filter(t => t.status === "BLOCKED").length
   const awaiting = d.tasks.filter(t => t.status === "WAITING_APPROVAL").length + d.approvals.length
   const late = loops.filter(l => l.tone === "warning" || l.tone === "danger")
-  const rows: { key: string; title: string; meta: string; n: number; tone: Tone; go: () => void }[] = [
+  const rows: { key: string; title: string; meta: string; n: number | null; tone: Tone; go?: () => void }[] = [
     { key: "failed", title: "Failed tasks", meta: "an agent run ended in failure", n: failed, tone: "danger", go: () => go("tasks", "attention") },
     { key: "blocked", title: "Blocked tasks", meta: "cannot continue on their own", n: blocked, tone: "danger", go: () => go("tasks", "attention") },
     { key: "approval", title: "Waiting for your approval", meta: "approval records and tasks stopped for a decision", n: awaiting, tone: "warning", go: () => go("approvals") },
-    { key: "providers", title: "Providers cooling down", meta: cooling.length ? cooling.join(", ") : "quota or rate limit", n: cooling.length, tone: "warning", go: () => go("agents") },
-    { key: "loops", title: "Loops late or failing", meta: late.length ? late.map(l => l.name).join(", ") : "every loop on schedule", n: late.length, tone: "warning", go: () => go("automation") },
+    { key: "providers", title: "Providers cooling down", meta: !w.providers ? "provider capacity not reported" : cooling.length ? cooling.join(", ") : "quota or rate limit", n: w.providers ? cooling.length : null, tone: "warning", go: () => go("agents") },
+    { key: "loops", title: "Loops late or failing", meta: late.length ? late.map(l => l.name).join(", ") : "none late or failing", n: late.length, tone: "warning" },
   ]
   return (
     <Panel title="Needs intervention" description="What will not resolve by itself">
       {rows.map(r => <PanelRow key={r.key} onClick={r.go} className="items-center py-2.5" lead={<Dot tone={r.n ? r.tone : "neutral"} />} title={r.title} meta={r.meta}
-        trail={<span className={cn("num text-[15px] font-semibold", r.n ? (r.tone === "danger" ? "text-destructive" : "text-warning") : "text-muted-foreground")}>{r.n}</span>} />)}
+        trail={<span className={cn("num text-[15px] font-semibold", r.n ? (r.tone === "danger" ? "text-destructive" : "text-warning") : "text-muted-foreground")}>{r.n ?? "—"}</span>} />)}
     </Panel>
   )
 }
@@ -224,7 +227,7 @@ function KillSwitch() {
   const [brief, setBrief] = useState<string | null>(null)
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <Button variant="outline" className="h-10" onClick={() => apiText("/company/brief").then(setBrief, e => setBrief(`Brief unavailable: ${(e as Error).message}`))}>
+      <Button variant="outline" className="h-11 sm:h-10" onClick={() => apiText("/company/brief").then(setBrief, e => setBrief(`Brief unavailable: ${(e as Error).message}`))}>
         <FileText />Company brief
       </Button>
       <AgentsSwitch />

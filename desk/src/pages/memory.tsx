@@ -93,7 +93,7 @@ export function MemoryPage() {
               const body = <>{f.fields.length > 0 && <Facts items={f.fields} />}
                 {f.prose && <p className="text-sm whitespace-pre-line text-muted-foreground">{f.prose}</p>}</>
               const head = <span className="min-w-0 flex-1 truncate font-medium">{f.title}</span>
-              return q ? <article key={f.title} className="grid gap-2 py-4"><h3 className="font-semibold">{f.title}</h3>{body}</article>
+              return q ? <article key={f.title} className="grid gap-2 py-4"><h2 className="font-semibold">{f.title}</h2>{body}</article>
                 : <Expandable key={f.title} summary={head}>{body}</Expandable>
             })}</div> : none("No permanent facts recorded.")
           })()}

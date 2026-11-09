@@ -25,8 +25,8 @@ function ApprovalCard({ a }: { a: Approval }) {
   return (
     <article className={cn("panel grid content-start gap-5 p-5", high && "border-destructive/35")} aria-labelledby={`apr-${a.key}`}>
       <header className="grid gap-1.5">
-        <div className="flex items-center justify-between gap-3 text-xs">
-          <span className="font-mono text-muted-foreground">{a.key} · requested by {a.requested_by} · {ago(a.created_at)} ago</span>
+        <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 text-xs">
+          <span className="min-w-0 font-mono text-muted-foreground [overflow-wrap:anywhere]">{a.key} · requested by {a.requested_by} · {ago(a.created_at)} ago</span>
           <Status value={a.risk} label={`${humanize(a.risk)} risk`} pill />
         </div>
         <h3 id={`apr-${a.key}`} className="text-[16px] leading-snug font-semibold tracking-tight">{a.action}</h3>

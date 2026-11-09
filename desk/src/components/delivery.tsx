@@ -47,7 +47,7 @@ export function DeliveryPanel({ items, limit, action, expandable }: { items: Imp
       {shown.length ? shown.map(i => <DeliveryRow key={i.task} i={i} />)
         : <PanelEmpty title="No code mission in flight">Missions appear here from detection until their effect is measured.</PanelEmpty>}
       {expandable && items.length > shown.length && <button type="button" onClick={() => setAll(true)}
-        className="flex w-full items-center justify-center px-4 py-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground">
+        className="flex min-h-11 w-full items-center justify-center px-4 py-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring">
         Show all {items.length} · {items.length - shown.length} more</button>}
     </Panel>
   )

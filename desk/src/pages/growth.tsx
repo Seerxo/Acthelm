@@ -136,7 +136,7 @@ export function GrowthPage() {
     {!Array.isArray(d.portfolio) && <Calm status={<Status value="UNKNOWN" />} title="Portfolio unavailable">This API version does not report it.</Calm>}
     {Array.isArray(d.portfolio) && !units.length && <Calm title="No business units recorded">Growth shows per unit once one is recorded and reports a series with its source. Nothing is estimated meanwhile.</Calm>}
     {measured.map(u => (
-      <Section key={u.key} title={<button className="inline-flex min-h-6 items-center text-left hover:underline" onClick={() => go("project", u.key)}>{u.name}</button>}
+      <Section key={u.key} title={<button type="button" className="inline-flex min-h-11 items-center text-left underline-offset-2 hover:underline focus-visible:underline sm:min-h-6" onClick={() => go("project", u.key)}>{u.name}</button>}
         action={<span>{u.latest_at ? `newest reading ${ago(u.latest_at)} ago` : ""}{dataState(u).stale > 0 && <span className="text-warning"> · {dataSummary(u)}</span>}</span>}>
         {/* Known growth shapes get their own view; any other reported series falls back to the plain list. */}
         <div className="grid gap-4">
