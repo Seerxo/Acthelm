@@ -8,7 +8,6 @@ import { cn } from "@/lib/utils"
 import { useData, useDesk } from "@/state"
 import { Calm, Muted, PageHeader, Section, Status } from "@/components/desk"
 import { Stat, StatGroup } from "@/pages/finance"
-import { PageTabs } from "@/components/page-tabs"
 import { MetricRows } from "@/pages/projects"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 
@@ -133,7 +132,6 @@ export function GrowthPage() {
   const silent = units.filter(u => !u.metrics.length)
   return <>
     <PageHeader title="Growth" />
-    <PageTabs page="growth" />
     {!Array.isArray(d.portfolio) && <Calm status={<Status value="UNKNOWN" />} title="Portfolio unavailable">This API version does not report it.</Calm>}
     {Array.isArray(d.portfolio) && !units.length && <Calm title="No business units recorded" />}
     {measured.map(u => (

@@ -24,7 +24,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { useReturnFocus } from "@/lib/return-focus"
-import { PageTabs } from "@/components/page-tabs"
 
 const NONE = "none"  // Radix Select cannot hold "": the sentinel means "not attached"
 
@@ -279,7 +278,6 @@ export function TasksPage() {
     <PageHeader title={pageTitle("tasks")}>
       <Button className="h-10" onClick={() => compose(true)}><Plus />New task</Button>
     </PageHeader>
-    <PageTabs page="tasks" />
     <div className="grid gap-3">
       <nav aria-label="Filter work" className="task-filters-scroll -mx-1 flex flex-nowrap gap-1 px-1 pb-1">
         {FILTERS.map(f => {

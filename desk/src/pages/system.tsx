@@ -9,7 +9,6 @@ import { groupEvents, hasRepeats } from "@/lib/event-groups"
 import { useChanges, useData, useDesk, useNow, type Page } from "@/state"
 import { Calm, ChangeMark, Disclosure, Dot, Expandable, Facts, Muted, PageHeader, Panel, PanelRow, Section, Status, FigureStrip } from "@/components/desk"
 import { installed, serviceWorker } from "@/lib/pwa"
-import { PageTabs } from "@/components/page-tabs"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -75,7 +74,6 @@ export function ActivityPage() {
   const mode = view ?? (hasRepeats(events) ? "grouped" : "timeline")
   return <>
     <PageHeader title="Activity" />
-    <PageTabs page="activity" />
     {events.length > 0 && <FigureStrip label="Activity at a glance" items={[
       { label: "Recent events", value: String(events.length), sub: `newest ${ago(events.reduce((m, e) => (e.at > m ? e.at : m), events[0].at))} ago` },
       { label: "High or critical", value: String(n("high")), tone: n("high") ? "danger" : undefined, sub: n("high") ? "worth a look" : "none recorded", onClick: () => setSev("high") },
@@ -177,7 +175,6 @@ export function HealthPage() {
       meta={c.detail} trail={c.page ? <ChevronRight className="size-4 text-muted-foreground/50" /> : undefined} />)
   return <>
     <PageHeader title="System status" />
-    <PageTabs page="health" />
     {/* Problems first. Anything not verified (failing, late or unknown) is a problem; only verified checks fold away. */}
     {problems.length > 0 ? <Panel title="Needs attention" count={problems.length}>{problems.map(row)}</Panel>
       : checks.length ? <Calm title="Every check is verified" status={<Dot tone="success" />} />

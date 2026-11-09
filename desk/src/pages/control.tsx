@@ -3,7 +3,6 @@ import { ago, humanize, when } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { useData, useNow } from "@/state"
 import { ClampText, EmptyState, Facts, PageHeader, FigureStrip } from "@/components/desk"
-import { PageTabs } from "@/components/page-tabs"
 
 export function IncidentsPage() {
   const d = useData()
@@ -15,7 +14,6 @@ export function IncidentsPage() {
   const watched = !!at && now - new Date(at).getTime() <= 25 * 60_000
   return <>
     <PageHeader title="Incidents" />
-    <PageTabs page="incidents" />
     {d.incidents.length > 0 && <FigureStrip label="Incidents at a glance" items={[
       { label: "Open", value: String(d.incidents.length), tone: d.incidents.length ? "warning" : undefined, sub: d.incidents.length ? "recorded and unresolved" : "none recorded" },
       { label: "SEV0–1", value: String(sev("SEV0") + sev("SEV1")), tone: sev("SEV0") + sev("SEV1") ? "danger" : undefined, sub: "highest severity" },

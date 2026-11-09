@@ -6,7 +6,6 @@ import { api, type Memory } from "@/lib/api"
 import { when } from "@/lib/format"
 import { checkMemory } from "@/lib/validate"
 import { Calm, Expandable, Facts, PageHeader, Status } from "@/components/desk"
-import { PageTabs } from "@/components/page-tabs"
 import { Chips } from "@/components/detail"
 import { ApproveLearning } from "@/components/controls"
 import { Input } from "@/components/ui/input"
@@ -52,7 +51,6 @@ export function MemoryPage() {
   const first = tabs.find(([, , n]) => n > 0)?.[0] ?? "decisions"
   return <>
     <PageHeader title="Memory" />
-    <PageTabs page="memory" />
     {error ? <div role="alert" className="panel grid justify-items-start gap-2 px-4 py-5">
         <span className="flex items-center gap-2 text-sm font-medium"><Status value="failed" tone="danger" label="Memory could not be loaded" /></span>
         <p className="text-[13px] text-muted-foreground">{error}</p>

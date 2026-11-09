@@ -11,7 +11,6 @@ import { cn } from "@/lib/utils"
 import { mergedAwaitingAcceptance } from "@/lib/qa-status"
 import { Calm, ChangeMark, Disclosure, DOT, Expandable, FigureStrip, Muted, PageHeader, Status, TaskKey } from "@/components/desk"
 import { AgentsSwitch } from "@/components/controls"
-import { PageTabs } from "@/components/page-tabs"
 
 const short = (name: string) => name.replace(/ Agent$/, "")
 const LANE: Group[] = ["attention", "running", "review", "next", "waiting"]   // open work, in the order it needs attention
@@ -143,7 +142,6 @@ export function AgentsPage() {
     </section>)
   return <>
     <PageHeader title="Agents"><AgentsSwitch /></PageHeader>
-    <PageTabs page="agents" />
     {d.agents.length > 0 && <FigureStrip label="Agents at a glance" items={[
       // Zero running is a count, not a verdict: idle agents with READY work can be the problem (lib/operating.ts decides health).
       { label: "Running now", value: String(n("RUNNING")), sub: n("RUNNING") ? "executing a task" : "none executing; not a health signal" },

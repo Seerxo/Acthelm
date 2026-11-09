@@ -17,7 +17,6 @@ import { Disclosure, Dot, Expandable, FigureStrip, Muted, PageHeader, Panel, Pan
 import { DeliveryPanel } from "@/components/delivery"
 import { RunsChart } from "@/components/charts"
 import { DataRows } from "@/components/data-rows"
-import { PageTabs } from "@/components/page-tabs"
 
 const MIN = 60_000, HOUR = 60 * MIN
 const unpack = (x: State) => ({ state: x.node, tone: x.tone })
@@ -118,7 +117,6 @@ export function AutomationPage() {
   ]
   return <>
     <PageHeader title="Automation"><KillSwitch /></PageHeader>
-    <PageTabs page="automation" />
     <FigureStrip label="Automation at a glance" items={[
       { label: "On schedule", value: `${count("success") + count("info")} of ${loops.length}`, sub: "loops with fresh evidence" },
       { label: "Need attention", value: String(count("warning") + count("danger")), tone: count("danger") ? "danger" : count("warning") ? "warning" : undefined,

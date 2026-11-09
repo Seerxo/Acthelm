@@ -2,7 +2,6 @@
 // amount shows its class, never an invented figure. Data: /desk/state (revenue, portfolio, costs).
 import { pageTitle } from "@/lib/nav"
 import { Children, isValidElement, type ReactElement, type ReactNode } from "react"
-import { PageTabs } from "@/components/page-tabs"
 import { ago, humanize, reading, REVENUE_SOURCE, usd, when } from "@/lib/format"
 import { freshLabel, isUnverified, staleSuffix } from "@/lib/freshness"
 import { cn } from "@/lib/utils"
@@ -129,7 +128,6 @@ function Costs() {
 export function FinancePage() {
   return <>
     <PageHeader title={pageTitle("finance")} />
-    <PageTabs page="finance" />
     <Section title="Revenue"><Revenue /></Section>
     <Section title="By business unit"><ByUnit /></Section>
     <Section title="Costs"><Costs /></Section>

@@ -3,7 +3,6 @@
 // action is the emergency revoke of the standing grant. Green CI here is a PR check, not a production deploy.
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { ChevronRight, ExternalLink, RefreshCw } from "lucide-react"
-import { PageTabs } from "@/components/page-tabs"
 import { api } from "@/lib/api"
 import { ago, humanize, when } from "@/lib/format"
 import { freshLabel } from "@/lib/freshness"
@@ -86,7 +85,7 @@ export function StageCPage() {
       {marker ? `${humanize(marker)} · ` : ""}{fetchedAt ? `read ${ago(fetchedAt)} ago` : ""}</span>}>
     <Button variant="outline" className="h-11" onClick={() => void read()} disabled={loading} aria-label="Refresh Stage C state">
       <RefreshCw className={cn(loading && "animate-spin")} />Refresh</Button>
-  </PageHeader><PageTabs page="stage-c" /></>
+  </PageHeader></>
 
   if (!state) return <>
     {header}
