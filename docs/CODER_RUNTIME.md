@@ -286,6 +286,31 @@ At abort/completion, revoke the standing authorization, drain/stop new work, the
 `scripts/compose-bound.sh up -d --no-deps company-worker` to restore the hard-coded OFF flag and verify it.
 Arming and disarming recreate the worker and require their own explicit founder authorization.
 
+### Founder Start/Stop from the Desk
+
+On the Stage C host the flag is no longer left on. It follows the founder's existing one-task authorization:
+
+- **Start Pilot** is Desk "Authorize Stage C" (`POST /stage-c/authorization`, `control.authorize_pilot`): one task,
+  the deployed SHA, about 30 minutes, single use. **Stop Pilot** is `POST /stage-c/authorization/revoke`.
+- The root timer `scripts/systemd/stage-c-arm.timer` runs `scripts/stage-c-arm` every 20 seconds under
+  `flock /run/stage-c-arm.lock`. It asks `app/stage_c_arm.py` inside `company-api` (read-only PostgreSQL session,
+  proven with `SHOW default_transaction_read_only`) and arms the worker only when all hold: host acceptance for
+  the source SHA in `.pilot-source-sha`, agents not paused, a fresh watchdog readiness for that SHA, and either an
+  unexpired, unrevoked authorization for that SHA or the authorized task's own run still in flight after it consumed
+  the authorization (the repository lease held by `stage-c-runner:<task>`, or the consuming run still STARTED).
+- Arm writes `/root/stage-c-pilot.compose.yml` (mode 600, exactly the JSON above) and recreates only
+  `company-worker` with the four image IDs from `pilot-images.env`; it refuses unless `company-api` has
+  `CODER_PAUSE_FENCE_ENABLED=true`. Disarm recreates the worker without the override and deletes it. If the worker
+  cannot be recreated safely, it is stopped. Any read error disarms. A tick that already matches changes nothing.
+- Each arm/disarm logs one journal line (`journalctl -t stage-c-arm`): time, action, reason code, task key.
+  `scripts/stage-c-arm --dry-run` prints the decision and the worker state and changes nothing.
+- Stop Pilot disarms within about 20 seconds even mid-run: the worker is recreated and the run is recovered as an
+  infrastructure interruption (`stage_c_worker.recover_interrupted`). Every new claim, including a CI repair,
+  needs a new Start Pilot. The standing authorization does not arm the worker.
+
+This host has no release ledger, so `scripts/compose-bound.sh` is not used here; the timer runs the same pinned
+Compose command the manual pilot used. The API gets no Docker socket and no new endpoint.
+
 Every worker tick tracks already-published Stage C tasks, including when writes are OFF.
 It calls `stage_c_ci.ingest` (same PR, at most two CI repairs, normal daily/retry gates),
 records only a verified founder merge and calls `stage_c_verify.step`. The existing host

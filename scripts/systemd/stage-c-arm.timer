@@ -1,0 +1,14 @@
+# Stage C (docs/CODER_RUNTIME.md, Founder Start/Stop from the Desk): re-evaluate every 20s, so Start Pilot
+# arms within about 20s and Stop Pilot, expiry or a finished run disarms within about 20s. An idle tick is
+# one read-only query and two docker exec calls. The service is a oneshot, so runs never overlap.
+[Unit]
+Description=Company OS Stage C worker arm/disarm poll
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=20s
+AccuracySec=1s
+Unit=stage-c-arm.service
+
+[Install]
+WantedBy=timers.target
