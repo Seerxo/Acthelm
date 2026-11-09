@@ -43,7 +43,7 @@ test("every route belongs to a section and every section tab is a real route", (
   // Every page except the project detail page is reachable from a section, so nothing is orphaned.
   const reachable = new Set(SECTIONS.flatMap(s => [s.home, ...s.tabs]))
   assert.deepEqual(PAGES.filter(p => !reachable.has(p)), ["project"])
-  assert.equal(sectionOf("project").key, "home")
-  assert.equal(SECTIONS.length, 3)
+  assert.equal(sectionOf("project").key, "goals")
+  assert.equal(SECTIONS.length, 7)
   for (const p of PAGES) assert.ok(PAGE_LABEL[p], p)
 })

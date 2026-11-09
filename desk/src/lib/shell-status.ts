@@ -2,7 +2,7 @@
 // heard from, and how many decisions wait for the founder. Read only from /desk/state through the same helpers the
 // pages use (operating.ts vitals, agent-state.ts, approvals.ts), so the header never disagrees with the page it opens.
 // Missing data reads "unknown", never 0 or "running".
-import type { DeskState, Tone } from "./api"
+import type { DeskState, Need, Tone } from "./api"
 import { agentState } from "./agent-state.ts"
 import { approvalSummary } from "./approvals.ts"
 import { vitals } from "./operating.ts"
@@ -26,4 +26,11 @@ export function shellStatus(d: DeskState, now: number): ShellFact[] {
   const approvals: ShellFact = { key: "approvals", label: "Approvals", value: n ? `${n} waiting` : "None waiting",
     short: String(n), tone: n ? "warning" : "neutral", page: "approvals" }
   return [agents, worker, approvals]
+}
+
+/** What comes next for the founder: the top needs-you item (the API sorts by urgency, app/desk.py needs_you).
+ *  null = nothing needs the founder; undefined = the API did not report the queue, so nothing is claimed. */
+export function nextNeed(d: Pick<DeskState, "needs_you">): Need | null | undefined {
+  if (!Array.isArray(d.needs_you)) return undefined
+  return d.needs_you[0] ?? null
 }

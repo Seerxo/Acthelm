@@ -32,10 +32,11 @@ export function Status({ value, tone, label, pill, live, className }: {
 }) {
   const t = tone ?? toneOf(value)
   return (
-    <span className={cn("inline-flex shrink-0 items-center gap-1.5 text-xs font-medium whitespace-nowrap",
-      pill ? cn("h-5 rounded-full px-2", PILL[t]) : TEXT[t], className)}>
-      <span className={cn("size-1.5 rounded-full", DOT[t], live && "desk-pulse")} aria-hidden />
-      {label ?? humanize(value ?? "UNKNOWN")}
+    <span className={cn("inline-flex max-w-full min-w-0 items-center gap-1.5 text-xs font-medium",
+      pill ? cn("min-h-5 rounded-full px-2", PILL[t]) : TEXT[t], className)}>
+      <span className={cn("size-1.5 shrink-0 rounded-full", DOT[t], live && "desk-pulse")} aria-hidden />
+      {/* Wraps instead of widening a 375px row; short labels still sit on one line. */}
+      <span className="min-w-0 [overflow-wrap:anywhere]">{label ?? humanize(value ?? "UNKNOWN")}</span>
     </span>
   )
 }
@@ -159,7 +160,7 @@ export function StatStrip({ items, className }: { items: StatItem[]; className?:
         const cls = cn("grid min-w-0 flex-1 content-start gap-0.5 px-4 py-3 text-left sm:first:pl-0",
           i % 2 === 1 && "max-sm:border-l", i > 1 && "max-sm:border-t")
         return s.onClick
-          ? <button key={s.label} title={s.title} onClick={s.onClick} className={cn(cls, "group transition-colors duration-150 hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:first:-ml-0")}>{body}</button>
+          ? <button key={s.label} type="button" title={s.title} onClick={s.onClick} className={cn(cls, "group transition-colors duration-150 hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:first:-ml-0")}>{body}</button>
           : <div key={s.label} title={s.title} className={cls}>{body}</div>
       })}
     </div>
@@ -252,7 +253,7 @@ export function CommandTrack({ l, compact }: { l: Lifecycle; compact?: boolean }
   const at = trackIndex(l.step)
   if (at === null) return <Status value={l.step} label={l.label} tone={l.tone} />
   return (
-    <span className="inline-flex items-center gap-2" title={l.detail} aria-label={`${l.label}: ${l.detail}`}>
+    <span role="img" className="inline-flex items-center gap-2" title={l.detail} aria-label={`${l.label}: ${l.detail}`}>
       <span className="flex items-center gap-[3px]" aria-hidden>
         {TRACK.map((s, i) => (
           <i key={s} className={cn("h-1 rounded-full transition-colors duration-200", compact ? "w-2.5" : "w-4",
@@ -266,17 +267,20 @@ export function CommandTrack({ l, compact }: { l: Lifecycle; compact?: boolean }
 
 /** A bordered list surface: the one container for rows of objects (tasks, decisions, units). A heading row sits
  *  above it on the page, never inside a second card. */
-export function Panel({ title, action, children, className, description, count }: {
+export function Panel({ title, action, children, className, description, count, level = 2 }: {
   title?: ReactNode; action?: ReactNode; children: ReactNode; className?: string; description?: ReactNode; count?: number
+  /** Heading level of the title (default h2); use 3 for a Panel inside a titled Section. */
+  level?: 2 | 3 | 4
 }) {
+  const H = `h${level}` as "h2" | "h3" | "h4"
   return (
     <section className={cn("grid min-w-0 content-start gap-2.5", className)}>
       {title && (
         <header className="flex min-h-7 items-end justify-between gap-3 px-0.5">
           <div className="min-w-0">
-            <h2 className="flex items-baseline gap-2 text-[13px] leading-6 font-semibold tracking-[-0.005em]">
+            <H className="flex items-baseline gap-2 text-[13px] leading-6 font-semibold tracking-[-0.005em]">
               {title}{count !== undefined && <span className="num rounded-full bg-muted px-1.5 text-[11px] leading-[18px] font-medium text-muted-foreground">{count}</span>}
-            </h2>
+            </H>
             {description && <p className="text-xs text-muted-foreground">{description}</p>}
           </div>
           {action && <div className="flex max-w-[65%] min-w-0 flex-wrap items-center justify-end gap-x-3 text-xs text-muted-foreground">{action}</div>}

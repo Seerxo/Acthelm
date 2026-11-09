@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { DeskState } from "./api.ts"
-import { shellStatus } from "./shell-status.ts"
+import { nextNeed, shellStatus } from "./shell-status.ts"
 
 const NOW = Date.parse("2026-11-09T12:00:00Z")
 const heard = { status: "HEALTHY", heartbeat_at: "2026-11-09T11:59:30Z" }
@@ -37,4 +37,11 @@ test("approvals count records plus tasks stopped for a decision", () => {
     tasks: [{ key: "T1", status: "WAITING_APPROVAL" }, { key: "T2", status: "READY" }] as DeskState["tasks"] })
   assert.equal(get(d).approvals.short, "2")
   assert.equal(get(d).approvals.tone, "warning")
+})
+
+test("what's next is the API's top needs-you item; an unreported queue claims nothing", () => {
+  assert.equal(nextNeed({}), undefined)
+  assert.equal(nextNeed({ needs_you: [] }), null)
+  const top = { title: "Approve deploy" } as NonNullable<DeskState["needs_you"]>[number]
+  assert.equal(nextNeed({ needs_you: [top, { title: "later" } as typeof top] }), top)
 })

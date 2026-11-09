@@ -1,0 +1,35 @@
+// Stage C navigation is shown only where the backend proves Stage C exists. `npm test`.
+import assert from "node:assert/strict"
+import { test } from "node:test"
+import type { DeskState } from "./api.ts"
+import { stageCPresent } from "./stage-c-gate.ts"
+
+const SHA = "a".repeat(40)
+// What production answers: the watchdog's failing preflight (recorded on every host), no acceptance, no tasks, no grants.
+const prod = { version: 1, tasks: [], authorizations: { one_task: null, standing: null },
+  runtime: { acceptance: { source_sha: null, accepted_at: null, valid: null },
+    preflight: { status: "FAIL", checked_at: "2026-11-09T10:00:00Z", failed: ["preflight_unavailable"] } } }
+const withRt = (rt: object) => ({ ...prod, runtime: { ...prod.runtime, ...rt } })
+
+test("absent: no answer, or production's recorded-but-failing preflight, hides Stage C", () => {
+  assert.equal(stageCPresent(undefined), false)
+  assert.equal(stageCPresent(null), false)
+  assert.equal(stageCPresent(prod), false)
+  assert.equal(stageCPresent(withRt({ preflight: { status: "STALE", checked_at: "2026-11-09T10:00:00Z" } })), false)
+  assert.equal(stageCPresent(prod, { runtime: { stage_c_enabled: false } } as DeskState), false)
+})
+
+test("present: acceptance, passing preflight, a task, a grant or the code-write flag shows Stage C", () => {
+  assert.equal(stageCPresent(withRt({ acceptance: { source_sha: SHA, accepted_at: "2026-11-09T09:00:00Z", valid: false } })), true)
+  assert.equal(stageCPresent(withRt({ preflight: { status: "PASS" } })), true)
+  assert.equal(stageCPresent({ ...prod, tasks: [{ key: "TASK-1" }] }), true)
+  assert.equal(stageCPresent({ ...prod, authorizations: { one_task: { status: "ACTIVE" }, standing: null } }), true)
+  assert.equal(stageCPresent({ ...prod, authorizations: { one_task: null, standing: "garbled" } }), true)  // unreadable grant
+  assert.equal(stageCPresent(undefined, { runtime: { stage_c_enabled: true } } as DeskState), true)
+})
+
+test("error or junk: hidden, never a crash", () => {
+  for (const junk of ["<html>", 42, [], true]) assert.equal(stageCPresent(junk), false)
+  const hostile = new Proxy({}, { get() { throw new Error("boom") } })
+  assert.equal(stageCPresent(hostile), false)
+})
