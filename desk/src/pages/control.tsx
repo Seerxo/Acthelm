@@ -3,6 +3,7 @@ import { ago, humanize, when } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { useData, useNow } from "@/state"
 import { ClampText, EmptyState, Facts, PageHeader, FigureStrip } from "@/components/desk"
+import { PageTabs } from "@/components/page-tabs"
 
 export function IncidentsPage() {
   const d = useData()
@@ -13,9 +14,9 @@ export function IncidentsPage() {
   const at = d.health.resources.at, now = useNow("minute")
   const watched = !!at && now - new Date(at).getTime() <= 25 * 60_000
   return <>
-    <PageHeader title="Incidents" description="Production problems, business impact first."
-      />
-    {(d.incidents.length > 0 || watched) && <FigureStrip label="Incidents at a glance" items={[
+    <PageHeader title="Incidents" />
+    <PageTabs page="incidents" />
+    {d.incidents.length > 0 && <FigureStrip label="Incidents at a glance" items={[
       { label: "Open", value: String(d.incidents.length), tone: d.incidents.length ? "warning" : undefined, sub: d.incidents.length ? "recorded and unresolved" : "none recorded" },
       { label: "SEV0–1", value: String(sev("SEV0") + sev("SEV1")), tone: sev("SEV0") + sev("SEV1") ? "danger" : undefined, sub: "highest severity" },
       { label: "Lower severity", value: String(d.incidents.length - sev("SEV0") - sev("SEV1")), sub: "SEV2 and below" },
@@ -25,17 +26,17 @@ export function IncidentsPage() {
         <header className="grid gap-1">
           <div className="flex items-center justify-between gap-3">
             <span className={cn("text-[11px] font-semibold tracking-[0.06em] uppercase", ["SEV0", "SEV1"].includes(i.severity) ? "text-destructive" : "text-warning")}>{i.severity}</span>
-            <span className="max-w-[60%] text-right font-mono text-xs break-all text-muted-foreground">{i.key}</span>
           </div>
           <h2 className="text-[15px] leading-snug font-semibold">{i.title}</h2>
           <p className="text-sm text-muted-foreground">{unit(i.business_unit) ?? "No business unit linked"}{i.service && ` · ${i.service}`} · open {ago(i.started_at)}</p>
         </header>
         {i.description && <div className="grid gap-1"><span className="text-xs text-muted-foreground">Impact</span><p className="text-sm"><ClampText>{i.description}</ClampText></p></div>}
-        <Facts items={[["Status", humanize(i.status)], ["Root cause", i.root_cause ? <ClampText key="root-cause">{i.root_cause}</ClampText> : "Not yet identified"], ["Detected by", i.detected_by],
-          ["Started", when(i.started_at)], ["Founder notified", i.founder_notified ? "Yes" : "No"]]} />
+        <Facts items={[["Status", humanize(i.status)], ["Root cause", i.root_cause ? <ClampText key="root-cause">{i.root_cause}</ClampText> : "Not yet identified"], ["Founder notified", i.founder_notified ? "Yes" : "No"]]} />
+        <details className="group text-[13px]"><summary className="min-h-11 cursor-pointer list-none py-2 text-muted-foreground hover:text-foreground [&::-webkit-details-marker]:hidden sm:min-h-0">Details</summary>
+          <Facts items={[["Key", <span key="k" className="font-mono">{i.key}</span>], ["Detected by", i.detected_by], ["Started", when(i.started_at)]]} /></details>
       </article>))}</div>
       : !watched
-        ? <EmptyState icon={<ShieldCheck />} title="No incidents recorded, not verified">{at ? `The watchdog last reported ${ago(at)} ago` : "The watchdog has not reported"}, so an empty list is not proof that production is healthy.</EmptyState>
-        : <EmptyState icon={<ShieldCheck />} title="No active incidents">Production problems recorded by the Company OS appear here.</EmptyState>}
+        ? <EmptyState icon={<ShieldCheck />} title="No incidents recorded, not verified">{at ? `Watchdog last reported ${ago(at)} ago` : "The watchdog has not reported"}: an empty list is not proof of health.</EmptyState>
+        : <EmptyState icon={<ShieldCheck />} title="No active incidents" />}
   </>
 }

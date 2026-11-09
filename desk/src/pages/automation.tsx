@@ -17,6 +17,7 @@ import { Disclosure, Dot, Expandable, FigureStrip, Muted, PageHeader, Panel, Pan
 import { DeliveryPanel } from "@/components/delivery"
 import { RunsChart } from "@/components/charts"
 import { DataRows } from "@/components/data-rows"
+import { PageTabs } from "@/components/page-tabs"
 
 const MIN = 60_000, HOUR = 60 * MIN
 const unpack = (x: State) => ({ state: x.node, tone: x.tone })
@@ -116,12 +117,13 @@ export function AutomationPage() {
       state: <span className={cn("text-sm", r?.drift.length && "text-warning")}>{!r ? <Muted>Not reported</Muted> : r.drift.length ? r.drift.join(" · ") : <Status value="NONE" label="None" tone="success" />}</span> },
   ]
   return <>
-    <PageHeader title="Automation" description="What runs by itself, and the one switch that stops it."><KillSwitch /></PageHeader>
+    <PageHeader title="Automation"><KillSwitch /></PageHeader>
+    <PageTabs page="automation" />
     <FigureStrip label="Automation at a glance" items={[
       { label: "On schedule", value: `${count("success") + count("info")} of ${loops.length}`, sub: "loops with fresh evidence" },
       { label: "Need attention", value: String(count("warning") + count("danger")), tone: count("danger") ? "danger" : count("warning") ? "warning" : undefined,
         sub: count("warning") + count("danger") ? "late, failing or unproven" : "nothing late" },
-      { label: "No evidence", value: String(count("neutral")), sub: "not reported yet, never assumed healthy" },
+      { label: "No evidence", value: String(count("neutral")), sub: "never assumed healthy" },
       { label: "Agent execution", value: d.control.agents_paused ? "Paused" : "On", tone: d.control.agents_paused ? "warning" : undefined,
         sub: d.control.agents_paused ? "paused by you; services keep running" : "kill switch not engaged" },
     ]} />
@@ -155,16 +157,12 @@ export function AutomationPage() {
       <DataRows label="Runtime" headless descColumn rows={runtime} rowKey={x => x.name} title={x => x.name} desc={x => x.what}
         aside={{ head: "State", cell: x => x.state }} />
     </Section>
-    <Section title="Autonomy gates" description={r?.stage_c_enabled === true ? "Permission flags reported by the runtime; this page cannot change them. Stage C authority can be withdrawn here; it is granted per task, from the task."
-        : "Permission flags reported by the runtime; this page cannot change them."}
+    <Section title="Autonomy gates" description="Reported by the runtime; read-only here."
       // Stage C runs on its own host only; where the runtime does not report it on, there is nothing here to withdraw.
       action={r?.stage_c_enabled === true ? <RevokeStageC /> : undefined}>
       <DataRows label="Autonomy gates" headless descColumn rows={gates} rowKey={x => x.name} title={x => x.name} desc={x => x.what}
         aside={{ head: "State", cell: x => x.state }} />
-      <p className="mt-3 max-w-3xl rounded-lg border border-border/70 bg-surface/70 px-3.5 py-3 text-[13px] leading-5 text-muted-foreground">
-        Stage C runtime readiness, code-writing permission and a completed independently reviewed pilot are separate facts.
-        This read model reports the permission flag above; it does not prove preflight readiness or pilot completion.
-      </p>
+      <p className="mt-3 text-xs text-muted-foreground">The Stage C flag is a permission, not proof of preflight readiness or a completed pilot.</p>
     </Section>
     </Disclosure>
   </>
@@ -183,8 +181,8 @@ function Outcomes() {
   const series = d.run_series
   const sum = (k: "SUCCEEDED" | "FAILED" | "ESCALATED" | "STARTED") => (series ?? []).reduce((n, x) => n + x[k], 0)
   return (
-    <Panel title="Execution outcomes" description="Agent runs, last 14 days">
-      {series === undefined ? <PanelEmpty title="Not reported">This API version does not report runs.</PanelEmpty> : <div className="grid gap-3 p-4">
+    <Panel title="Execution outcomes · 14 days">
+      {series === undefined ? <PanelEmpty title="Not reported" /> : <div className="grid gap-3 p-4">
         <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
           {([["Succeeded", sum("SUCCEEDED"), "success"], ["Failed", sum("FAILED"), "danger"], ["Escalated", sum("ESCALATED"), "warning"], ["Still running", sum("STARTED"), "info"]] as const)
             .map(([label, n, tone]) => <div key={label} className="grid gap-0.5">
@@ -214,10 +212,15 @@ function Intervention({ loops }: { loops: { name: string; tone: Tone }[] }) {
     { key: "providers", title: "Providers cooling down", meta: !w.providers ? "provider capacity not reported" : cooling.length ? cooling.join(", ") : "quota or rate limit", n: w.providers ? cooling.length : null, tone: "warning", go: () => go("agents") },
     { key: "loops", title: "Loops late or failing", meta: late.length ? late.map(l => l.name).join(", ") : "none late or failing", n: late.length, tone: "warning" },
   ]
+  // Only what needs a hand gets a row; the clear and the unreported fold into one quiet line each (never shown as 0).
+  const open = rows.filter(r => r.n), clear = rows.filter(r => r.n === 0), unknown = rows.filter(r => r.n === null)
   return (
-    <Panel title="Needs intervention" description="What will not resolve by itself">
-      {rows.map(r => <PanelRow key={r.key} onClick={r.go} className="items-center py-2.5" lead={<Dot tone={r.n ? r.tone : "neutral"} />} title={r.title} meta={r.meta}
-        trail={<span className={cn("num text-[15px] font-semibold", r.n ? (r.tone === "danger" ? "text-destructive" : "text-warning") : "text-muted-foreground")}>{r.n ?? "—"}</span>} />)}
+    <Panel title="Needs intervention" count={open.length}>
+      {open.map(r => <PanelRow key={r.key} onClick={r.go} className="items-center py-2.5" lead={<Dot tone={r.tone} />} title={r.title} meta={r.meta}
+        trail={<span className={cn("num text-[15px] font-semibold", r.tone === "danger" ? "text-destructive" : "text-warning")}>{r.n}</span>} />)}
+      {(clear.length > 0 || unknown.length > 0) && <p className="grid gap-0.5 px-4 py-3 text-xs text-muted-foreground">
+        {clear.length > 0 && <span><span className="font-medium text-foreground">Clear:</span> {clear.map(r => r.title.toLowerCase()).join(", ")}</span>}
+        {unknown.length > 0 && <span><span className="font-medium text-foreground">Not reported:</span> {unknown.map(r => r.title.toLowerCase()).join(", ")}</span>}</p>}
     </Panel>
   )
 }

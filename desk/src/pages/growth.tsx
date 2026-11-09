@@ -7,7 +7,8 @@ import { dataState, dataSummary, isUnverified, staleSuffix } from "@/lib/freshne
 import { cn } from "@/lib/utils"
 import { useData, useDesk } from "@/state"
 import { Calm, Muted, PageHeader, Section, Status } from "@/components/desk"
-import { Stat } from "@/pages/finance"
+import { Stat, StatGroup } from "@/pages/finance"
+import { PageTabs } from "@/components/page-tabs"
 import { MetricRows } from "@/pages/projects"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 
@@ -74,14 +75,13 @@ function Subscriptions({ u }: { u: Unit }) {
   const age = (m?: Metric) => (m ? `${ago(m.observed_at)} ago${staleSuffix(m)} · ${m.source}` : "not reported")
   return (
     <div className="grid gap-2">
-      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-4">
+      <StatGroup>
         <Stat label="Active subscriptions" value={active ? fmtNum(active.value) : "—"} sub={age(active)} warn={isUnverified(active)} />
         <Stat label="New this month" value={added ? fmtNum(added.value) : "—"} sub={age(added)} warn={isUnverified(added)} />
         <Stat label="Cancelled this month" value={lost ? fmtNum(lost.value) : "—"} sub={age(lost)} warn={isUnverified(lost)} />
         {/* Net only when both sides are measured: one unknown side makes the net unknown. */}
         <Stat label="Net this month" value={added && lost ? `${added.value - lost.value > 0 ? "+" : ""}${fmtNum(added.value - lost.value)}` : "—"} sub={added && lost ? `new − cancelled${isUnverified(added) || isUnverified(lost) ? " · uses an unverified figure" : ""}` : "needs both figures"} warn={isUnverified(added) || isUnverified(lost)} />
-      </div>
-      <p className="text-xs text-muted-foreground">Subscription readings come from Polar. Missing readings are not treated as zero.</p>
+      </StatGroup>
     </div>
   )
 }
@@ -99,7 +99,7 @@ function SeerxoFunnel({ u }: { u: Unit }) {
   const value = (m?: Metric, percent = false) => m ? percent ? `${fmtNum(m.value * 100)}%` : fmtNum(m.value) : "—"
   return (
     <div className="grid gap-2">
-      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-4">
+      <StatGroup>
         <Stat label="Signups · 7d" value={value(signups)} sub={age(signups)} warn={isUnverified(signups)} />
         <Stat label="Activation cohort · 7d" value={value(cohort)} sub={age(cohort)} warn={isUnverified(cohort)} />
         <Stat label="Activated · 7d" value={value(activated)} sub={age(activated)} warn={isUnverified(activated)} />
@@ -108,14 +108,14 @@ function SeerxoFunnel({ u }: { u: Unit }) {
         <Stat label="Quota hits · 7d" value={value(quotaHits)} sub={age(quotaHits)} warn={isUnverified(quotaHits)} />
         <Stat label="Checkout started · 7d" value={value(checkouts)} sub={age(checkouts)} warn={isUnverified(checkouts)} />
         <Stat label="Paid users" value={value(paid)} sub={age(paid)} warn={isUnverified(paid)} />
-      </div>
-      <div className="grid grid-cols-1 gap-px overflow-hidden rounded-lg border bg-border sm:grid-cols-3" aria-label="New signups, last 7 days">
+      </StatGroup>
+      <StatGroup label="New signups, last 7 days">
         <Stat label="New signups · got a result" value={value(generated)} sub={age(generated)} warn={isUnverified(generated)} />
         <Stat label="New signups · only errors" value={value(failedOnly)} sub={age(failedOnly)} warn={isUnverified(failedOnly) || (failedOnly?.value ?? 0) > 0} />
         <Stat label="New signups · not tried yet" value={notTried === null ? "—" : fmtNum(notTried)}
           sub={notTried === null ? "needs all three readings" : "signups − result − only errors"} warn={isUnverified(signups) || isUnverified(generated) || isUnverified(failedOnly)} />
-      </div>
-      <p className="text-xs text-muted-foreground">Funnel readings are aggregate backend observations. Checkout started counts users who began paying, not purchases. Free → paid conversion is not derived until matching cohort data exists.</p>
+      </StatGroup>
+      <p className="text-xs text-muted-foreground">Checkout started is not a purchase. Free → paid conversion is not derived until matching cohort data exists.</p>
     </div>
   )
 }
@@ -132,9 +132,10 @@ export function GrowthPage() {
   const measured = units.filter(u => u.metrics.length)
   const silent = units.filter(u => !u.metrics.length)
   return <>
-    <PageHeader title="Growth" description="Reported series, per business unit." />
+    <PageHeader title="Growth" />
+    <PageTabs page="growth" />
     {!Array.isArray(d.portfolio) && <Calm status={<Status value="UNKNOWN" />} title="Portfolio unavailable">This API version does not report it.</Calm>}
-    {Array.isArray(d.portfolio) && !units.length && <Calm title="No business units recorded">Growth shows per unit once one is recorded and reports a series with its source. Nothing is estimated meanwhile.</Calm>}
+    {Array.isArray(d.portfolio) && !units.length && <Calm title="No business units recorded" />}
     {measured.map(u => (
       <Section key={u.key} title={<button type="button" className="inline-flex min-h-11 items-center text-left underline-offset-2 hover:underline focus-visible:underline sm:min-h-6" onClick={() => go("project", u.key)}>{u.name}</button>}
         action={<span>{u.latest_at ? `newest reading ${ago(u.latest_at)} ago` : ""}{dataState(u).stale > 0 && <span className="text-warning"> · {dataSummary(u)}</span>}</span>}>
@@ -150,7 +151,7 @@ export function GrowthPage() {
       <Section title="No growth source connected" count={silent.length}>
         {/* One line for all of them: the same sentence per unit was most of this page. */}
         <p className="text-sm"><span className="font-medium">{silent.map(u => u.name).join(", ")}</span>
-          <Muted className="block text-xs">No metrics reported: nothing is shown until a source reports with provenance.</Muted></p>
+          <Muted className="block text-xs">No metrics reported</Muted></p>
       </Section>
     )}
   </>

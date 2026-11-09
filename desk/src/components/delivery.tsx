@@ -39,13 +39,13 @@ export function DeliveryRow({ i }: { i: Improvement }) {
 export function DeliveryPanel({ items, limit, action, expandable }: { items: Improvement[] | undefined; limit?: number; action?: ReactNode; expandable?: boolean }) {
   const [all, setAll] = useState(false)
   if (items === undefined) return (
-    <Panel title="Code missions" description="Each on its own pipeline"><PanelEmpty title="Not reported">This API version does not report code missions.</PanelEmpty></Panel>
+    <Panel title="Code missions"><PanelEmpty title="Not reported" /></Panel>
   )
   const shown = limit && !all ? items.slice(0, limit) : items
   return (
-    <Panel title="Code missions" count={items.length} description="Each row is one task on its own pipeline, detected to measured" action={action}>
+    <Panel title="Code missions" count={items.length} action={action}>
       {shown.length ? shown.map(i => <DeliveryRow key={i.task} i={i} />)
-        : <PanelEmpty title="No code mission in flight">Missions appear here from detection until their effect is measured.</PanelEmpty>}
+        : <PanelEmpty title="No code mission in flight" />}
       {expandable && items.length > shown.length && <button type="button" onClick={() => setAll(true)}
         className="flex min-h-11 w-full items-center justify-center px-4 py-2.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring">
         Show all {items.length} · {items.length - shown.length} more</button>}

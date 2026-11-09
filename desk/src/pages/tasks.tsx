@@ -1,10 +1,9 @@
 // Work: every task in a founder lane (lib/task-lanes.ts: Needs you, Running, Not scheduled, Done), each row saying what happens next and,
 // for stopped work, the recorded reason. Filters are routes (#/tasks/attention) so Overview links land on the right list.
 import { useEffect, useRef, useState, type ComponentProps } from "react"
-import { ChevronRight, Code2, Search, Sparkles } from "lucide-react"
+import { ChevronRight, Code2, Plus, Search, Sparkles } from "lucide-react"
 import { deliveryView } from "@/lib/delivery"
 import { pageTitle } from "@/lib/nav"
-import { DeliveryTrack } from "@/components/delivery"
 import { ago } from "@/lib/format"
 import { api, type TaskRow } from "@/lib/api"
 import { codeTaskBody } from "@/lib/founder-forms"
@@ -25,6 +24,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { useReturnFocus } from "@/lib/return-focus"
+import { PageTabs } from "@/components/page-tabs"
 
 const NONE = "none"  // Radix Select cannot hold "": the sentinel means "not attached"
 
@@ -144,9 +144,9 @@ export function CreateTask({ open, onOpenChange }: { open: boolean; onOpenChange
         onEscapeKeyDown={e => { if (busy) e.preventDefault() }} onInteractOutside={e => { if (busy) e.preventDefault() }}>
         <div className="grid gap-5">
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2"><Sparkles className="size-4 text-brand" />New task</DialogTitle>
-            <DialogDescription>{code ? "A code change by the developer agent, limited to the files you choose. It is recorded as BACKLOG; nothing runs until you authorize Stage C and mark it READY."
-              : <>Describe the outcome you want. It is recorded as a READY task for {agentName}; nothing runs until an agent picks it up.</>}</DialogDescription>
+            <DialogTitle>New task</DialogTitle>
+            <DialogDescription>{code ? "Recorded as BACKLOG, limited to the files you choose. Nothing runs until you authorize Stage C and mark it READY."
+              : <>Recorded as a READY task for {agentName}. Nothing runs until an agent picks it up.</>}</DialogDescription>
           </DialogHeader>
           <div role="group" aria-label="Task kind" className="flex gap-1">
             <Button type="button" size="sm" variant={code ? "outline" : "secondary"} aria-pressed={!code} disabled={busy} onClick={() => setCode(false)}><Sparkles />Brief</Button>
@@ -162,7 +162,6 @@ export function CreateTask({ open, onOpenChange }: { open: boolean; onOpenChange
           <Collapsible>
             <CollapsibleTrigger className="group flex min-h-9 items-center gap-1.5 text-[13px] text-muted-foreground hover:text-foreground">
               <ChevronRight className="size-4 shrink-0 transition-transform group-data-[state=open]:rotate-90" /><span className="shrink-0">More options</span>
-              <span className="min-w-0 text-left text-xs">· owner, project, priority, success criteria</span>
             </CollapsibleTrigger>
             <CollapsibleContent className="grid gap-4 pt-3">
               <label className="grid gap-1.5 text-[13px] font-medium">Title
@@ -228,20 +227,16 @@ function TaskLine({ t, reason, paused }: { t: TaskRow; reason?: string; paused: 
         {t.risk !== "LOW" && <Tag tone={t.risk === "HIGH" || t.risk === "CRITICAL" ? "warning" : "neutral"} className="max-sm:hidden">{t.risk} risk</Tag>}
       </span>}
       meta={<><span className="[overflow-wrap:anywhere]"><span className="font-mono text-xs">{t.key}</span> · {nextLine(t, { reason, paused, merged })}</span>
-        {/* A code task's PR and CI at a glance; the full evidence is on the task. */}
-        {mv && <span className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+        {/* A code task's stage, PR and CI at a glance; SHAs, checks and runs are on the task, under Details. */}
+        {mv && <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
           <Status value={mission!.stage} label={mv.label} tone={mv.tone} />
-          {codeChips(mission).map(c => <Tag key={c.label} tone={c.tone}>{c.label}</Tag>)}
-          <DeliveryTrack v={mv} className="w-28 max-sm:hidden" /></span>}</>}
+          {codeChips(mission).map(c => <Status key={c.label} value={c.label} label={c.label} tone={c.tone} />)}</span>}</>}
       tone={g === "attention" ? "danger" : undefined}
       trail={<>
-        <span className="max-lg:hidden">{[t.agent ?? "unassigned", t.business_unit].filter(Boolean).join(" · ")}</span>
-        {/* Where the task came from: who opened it, and whether automatically. Absent on older APIs. */}
-        {t.origin && <span className="max-w-[9rem] truncate max-xl:hidden" title={t.origin.reason ?? t.origin.trigger ?? undefined}>
-          {t.origin.automatic ? "auto" : "from"} {t.origin.by}</span>}
-        <span className="num max-sm:hidden">{ago(t.updated_at)}</span>
-        <Status value={t.status} tone={tone} label={merged ? "Merged" : undefined} />
-        <ChevronRight className="size-4 text-muted-foreground/40 max-sm:hidden" />
+        {/* Desktop columns (Owner · Updated · Status) line up with the lane's header row. */}
+        <span className="w-36 truncate max-lg:hidden">{[t.agent ?? "unassigned", t.business_unit].filter(Boolean).join(" · ")}</span>
+        <span className="num w-20 max-sm:hidden lg:text-right">{ago(t.updated_at)}</span>
+        <span className="flex lg:w-28 lg:justify-end"><Status value={t.status} tone={tone} label={merged ? "Merged" : undefined} /></span>
       </>} />
   )
 }
@@ -281,10 +276,10 @@ export function TasksPage() {
   const lead = d.task_lead_time
   const changes = useChanges()
   return <>
-    <PageHeader title={pageTitle("tasks")} description="Every task, what it is doing and what happens next."
-      >
-      <Button variant="outline" className="h-10" onClick={() => compose(true)}><Sparkles />New task</Button>
+    <PageHeader title={pageTitle("tasks")}>
+      <Button className="h-10" onClick={() => compose(true)}><Plus />New task</Button>
     </PageHeader>
+    <PageTabs page="tasks" />
     <div className="grid gap-3">
       <nav aria-label="Filter work" className="task-filters-scroll -mx-1 flex flex-nowrap gap-1 px-1 pb-1">
         {FILTERS.map(f => {
@@ -294,9 +289,9 @@ export function TasksPage() {
           if (!n && !on && f.key !== "active" && f.key !== "all") return null
           return (
             <button key={f.key} aria-current={on ? "true" : undefined} onClick={() => go("tasks", f.key === "active" ? undefined : f.key)}
-              className={cn("inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-[13px] transition-colors duration-150",
-                on ? "border-foreground/15 bg-foreground text-background" : "border-border bg-card text-muted-foreground hover:text-foreground")}>
-              {f.label}<span className={cn("num text-xs", on ? "text-background/70" : "text-muted-foreground")}>{n}</span>
+              className={cn("inline-flex h-9 shrink-0 items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium transition-colors duration-150 max-sm:h-11",
+                on ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground")}>
+              {f.label}<span className="num text-xs text-muted-foreground">{n}</span>
             </button>
           )
         })}
@@ -311,8 +306,8 @@ export function TasksPage() {
         </Select>
       </div>
       {scope && <p role="status" className="text-xs text-muted-foreground">{scope}</p>}
-      {lead && <p className="text-xs text-muted-foreground">
-        Median lead time, created → done, last 30 days: <b className="num font-medium text-foreground">{lead.median_hours === null ? "no completions" : `${lead.median_hours} h`}</b>
+      {lead && <p className="num text-xs text-muted-foreground" title="Created → done, last 30 days">
+        Median lead time <b className="font-medium text-foreground">{lead.median_hours === null ? "no completions" : `${lead.median_hours} h`}</b>
         {` · ${lead.sample_size} completed · ${lead.review_pending} awaiting review`}</p>}
     </div>
     {groups.length ? groups.map(g => {
@@ -342,14 +337,16 @@ export function TasksPage() {
           {g.key === "needs" ? <h2 className={cn(head, "font-normal")}>{header}</h2>
             : <button type="button" aria-expanded={open} onClick={() => setManual(m => ({ ...m, [g.key]: !open }))}
                 className={cn(head, "transition-colors hover:bg-muted/40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring")}>{header}</button>}
+          {(open || pinned(g.tasks).length > 0) && <div aria-hidden className="flex gap-x-3 bg-muted/30 px-4 py-2 text-xs font-medium text-muted-foreground max-lg:hidden">
+            <span className="flex-1 pl-7">Task</span><span className="flex gap-2"><span className="w-36">Owner</span><span className="w-20 text-right">Updated</span><span className="w-28 text-right">Status</span></span></div>}
           {(open ? g.tasks : pinned(g.tasks)).map(t => <TaskLine key={t.key} t={t} reason={reasons[t.key]} paused={paused} />)}
         </section>
       )
     }) : (
       <div className="panel"><PanelEmpty title={q || unit !== "all" ? "No task matches" : filter === "active" ? "No active work" : "Nothing here"}
         action={q || unit !== "all" ? <Button size="sm" variant="outline" onClick={() => { setQuery(""); setUnit("all") }}>Clear search</Button>
-          : <Button size="sm" variant="outline" onClick={() => compose(true)}><Sparkles />New task</Button>}>
-        {q || unit !== "all" ? "Try another word or business unit." : "A task is recorded when you or the CEO ask for work. Recording is not execution."}
+          : null}>
+        {q || unit !== "all" ? "Try another word or business unit." : null}
       </PanelEmpty></div>
     )}
   </>

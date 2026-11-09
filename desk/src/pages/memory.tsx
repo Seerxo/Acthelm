@@ -5,7 +5,8 @@ import { toast } from "sonner"
 import { api, type Memory } from "@/lib/api"
 import { when } from "@/lib/format"
 import { checkMemory } from "@/lib/validate"
-import { Calm, Expandable, Facts, FigureStrip, PageHeader, Status } from "@/components/desk"
+import { Calm, Expandable, Facts, PageHeader, Status } from "@/components/desk"
+import { PageTabs } from "@/components/page-tabs"
 import { Chips } from "@/components/detail"
 import { ApproveLearning } from "@/components/controls"
 import { Input } from "@/components/ui/input"
@@ -50,14 +51,13 @@ export function MemoryPage() {
   const grid = "panel grid grid-cols-1 [&_p]:max-w-3xl divide-y divide-border/70 px-4 sm:px-5 [overflow-wrap:anywhere]"
   const first = tabs.find(([, , n]) => n > 0)?.[0] ?? "decisions"
   return <>
-    <PageHeader title="Memory" description="Decisions, learnings, permanent facts and agent notebooks." />
+    <PageHeader title="Memory" />
+    <PageTabs page="memory" />
     {error ? <div role="alert" className="panel grid justify-items-start gap-2 px-4 py-5">
         <span className="flex items-center gap-2 text-sm font-medium"><Status value="failed" tone="danger" label="Memory could not be loaded" /></span>
-        <p className="text-[13px] text-muted-foreground">{error}. Nothing is shown rather than an empty list.</p>
+        <p className="text-[13px] text-muted-foreground">{error}</p>
         <Button size="sm" variant="outline" onClick={() => { setError(null); setAttempt(n => n + 1) }}><RefreshCw />Try again</Button></div>
     : !memory ? <div className="grid gap-4" aria-busy="true" aria-label="Loading memory"><Skeleton className="h-[92px] rounded-xl" /><Skeleton className="h-10 w-80" /><Skeleton className="h-40 rounded-xl" /></div> : (<>
-      <FigureStrip label="Memory at a glance" items={tabs.map(([v, label, n]) => ({ label, value: String(n), onClick: () => setTab(v),
-        sub: ({ decisions: "settled by the founder", learnings: "lessons from runs", permanent: "facts never re-asked", notes: "agent working notes" } as Record<string, string>)[v] }))} />
       <Tabs value={tab ?? first} onValueChange={setTab} className="min-w-0 gap-4">
         <div className="flex w-full min-w-0 flex-wrap items-center justify-between gap-3">
           <TabsList className="h-auto min-w-0 max-w-full justify-start overflow-x-auto [scrollbar-width:none]">

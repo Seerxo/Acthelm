@@ -1,13 +1,13 @@
 // Task / agent detail in a side sheet, plus the confirmation and result dialogs the controls use.
-// Summary and evidence first; raw context and agent configuration only under "Advanced".
+// State, the one next action and the flow first; SHAs, checks, runs and raw context only under "Details".
 import { useEffect, useState, type ReactNode } from "react"
-import { Check, ChevronRight, Copy, Loader2, Play } from "lucide-react"
+import { Check, ChevronRight, Copy, ExternalLink, Loader2, Play } from "lucide-react"
 import { toast } from "sonner"
 import { api, type AgentDetail, type Run, type TaskDetail } from "@/lib/api"
 import { ago, duration, humanize, usd, when } from "@/lib/format"
 import { cn } from "@/lib/utils"
 import { useDesk } from "@/state"
-import { Facts, Muted, priorityTone, Status, Tag, TaskKey } from "@/components/desk"
+import { ClampText, Facts, Muted, priorityTone, Status, Tag, TaskKey } from "@/components/desk"
 import { story } from "@/lib/task-story"
 import { Button } from "@/components/ui/button"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
@@ -23,7 +23,8 @@ import { checkAgentDetail, checkTaskDetail } from "@/lib/validate"
 import { attendedPlans, canOfferReady, isCodeWrite, readyBlock, readyNote } from "@/lib/ready"
 import { AcceptDone, AuthorizeStageC, MarkReady } from "@/components/controls"
 import { acceptOffer, mergedForReview, prLink } from "@/lib/accept"
-import { taskPipeline, type StepState } from "@/lib/pipeline"
+import { taskPipeline, type Step, type StepState } from "@/lib/pipeline"
+import { primaryAction, type NextAction } from "@/lib/next-action"
 import { deliverableItems } from "@/lib/deliverable"
 import { useReturnFocus } from "@/lib/return-focus"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -70,7 +71,7 @@ export const Pre = ({ children }: { children: ReactNode }) => (
 
 const Section = ({ title, children }: { title: string; children: ReactNode }) => (
   <section className="grid min-w-0 grid-cols-1 gap-2">
-    <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
+    <h3 className="text-sm font-semibold">{title}</h3>
     {children}
   </section>
 )
@@ -84,13 +85,15 @@ const Chips = ({ items }: { items: (string | null | undefined)[] | string | null
 }
 export { Chips }
 
-function Advanced({ children }: { children: ReactNode }) {
+/** Technical detail one click away, closed by default: SHAs, checks, runs, raw context. */
+function Details({ hint, children }: { hint?: string; children: ReactNode }) {
   return (
-    <Collapsible className="rounded-lg border bg-surface/50">
-      <CollapsibleTrigger className="group flex w-full items-center gap-2 px-3 py-2 text-sm text-muted-foreground hover:text-foreground">
-        <ChevronRight className="size-4 transition-transform group-data-[state=open]:rotate-90" />Advanced · raw data
+    <Collapsible className="rounded-xl border">
+      <CollapsibleTrigger className="group flex min-h-11 w-full items-center gap-2 rounded-xl px-4 text-left text-sm font-medium hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-ring">
+        <ChevronRight className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />Details
+        {hint && <span className="min-w-0 truncate text-xs font-normal text-muted-foreground">{hint}</span>}
       </CollapsibleTrigger>
-      <CollapsibleContent className="grid gap-4 border-t p-3">{children}</CollapsibleContent>
+      <CollapsibleContent className="grid gap-5 border-t p-4">{children}</CollapsibleContent>
     </Collapsible>
   )
 }
@@ -98,7 +101,7 @@ function Advanced({ children }: { children: ReactNode }) {
 // Recorded fields only: no invented steps, durations or tokens.
 export function Runs({ runs }: { runs: Run[] }) {
   const { open } = useDesk()
-  if (!runs.length) return <Muted>No runs recorded. The worker has not executed this yet.</Muted>
+  if (!runs.length) return <Muted className="text-sm">No runs recorded.</Muted>
   return (
     <div className="grid gap-2">
       {runs.map(r => (
@@ -118,61 +121,62 @@ export function Runs({ runs }: { runs: Run[] }) {
   )
 }
 
-/** Where the task stands, why it stopped (recorded reason only), what happens next, and what the founder can do from
- *  the Desk. Actions are limited to the Desk's authorized calls: assign, the approval inbox, and a new task. */
+/** Where the task stands, why it stopped (recorded reason only), what happens next, and the one next action
+ *  (lib/next-action.ts). Every other authorized control stays as a secondary button. */
 function StandsNow({ t }: { t: TaskDetail }) {
   const { data, act, open, go, compose } = useDesk()
   const s = story(t, { paused: data?.control.agents_paused })
   const [agent, setAgent] = useState(t.assigned_agent ?? "")
   const agents = (data?.agents ?? []).filter(a => a.enabled !== false)
   const accept = acceptOffer(t), link = prLink(t)
+  // A code task's order is explicit: Authorize Stage C, then Mark READY (the API refuses READY without it).
+  const authorize = isCodeWrite(t) && !["DONE", "CANCELLED"].includes(t.status) && !mergedForReview(t)
+  const ready = canOfferReady(t), block = ready ? readyBlock(t) : null
+  const first = primaryAction({ accept: !!accept, approve: s.founder.includes("approve"), authorize, ready, readyBlocked: !!block,
+    assign: s.founder.includes("assign"), followUp: s.founder.includes("follow-up") })
+  const v = (k: NextAction) => (first === k ? "default" : "outline")
   return (
-    <section aria-label="Where this task stands" className="grid min-w-0 gap-4 rounded-xl border bg-surface/60 p-4">
-      {/* Header: status, where it stands, the next action and the verified PR link (lib/accept.ts). */}
+    <section aria-label="Where this task stands" className="grid min-w-0 gap-4">
       <div className="grid min-w-0 gap-1.5">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
           <Status value={t.status} pill tone={s.tone} label={mergedForReview(t) ? "Merged" : undefined} />
-          <span className="min-w-0 text-sm font-medium [overflow-wrap:anywhere]">{s.now}</span>
+          {link?.state === "verified" && <a href={link.pr.url} target="_blank" rel="noopener noreferrer"
+            className="inline-flex min-h-7 items-center gap-1 text-xs font-medium underline-offset-2 hover:underline max-sm:min-h-11">PR #{link.pr.number}<ExternalLink className="size-3" /></a>}
+          {/* The task and its publication record disagree, so no number or link is shown. */}
+          {link?.state === "unverified" && <Status value="UNVERIFIED" tone="warning" label="PR unverified" />}
         </div>
-        <p className="text-[13px] text-muted-foreground"><span className="font-medium text-foreground">Next: </span>{s.next}</p>
-        {link?.state === "verified" && <a href={link.pr.url} target="_blank" rel="noopener noreferrer"
-          className="w-fit font-mono text-xs font-medium underline underline-offset-2 [overflow-wrap:anywhere] hover:text-info">PR #{link.pr.number}{link.pr.commit && ` · ${link.pr.commit.slice(0, 7)}`}</a>}
-        {link?.state === "unverified" && <p className="text-xs text-warning">PR link unverified: the task and its publication record disagree, so no link is shown.</p>}
+        <p className="text-sm font-medium [overflow-wrap:anywhere]">{s.now}</p>
+        <p className="text-[13px] text-muted-foreground">{s.next}</p>
       </div>
       {s.blocker && (
-        <div className={cn("grid gap-1 rounded-lg border-l-2 py-1.5 pl-3 text-sm", s.tone === "danger" ? "border-destructive" : "border-warning")}>
-          <span className="text-xs font-medium text-muted-foreground">{["BLOCKED", "FAILED"].includes(t.status) ? "Why it stopped" : "Waiting on"}</span>
-          <span className="[overflow-wrap:anywhere]">{s.blocker === "unrecorded" ? <Muted>No reason was recorded. The run history below is the only evidence.</Muted> : s.blocker}</span>
+        <div className={cn("grid gap-1 border-l-2 py-0.5 pl-3 text-sm", s.tone === "danger" ? "border-destructive" : "border-warning")}>
+          <span className="text-xs text-muted-foreground">{["BLOCKED", "FAILED"].includes(t.status) ? "Why it stopped" : "Waiting on"}</span>
+          {s.blocker === "unrecorded" ? <Muted>No reason recorded. See the runs under Details.</Muted> : <ClampText>{s.blocker}</ClampText>}
           {s.waitingOn.length > 0 && <span className="flex flex-wrap gap-1.5 pt-0.5">{s.waitingOn.map(d => (
             <button type="button" key={d.key} onClick={() => open({ kind: "task", key: d.key })} className="max-sm:min-h-11 rounded-md border bg-background px-1.5 py-0.5 font-mono text-[11px] hover:bg-muted">{d.key} · {humanize(d.status).toLowerCase()}</button>))}</span>}
         </div>
       )}
-      {/* Where the task is, step by step, from recorded facts only (lib/pipeline.ts); updates live while open. */}
-      <Pipeline t={t} />
-      {(s.founder.length > 0 || canOfferReady(t) || isCodeWrite(t) || accept) && (
-        <div className="grid min-w-0 gap-2 border-t border-border/70 pt-3">
-          <span className="text-xs font-medium text-muted-foreground">What you can do</span>
+      {first && (
+        <div className="grid min-w-0 gap-2">
           {/* Phones: one full-width button per row. */}
           <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center max-sm:[&_button]:w-full">
-            {accept && <AcceptDone taskKey={t.key} evidence={accept.evidence} merged={accept.merged} />}
-            {s.founder.includes("approve") && <Button size="sm" className="h-9" onClick={() => { open(null); go("approvals") }}>Decide in Approvals</Button>}
+            {accept && <AcceptDone taskKey={t.key} evidence={accept.evidence} merged={accept.merged} primary={first === "accept"} />}
+            {s.founder.includes("approve") && <Button size="sm" variant={v("approve")} className="h-9 max-sm:h-11" onClick={() => { open(null); go("approvals") }}>Decide in Approvals</Button>}
+            {authorize && <AuthorizeStageC taskKey={t.key} primary={first === "authorize"} />}
+            {ready && <MarkReady taskKey={t.key} status={t.status} codeWrite={isCodeWrite(t)} note={readyNote(t)} blocked={!!block} primary={first === "ready"} />}
             {s.founder.includes("assign") && <>
               <Select value={agent} onValueChange={setAgent}>
-                <SelectTrigger className="h-9 w-full sm:w-48" aria-label="Agent to assign"><SelectValue placeholder="Choose agent" /></SelectTrigger>
+                <SelectTrigger className="h-9 w-full sm:w-44 max-sm:h-11" aria-label="Agent to assign"><SelectValue placeholder="Choose agent" /></SelectTrigger>
                 <SelectContent>{agents.map(a => <SelectItem key={a.key} value={a.key}>{a.name}</SelectItem>)}</SelectContent>
               </Select>
-              <Button size="sm" variant="outline" className="h-9" disabled={!agent || agent === t.assigned_agent}
+              <Button size="sm" variant={v("assign")} className="h-9 max-sm:h-11" disabled={!agent || agent === t.assigned_agent}
                 onClick={async () => { if (await act(`/tasks/${encodeURIComponent(t.key)}/assign`, { agent, actor: "founder" }, `${t.key} assigned to ${agent}`)) open(null) }}>
                 {t.assigned_agent ? "Reassign" : "Assign"}
               </Button>
             </>}
-            {/* A code task's order is explicit: Authorize Stage C, then Mark READY (the API refuses READY without it). */}
-            {isCodeWrite(t) && !["DONE", "CANCELLED"].includes(t.status) && !mergedForReview(t) && <AuthorizeStageC taskKey={t.key} />}
-            {canOfferReady(t) && <MarkReady taskKey={t.key} status={t.status} codeWrite={isCodeWrite(t)} note={readyNote(t)} blocked={!!readyBlock(t)} />}
-            {s.founder.includes("follow-up") && <Button size="sm" variant="outline" className="h-9" onClick={() => { open(null); compose(true) }}>New follow-up task</Button>}
+            {s.founder.includes("follow-up") && <Button size="sm" variant={v("follow-up")} className="h-9 max-sm:h-11" onClick={() => { open(null); compose(true) }}>New follow-up task</Button>}
           </div>
-          {canOfferReady(t) && readyBlock(t) && <p className="text-xs text-warning">{readyBlock(t)}</p>}
-          <p className="text-[11px] text-muted-foreground">Cancelling a task is not available in the Desk yet.</p>
+          {block && <p className="text-xs text-warning">{block}</p>}
         </div>
       )}
     </section>
@@ -183,9 +187,14 @@ function TaskBody({ t }: { t: TaskDetail }) {
   const { data, go, open } = useDesk()
   const deliverable = deliverableItems(t.artifacts)
   const unit = data?.portfolio?.find(u => u.key === t.business_unit)
+  const steps = taskPipeline(t)
+  const evidence = steps.filter(s => s.detail)
+  const link = prLink(t)
   return (
     <div className="grid min-w-0 grid-cols-1 gap-6">
       <StandsNow t={t} />
+      {/* Created → run → PR/CI → merge → accepted, from recorded facts only (lib/pipeline.ts); updates live while open. */}
+      <Section title="Progress"><Pipeline steps={steps} /></Section>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-muted-foreground">
         <Tag tone={priorityTone(t.priority)}>{t.priority}</Tag>
         <span>{t.risk.toLowerCase()} risk</span>
@@ -194,19 +203,12 @@ function TaskBody({ t }: { t: TaskDetail }) {
               onClick={() => { open(null); go("project", unit.key) }}>· {unit.name}{t.project && ` / ${t.project}`}<ChevronRight className="size-3.5" /></button>
           : <span>· {t.business_unit}{t.project && ` / ${t.project}`}</span>)}
         <span>· {t.assigned_agent ? <>owned by <b className="font-medium text-foreground">{t.assigned_agent}</b></> : "unassigned"}</span>
-        {t.approval_required && <Status value="NEEDS_APPROVAL" label="Founder approval required" />}
+        {t.origin && <span>· {t.origin.automatic ? "auto" : "from"} {t.origin.by}</span>}
+        {t.approval_required && <Status value="NEEDS_APPROVAL" label="Approval required" />}
       </div>
-      {t.origin && (
-        <Section title="Why this task exists">
-          <p className="text-sm">{t.origin.automatic ? <>Opened automatically by <b className="font-medium">{t.origin.by}</b></> : <>Requested by <b className="font-medium">{t.origin.by}</b></>}
-            {t.origin.trigger && <Muted> · {t.origin.trigger}</Muted>}</p>
-          {t.origin.reason && t.origin.reason !== t.origin.trigger && <Muted className="text-xs [overflow-wrap:anywhere]">{t.origin.reason}</Muted>}
-          {t.goal && <p className="text-xs"><Muted>Serves goal </Muted>{t.goal.title}{t.goal.status && <Muted> · {t.goal.status.toLowerCase()}</Muted>}</p>}
-        </Section>
-      )}
       <Section title="Objective"><Text text={t.objective} none="No objective recorded." /></Section>
       <Section title="Done when"><Text text={t.success_criteria} none="No success criteria recorded." /></Section>
-      {/* An automatic task's description only restates its origin, shown above. */}
+      {/* An automatic task's description only restates its origin. */}
       {!t.origin?.automatic && t.description && t.description !== t.title && t.description !== t.objective && <Section title="Request"><Text text={t.description} none="" /></Section>}
       {deliverable.length > 0 && (
         <Section title="Deliverable">
@@ -218,14 +220,27 @@ function TaskBody({ t }: { t: TaskDetail }) {
       <Section title="Result">
         {/* A stopped task's error is shown as "Why it stopped" above; here only what the agent produced. */}
         {t.error && !["BLOCKED", "FAILED"].includes(t.status) ? <p className="text-sm text-destructive [overflow-wrap:anywhere]">{t.error}</p> : <Text text={t.result} none="No result recorded yet." />}
-        {t.supervisor && <p className="mt-1 text-sm"><Muted>Supervisor verdict: </Muted><Status value={t.supervisor.verdict} />{t.supervisor.notes && <Muted> · {t.supervisor.notes}</Muted>}</p>}
+        {t.supervisor && <p className="text-sm"><Muted>Supervisor </Muted><Status value={t.supervisor.verdict} /></p>}
       </Section>
       {t.dependencies.length > 0 && <Section title="Depends on"><Chips items={t.dependencies.map(d => `${d.key} · ${d.status}`)} /></Section>}
-      <Section title="Runs"><Runs runs={t.runs} /></Section>
-      <Advanced>
+      <Details hint={`${t.runs.length} ${t.runs.length === 1 ? "run" : "runs"}`}>
+        {t.origin && (
+          <Section title="Origin">
+            <p className="text-sm">{t.origin.automatic ? "Opened automatically by " : "Requested by "}<b className="font-medium">{t.origin.by}</b>
+              {t.origin.trigger && <Muted> · {t.origin.trigger}</Muted>}</p>
+            {t.origin.reason && t.origin.reason !== t.origin.trigger && <Muted className="text-xs [overflow-wrap:anywhere]">{t.origin.reason}</Muted>}
+            {t.goal && <p className="text-xs"><Muted>Serves goal </Muted>{t.goal.title}{t.goal.status && <Muted> · {t.goal.status.toLowerCase()}</Muted>}</p>}
+          </Section>
+        )}
+        {link?.state === "verified" && link.pr.commit && <Section title="Pull request"><p className="font-mono text-xs [overflow-wrap:anywhere]">#{link.pr.number} · {link.pr.commit}</p></Section>}
+        {evidence.length > 0 && <Section title="Evidence">
+          <Facts items={evidence.map(s => [s.label, <span key={s.key} className="font-mono text-xs">{s.detail}</span>] as [string, ReactNode])} />
+        </Section>}
+        {t.supervisor?.notes && <Section title="Supervisor notes"><Text text={t.supervisor.notes} none="" /></Section>}
+        <Section title="Runs"><Runs runs={t.runs} /></Section>
         <Section title="Context">{t.context ? <Pre>{JSON.stringify(t.context, null, 2)}</Pre> : <Muted>None</Muted>}</Section>
         <Section title="Artifacts">{t.artifacts ? <Pre>{JSON.stringify(t.artifacts, null, 2)}</Pre> : <Muted>None</Muted>}</Section>
-      </Advanced>
+      </Details>
     </div>
   )
 }
@@ -257,48 +272,47 @@ function AgentBody({ a }: { a: AgentDetail }) {
   }
   return (
     <div className="grid min-w-0 grid-cols-1 gap-5">
-      <div className="flex flex-wrap items-center gap-2"><Status value={a.status} /><Muted>{a.role}</Muted></div>
-      <Section title="Unattended task eligibility">
-        {a.unattended_tasks === undefined ? <Muted>No verified eligibility data from this API.</Muted>
-          : a.unattended_tasks.length ? <div className="grid grid-cols-1 gap-2">{a.unattended_tasks.map(t => (
+      <div className="flex flex-wrap items-center gap-2"><Status value={a.status} pill /><Muted className="text-[13px]">{a.role}</Muted></div>
+      <Facts items={[["Current task", a.current_task && `${a.current_task.key} · ${a.current_task.title}`],
+        ["Last run", a.last_run && when(a.last_run)], ["Last success", a.last_success && when(a.last_success)], ["Cost today", usd(a.cost_today_usd)]]} />
+      {a.last_error && <Section title="Last failure"><ClampText className="text-sm">{a.last_error}</ClampText></Section>}
+      <Section title="Unattended work">
+        {a.unattended_tasks === undefined ? <Muted className="text-sm">Not reported</Muted>
+          : a.unattended_tasks.length ? <div className="grid grid-cols-1 divide-y rounded-xl border">{a.unattended_tasks.map(t => (
             <button type="button" key={t.task} onClick={() => open({ kind: "task", key: t.task })}
-              className="max-sm:min-h-11 rounded-lg border px-3 py-2 text-left text-sm hover:bg-muted">
-              <TaskKey k={t.task} /> · {waitReason(t.reason)}
-              {t.approval_required && <p className="text-xs text-muted-foreground">Founder approval required.</p>}
-            </button>))}</div> : <Muted>No open tasks in the recent task window.</Muted>}
-        <p className="mt-2 text-xs text-muted-foreground">Task eligibility is separate from provider capacity. No model is called by this view.</p>
+              className="flex min-h-11 flex-wrap items-center gap-x-2 px-3 py-2 text-left text-sm first:rounded-t-xl last:rounded-b-xl hover:bg-muted/50">
+              <TaskKey k={t.task} /><span className="min-w-0 flex-1">{waitReason(t.reason)}</span>
+              {t.approval_required && <Status value="NEEDS_APPROVAL" label="Approval required" />}
+            </button>))}</div> : <Muted className="text-sm">No open tasks in the recent window.</Muted>}
       </Section>
-      <div><Button type="button" size="sm" className="max-sm:h-11 max-sm:w-full" disabled={busy} onClick={runOnce}>{busy ? <Loader2 className="animate-spin" /> : <Play />}Check attended task plans</Button></div>
-      {work !== null && (work === "paused" ? <Muted>Agent execution is paused. No models were called.</Muted>
-        : work.length ? <><p className="text-sm"><b>{work.length}</b> attended task plan(s). Run on the laptop; approval gates still apply:</p><Pre>{work.join("\n")}</Pre></>
-        : <Muted>No work for {a.key}. It stays asleep; no model was called.</Muted>)}
-      <Section title="Now">
-        <Facts items={[["Current task", a.current_task && `${a.current_task.key} · ${a.current_task.title}`],
-          ["Last run", a.last_run && when(a.last_run)], ["Last success", a.last_success && when(a.last_success)], ["Cost today", usd(a.cost_today_usd)]]} />
-      </Section>
-      {a.last_error && <Section title="Last recorded failure"><p className="text-sm [overflow-wrap:anywhere]">{a.last_error}</p><Muted>Historical information; current task eligibility is shown above.</Muted></Section>}
+      <div className="grid gap-2">
+        <Button type="button" size="sm" className="w-fit max-sm:h-11 max-sm:w-full" disabled={busy} onClick={runOnce}>{busy ? <Loader2 className="animate-spin" /> : <Play />}Check attended task plans</Button>
+        {work !== null && (work === "paused" ? <Muted className="text-sm">Agents are paused. No model was called.</Muted>
+          : work.length ? <><p className="text-sm"><b>{work.length}</b> attended plan(s); approval gates still apply.</p><Pre>{work.join("\n")}</Pre></>
+          : <Muted className="text-sm">No work for {a.key}. No model was called.</Muted>)}
+      </div>
       <Section title="Recent work">
-        {a.recent_tasks.length ? <div className="grid grid-cols-1 gap-1.5">{a.recent_tasks.map(t => (
+        {a.recent_tasks.length ? <div className="grid grid-cols-1 divide-y rounded-xl border">{a.recent_tasks.map(t => (
           <button type="button" key={t.key} onClick={() => open({ kind: "task", key: t.key })}
-            className="flex items-center max-sm:min-h-11 gap-2 rounded-lg border px-2.5 py-2 text-left text-sm hover:bg-muted">
+            className="flex min-h-11 items-center gap-2 px-3 py-2 text-left text-sm first:rounded-t-xl last:rounded-b-xl hover:bg-muted/50">
             <TaskKey k={t.key} /><span className="min-w-0 flex-1 truncate">{t.title}</span><Status value={t.status} />
-          </button>))}</div> : <Muted>No task history.</Muted>}
+          </button>))}</div> : <Muted className="text-sm">No task history.</Muted>}
       </Section>
-      <Section title="Run history"><Runs runs={a.recent_runs ?? []} /></Section>
-      <Section title="Learnings">
-        {a.recent_learnings.length ? a.recent_learnings.map(l => <p key={l.title} className="text-sm [overflow-wrap:anywhere]"><b>{l.title}</b><br /><Muted>{l.lesson}</Muted></p>) : <Muted>No related learnings.</Muted>}
-      </Section>
-      <Section title="Notebook">
-        {a.notebook.length ? a.notebook.map(n => <div key={n.note} className="flex gap-2 text-sm"><Tag>×{n.refs}</Tag><span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{n.note}</span><Muted className="shrink-0">{ago(n.last_seen_at)}</Muted></div>) : <Muted>No notebook entries.</Muted>}
-      </Section>
-      <Advanced>
+      <Details hint={`${(a.recent_runs ?? []).length} runs · learnings · configuration`}>
+        <Section title="Run history"><Runs runs={a.recent_runs ?? []} /></Section>
+        <Section title="Learnings">
+          {a.recent_learnings.length ? a.recent_learnings.map(l => <p key={l.title} className="text-sm [overflow-wrap:anywhere]"><b>{l.title}</b><br /><Muted>{l.lesson}</Muted></p>) : <Muted>No related learnings.</Muted>}
+        </Section>
+        <Section title="Notebook">
+          {a.notebook.length ? a.notebook.map(n => <div key={n.note} className="flex gap-2 text-sm"><Tag>×{n.refs}</Tag><span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{n.note}</span><Muted className="shrink-0">{ago(n.last_seen_at)}</Muted></div>) : <Muted>No notebook entries.</Muted>}
+        </Section>
         <Section title="Identity"><p className="text-sm">{a.identity.description}</p><Chips items={a.identity.capabilities} /></Section>
         <Section title="Skills"><Chips items={a.identity.skills} /></Section>
         <Section title="Allowed tools"><Chips items={a.identity.allowed_tools} /></Section>
         <Section title="Triggers"><Chips items={a.triggers.map(x => x.type + (x.event_type ? `: ${x.event_type}` : ""))} /></Section>
         <Section title="Schedule">{a.schedule ? <Pre>{JSON.stringify(a.schedule, null, 2)}</Pre> : <Muted>No automatic schedule</Muted>}</Section>
         <Section title="Memory policy"><Pre>{JSON.stringify(a.memory_policy, null, 2)}</Pre></Section>
-      </Advanced>
+      </Details>
     </div>
   )
 }
@@ -390,9 +404,11 @@ const STEP: Record<StepState, { dot: string; text: string; word: string }> = {
   pending: { dot: "bg-border", text: "text-muted-foreground", word: "Not reached" },
 }
 
+// A step's detail is shown inline only where it explains a stop or a wait; the rest is evidence, under Details.
+const SHOW_DETAIL: StepState[] = ["failed", "blocked", "waiting", "current"]
+
 /** The task's own pipeline (lib/pipeline.ts): recorded facts only; a step not reached is drawn as not reached. */
-function Pipeline({ t }: { t: TaskDetail }) {
-  const steps = taskPipeline(t)
+function Pipeline({ steps }: { steps: Step[] }) {
   return (
     <ol className="grid">
       {steps.map((s, i) => {
@@ -407,10 +423,10 @@ function Pipeline({ t }: { t: TaskDetail }) {
               <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-sm">
                 <span className={cn("font-medium", s.state === "pending" && "text-muted-foreground")}>{s.label}</span>
                 <span className={cn("text-xs", v.text || "text-muted-foreground")}>{v.word}</span>
-                {s.at && <span className="num text-xs text-muted-foreground" title={when(s.at)}>{ago(s.at)} ago{took && ` · took ${took}`}</span>}
+                {s.at && <span className="num text-xs text-muted-foreground" title={took ? `${when(s.at)} · took ${took}` : when(s.at)}>{ago(s.at)} ago</span>}
               </span>
-              {s.detail && <span className={cn("text-xs [overflow-wrap:anywhere]", s.state === "failed" || s.state === "blocked" ? "text-destructive" : "text-muted-foreground")}>{s.detail}</span>}
-              {s.href && <a href={s.href} target="_blank" rel="noopener noreferrer" className="w-fit text-xs font-medium text-foreground underline underline-offset-2 hover:text-info">Open pull request on GitHub</a>}
+              {s.detail && SHOW_DETAIL.includes(s.state) && <span className={cn("text-xs [overflow-wrap:anywhere]", s.state === "failed" || s.state === "blocked" ? "text-destructive" : "text-muted-foreground")}>{s.detail}</span>}
+              {s.href && <a href={s.href} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-7 w-fit items-center gap-1 text-xs font-medium text-foreground underline-offset-2 hover:underline max-sm:min-h-11">Open pull request<ExternalLink className="size-3" /></a>}
             </div>
           </li>
         )

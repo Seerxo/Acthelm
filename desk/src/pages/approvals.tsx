@@ -32,10 +32,10 @@ function ApprovalCard({ a }: { a: Approval }) {
         <h3 id={`apr-${a.key}`} className="text-[16px] leading-snug font-semibold tracking-tight">{a.action}</h3>
       </header>
       <Facts items={[["Why", a.reason], ["If approved", a.expected_effect], ["Rollback", a.rollback || "No rollback recorded"]]} />
-      {high && <p className="flex items-start gap-2 rounded-lg bg-warning/[0.07] px-3 py-2 text-xs text-warning">
-        <ShieldAlert className="mt-px size-3.5 shrink-0" />Only your verified founder sign-in can grant a {a.risk.toLowerCase()}-risk approval. You type its key to confirm.</p>}
       <footer className="grid gap-3 border-t border-border/70 pt-4 sm:flex sm:items-center sm:justify-end">
-        <span className="text-xs text-muted-foreground sm:mr-auto">Your decision is recorded in the audit log; it does not run the action itself.</span>
+        {/* HIGH/CRITICAL: verified founder sign-in only (the API refuses others), and the key is typed to confirm. */}
+        {high && <span className="flex items-center gap-1.5 text-xs text-warning sm:mr-auto" title="Only your verified founder sign-in can grant it; you type its key to confirm.">
+          <ShieldAlert className="size-3.5 shrink-0" />Founder sign-in · typed confirmation</span>}
         <ApprovalDecision a={a} />
       </footer>
     </article>
@@ -69,26 +69,28 @@ export function ApprovalsPage() {
   const others = Array.isArray(needs) ? needs.filter(n => !(n.kind === "APPROVAL" && n.target.page === "approvals")) : null
   const sum = approvalSummary(d)
   return <>
-    <PageHeader title="Approvals" description="Your decisions, most urgent first. Opening an item never approves it."
-      />
-    <FigureStrip label="Decisions at a glance" items={sum.figures.map(f => f.label === "Tasks awaiting approval" && sum.waitingTasks
-      ? { ...f, onClick: () => go("tasks", "attention") } : f)} />
+    <PageHeader title="Approvals" />
+    {/* Only figures with something in them get a cell; zeros and unreported ones are named once (never hidden). */}
+    {sum.figures.some(f => f.value !== "0" && f.value !== "—") && <FigureStrip label="Decisions at a glance" items={sum.figures.filter(f => f.value !== "0" && f.value !== "—")
+      .map(f => f.label === "Tasks awaiting approval" && sum.waitingTasks ? { ...f, onClick: () => go("tasks", "attention") } : f)} />}
+    {!sum.clear && (["0", "—"] as const).map(v => { const names = sum.figures.filter(f => f.value === v).map(f => f.label.toLowerCase())
+      return names.length > 0 && <p key={v} className="-mt-2 text-xs text-muted-foreground"><span className="font-medium text-foreground">{v === "0" ? "None:" : "Not reported:"}</span> {names.join(", ")}</p> })}
     {sum.clear
-      ? <EmptyState icon={<CircleCheck />} title="Nothing needs you">The company can continue on its own. New approvals, incidents and stuck high-priority work land here first.</EmptyState>
+      ? <EmptyState icon={<CircleCheck />} title="Nothing needs you">New approvals, incidents and stuck high-priority work land here.</EmptyState>
       : <>
         <section className="grid gap-3" aria-label="Approvals waiting">
           <h2 className="px-0.5 text-[15px] font-semibold tracking-tight">Approval records <span className="num text-[13px] font-normal text-muted-foreground">{d.approvals.length}</span></h2>
           {d.approvals.length ? <div className="grid gap-4 xl:grid-cols-2">{d.approvals.map(a => <ApprovalCard key={a.key} a={a} />)}</div>
             : sum.waitingTasks
               ? <div className="panel flex flex-wrap items-center justify-between gap-3 px-4 py-4 text-[13px]">
-                  <span className="text-muted-foreground"><span className="font-medium text-foreground">No approval record, but {sum.waitingTasks === 1 ? "1 task is" : `${sum.waitingTasks} tasks are`} waiting for approval.</span> The decision is made on the task itself.</span>
-                  <Button size="sm" variant="outline" onClick={() => go("tasks", "attention")}>Open in Work</Button>
+                  <span className="font-medium">{sum.waitingTasks === 1 ? "1 task is" : `${sum.waitingTasks} tasks are`} waiting for approval, decided on the task.</span>
+                  <Button size="sm" className="max-sm:h-11" onClick={() => go("tasks", "attention")}>Open in Work</Button>
                 </div>
-              : <p className="panel px-4 py-4 text-[13px] text-muted-foreground">No approval records. High-impact work stops here for your decision.</p>}
+              : <p className="panel px-4 py-4 text-[13px] text-muted-foreground">No approval records.</p>}
         </section>
         {others === null
-          ? <Panel title="Also needs you"><PanelRow title="Attention queue not reported" meta="This API version does not report it. Check incidents and system status directly." lead={<Dot tone="warning" />} /></Panel>
-          : others.length > 0 && <Panel title="Also needs you" count={others.length} description="Resolved where each item points; nothing here is decided by opening it">
+          ? <Panel title="Also needs you"><PanelRow title="Attention queue not reported" meta="Not reported by this API." lead={<Dot tone="warning" />} /></Panel>
+          : others.length > 0 && <Panel title="Also needs you" count={others.length}>
               {others.map((n, i) => <NeedRow key={`${n.kind}-${n.title}-${i}`} n={n} />)}
             </Panel>}
       </>}

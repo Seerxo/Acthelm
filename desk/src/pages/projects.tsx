@@ -73,7 +73,7 @@ export function BusinessTable({ only }: { only?: Unit[] } = {}) {
   const facts = useUnitFacts()
   const units = only ?? d.portfolio
   if (!Array.isArray(units)) return <Calm status={<Status value="UNKNOWN" />} title="Portfolio unavailable">This API version does not report it.</Calm>
-  if (!units.length) return <Calm title="No business units recorded">Units appear once the company records them. Nothing is estimated while none are recorded.</Calm>
+  if (!units.length) return <Calm title="No business units recorded" />
   return <>
     <div className="hidden lg:block">
       <DataRows label="Business units" rows={units} rowKey={u => u.key} titleHead="Unit"
@@ -100,7 +100,7 @@ export function BusinessTable({ only }: { only?: Unit[] } = {}) {
         const stale = dataState(u).stale > 0
         return <li key={u.key}>
           <button type="button" onClick={() => go("project", u.key)}
-            className="group grid min-h-[178px] w-full content-start gap-4 rounded-xl border bg-card p-4 text-left transition-[border-color,background-color,box-shadow] duration-150 hover:border-brand/30 hover:bg-surface/70 hover:shadow-xs focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
+            className="group grid min-h-[178px] w-full content-start gap-4 rounded-xl border bg-card p-4 text-left transition-[border-color,background-color,box-shadow] duration-150 hover:border-foreground/20 hover:bg-surface/70 hover:shadow-xs focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
             <span className="flex min-w-0 items-start justify-between gap-3">
               <span className="grid min-w-0 gap-1"><span className="truncate text-[15px] font-semibold tracking-tight">{u.name}</span>
                 <span className="text-xs text-muted-foreground">{u.priority} priority · {humanize(u.status)}</span></span>
@@ -142,8 +142,7 @@ export function ProjectsPage() {
   const attention = units.filter(u => { const f = facts(u.key); return f.incidents.length + f.blocked.length > 0 }).length
   const c = d.current_priority
   return <>
-    <PageHeader title={pageTitle("projects")} description="Each business, its verified numbers and its work."
-      />
+    <PageHeader title={pageTitle("projects")} />
     {Array.isArray(d.portfolio) && <FigureStrip label="Portfolio at a glance" items={[
       { label: "Live", value: String(live.length), sub: "active business units" },
       { label: "Need attention", value: String(attention), tone: attention ? "warning" : undefined, sub: attention ? "open incidents or stopped work" : "no incident or stopped work" },
@@ -162,11 +161,11 @@ export function ProjectsPage() {
       </section>
     )}
     {!Array.isArray(d.portfolio) ? <Calm status={<Status value="UNKNOWN" />} title="Project data unavailable">This API version does not report it.</Calm>
-      : !units.length ? <Calm title="No business units recorded">Units appear once the company records them. Nothing is estimated while none are recorded.</Calm>
+      : !units.length ? <Calm title="No business units recorded" />
       : <>
         <section className="grid gap-3" aria-label="Live businesses">
           <h2 className="px-0.5 text-[15px] font-semibold tracking-tight">Live <span className="num text-[13px] font-normal text-muted-foreground">{live.length}</span></h2>
-          {live.length ? <BusinessTable only={live} /> : <p className="panel px-4 py-4 text-[13px] text-muted-foreground">No business unit is active. Agents only take recurring work for active units.</p>}
+          {live.length ? <BusinessTable only={live} /> : <p className="panel px-4 py-4 text-[13px] text-muted-foreground">No business unit is active.</p>}
         </section>
         {rest.length > 0 && (
           <Collapsible className="grid gap-3">
@@ -287,10 +286,10 @@ export function ProjectDetail({ unitKey }: { unitKey: string }) {
     <PageHeader eyebrow="Business unit" title={u.name} description={`Priority ${u.priority} · ${dataSummary(u).toLowerCase()}`}
       meta={<><Status value={u.status} /><Summary parts={[[f.work.length, "open"], [f.incidents.length, f.incidents.length > 1 ? "incidents" : "incident", "warning"]]} /></>} />
     {/* Results and execution are kept apart: finished tasks are not business results. */}
-    <Section title="Business results" description="Verified readings from reporting sources only. Task completion is not counted here.">
+    <Section title="Business results" description="Verified readings only; finished tasks are not results.">
       {u.metrics.length ? <div className="grid gap-4"><UnitStats u={u} />
         {/* The unit's own 30-day trends; per-video YouTube series stay in Growth's table. */}
-        <TrendGrid metrics={u.metrics.filter(m => !m.subject.startsWith("youtube:")).slice(0, 4)} /></div> : <Calm title="No verified result reported">Nothing is shown until a source reports for this project; that is unknown, not zero.</Calm>}
+        <TrendGrid metrics={u.metrics.filter(m => !m.subject.startsWith("youtube:")).slice(0, 4)} /></div> : <Calm title="No verified result reported">Unknown, not zero.</Calm>}
     </Section>
     {priority && (
       <Section title="Current priority">
