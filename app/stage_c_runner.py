@@ -867,6 +867,17 @@ def _privacy_gate(worktree: Path, base: str, sha: str, task: models.Task, public
         raise PrivacyGateError("unreadable") from None
 
 
+def _unpublished_back_to_base(worktree: Path, base: str, remote: str, branch: str, protocol: str) -> None:
+    """After a refused push: if the fork has no such branch, un-commit (the change stays staged), so the retry takes the
+    normal scanned push path instead of the recovery path, which assumes a pushed commit (TASK-0007, 2026-11-09).
+    A branch that exists, or an unreadable remote, keeps the commit: recovery then verifies it as before."""
+    try:
+        if _git(worktree, "ls-remote", remote, f"refs/heads/{branch}", protocol=protocol).strip() == "":
+            _git(worktree, "reset", "-q", "--soft", base)
+    except Exception:
+        pass
+
+
 def _privacy_stop(db: Session, worktree: Path, base: str, sha: str, task: models.Task, texts: dict[str, str],
                   remote: str | None = None, protocol: str = "", expected_remote: str | None = None) -> dict | None:
     """None when `sha` may be published; else the BLOCKED outcome, naming categories, paths and lines only."""
@@ -1047,6 +1058,7 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
             remote_head = _git(worktree, "ls-remote", remote, f"refs/heads/{branch}",
                                protocol=protocol).split("\t")[0]
         except subprocess.CalledProcessError as e:
+            _unpublished_back_to_base(worktree, job.base, remote, branch, protocol)
             return _stop(db, "PUSH_FAILED", _redact(e.stderr.decode(errors="replace")))
         if remote_head != commit:
             return _stop(db, "PUSH_FAILED", f"remote {branch} is {remote_head!r}, not {commit}")
