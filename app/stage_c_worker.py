@@ -417,7 +417,10 @@ def execute(db, task, spec, usable):
                             role, _ = publication_role()
                             if role != "PASS":
                                 db.commit()
-                                raise PublishedPRRefused("upstream_role_not_read_only")
+                                # FAIL = GitHub says the token can write upstream; anything else = GitHub did not
+                                # answer (expired/revoked token, network). Both stop the push; the cause differs.
+                                raise PublishedPRRefused("upstream_role_not_read_only" if role == "FAIL"
+                                                         else "upstream_role_unverified")
                         out = stage_c_runner.publish(db, task, job, diff, worktree,
                                 f"https://github.com/{head_repository}.git",
                                 stage_c_runner.gh_pr_opener(REPOSITORY, "main", head_repository),
@@ -512,8 +515,14 @@ def execute(db, task, spec, usable):
                 # A token that can write upstream is a security event, not capacity: stop retrying and
                 # leave it on the founder's Desk until the agent account is back to Read.
                 task.status = enums.TaskStatus.BLOCKED
-                task.error = ("upstream_role_not_read_only: the worker token is not verified read-only on "
+                task.error = ("upstream_role_not_read_only: GitHub reports a worker token can write "
                               f"{REPOSITORY}; restore the agent account to Read, then set READY")
+            elif out["reason"] == "upstream_role_unverified":
+                # Unconfirmed is not unsafe: usually an expired or revoked token. Still no push, still the founder's.
+                task.status = enums.TaskStatus.BLOCKED
+                task.error = ("upstream_role_unverified: GitHub did not confirm a worker token's role on "
+                              f"{REPOSITORY} (expired, revoked or unreadable token); renew it on the Stage C host, "
+                              "then set READY")
         run.status = enums.AgentRunStatus.FAILED
         run.error = out["reason"]
         run.tool_calls = {**run.tool_calls, "attempts": [{"health": "DISABLED"}], "capacity_failure": True}

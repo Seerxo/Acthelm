@@ -1174,7 +1174,11 @@ def coder_prompt(job: Job) -> str:
             f"{read_only}"
             "Read the code you depend on before writing against it. Make the smallest correct change; do not add, "
             "rename or delete files. You cannot run anything; independent tests and a review "
-            "by another model follow.")
+            "by another model follow.\n"
+            # The pre-push privacy gate treats the task text as private: a name or comment that repeats 8+ of its
+            # words blocks publication (TASK-0006, 2026-11-09). Asking for own wording avoids that false stop.
+            "The objective and criteria are private notes: name tests and write comments in your own words; "
+            "never copy phrases from them into the files.")
 
 
 def _launch_lock(job_dir: Path, timeout_s: int = LAUNCH_LOCK_TIMEOUT) -> int:

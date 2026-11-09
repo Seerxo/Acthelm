@@ -321,9 +321,10 @@ pause
 
 stage "Scoped GitHub token for the worker (never shown, never in prompts)"
 open_url "https://github.com/settings/personal-access-tokens/new"
-step "Resource owner: you. Repository access: ONLY 'sez-company'. Expiry: 30 days."
+step "Sign in to GitHub as the AGENT account (seerxo-agent), never the founder: the token must be read-only upstream."
+step "Resource owner: seerxo-agent. Repository access: ONLY its fork seerxo-agent/seerxo-os (the push target). Expiry: 30 days."
 step "Repository permissions: Contents RW, Pull requests RW, Commit statuses READ, Actions READ, Metadata READ."
-step "NO Workflows, NO Administration, nothing else. Generate and copy the token."
+step "Upstream Seerxo/Acthelm is public: the token reads it without being granted it. NO Workflows, NO Administration."
 ask_secret COMPANY_STAGE_C_GITHUB_TOKEN "Paste the token (hidden):"
 if [[ -n "$COMPANY_STAGE_C_GITHUB_TOKEN" ]]; then
   code=$(printf 'header = "Authorization: Bearer %s"\n' "$COMPANY_STAGE_C_GITHUB_TOKEN" \
