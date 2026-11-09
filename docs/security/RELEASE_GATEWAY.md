@@ -67,7 +67,9 @@ path or a migration, because the host re-classifies the change from its own diff
 2. Gateway fetches the exact commit into its own clone, computes the payload digest with the same file list and
    `sha256  path` listing as `deploy-company-os.sh`, and the changed paths since the last applied release.
 3. Gateway runs the checks itself in an offline container from its own image (reuses the Stage C checks container:
-   `--network=none`, read-only), never trusting the repository's workflow results.
+   `--network=none`, read-only), never trusting the repository's workflow results. When `desk/` or `app/static`
+   changes it also rebuilds `app/static` from `desk/` offline and requires byte equality; the reviewer then reads
+   the `desk/` sources instead of the minified bundle ([DESK_BUNDLE_RELEASE.md](DESK_BUNDLE_RELEASE.md)).
 4. Gateway asks `company-review-signer` over its Unix socket (`POST /review`, gateway-signed, fresh, single-use
    nonce) to review the exact diff from the applied release. The signer builds the prompt itself
    (`RELEASE_REVIEW_PROMPT` + packet), asks `company-reasoner` /run on review-net, accepts only an answer with the
