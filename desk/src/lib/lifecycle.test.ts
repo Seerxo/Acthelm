@@ -44,6 +44,6 @@ test("every route belongs to a section and every section tab is a real route", (
   const reachable = new Set(SECTIONS.flatMap(s => [s.home, ...s.tabs]))
   assert.deepEqual(PAGES.filter(p => !reachable.has(p)), ["project"])
   assert.equal(sectionOf("project").key, "goals")
-  assert.equal(SECTIONS.length, 7)
+  assert.equal(SECTIONS.length, 8)
   for (const p of PAGES) assert.ok(PAGE_LABEL[p], p)
 })

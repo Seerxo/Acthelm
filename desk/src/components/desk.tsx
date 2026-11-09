@@ -1,8 +1,8 @@
 // Acthelm Desk primitives on top of shadcn/ui. Every page is built from these, so the language stays one.
 //
-// Type roles (use these, not ad-hoc sizes):
-//   page title 22/600 · section title 13/600 · object title 14/500 · value tabular
-//   body 14/400 · secondary 13 muted · metadata 12 muted · identifier 12 mono · eyebrow 11 caps
+// Type roles (Geist; use these, not ad-hoc sizes; tokens in index.css):
+//   page title 24/32 600 · section title 16/24 600 · object title 14/20 500 · metric 30/38 600 tabular
+//   body 14/20 · secondary 13/20 muted · meta 12/18 muted · identifier 12 mono · eyebrow 11 caps
 // Surfaces: the page background holds sections (heading + hairline, no box). A bordered surface is only for
 // an object that is acted on (approval, incident, composer) or elevated (dialog, sheet, popover).
 // Truth: every status shows its label (never colour alone); missing data reads UNKNOWN, never 0.
@@ -20,9 +20,11 @@ export const TEXT: Record<Tone, string> = {
 export const DOT: Record<Tone, string> = {
   success: "bg-success", info: "bg-info", warning: "bg-warning", danger: "bg-destructive", neutral: "bg-muted-foreground/60",
 }
+// Untitled-style badge: a faint tint, a hairline of the same hue and 700-weight text; never a solid block.
 const PILL: Record<Tone, string> = {
-  success: "bg-success/10 text-success", info: "bg-info/10 text-info", warning: "bg-warning/12 text-warning",
-  danger: "bg-destructive/10 text-destructive", neutral: "bg-muted text-muted-foreground",
+  success: "bg-success/8 text-success ring-1 ring-inset ring-success/20", info: "bg-info/8 text-info ring-1 ring-inset ring-info/20",
+  warning: "bg-warning/8 text-warning ring-1 ring-inset ring-warning/20", danger: "bg-destructive/8 text-destructive ring-1 ring-inset ring-destructive/20",
+  neutral: "bg-surface text-secondary-foreground ring-1 ring-inset ring-border",
 }
 
 /** Quiet status: dot + label. `pill` only where the status is the object's headline; `live` only for work an agent is
@@ -55,7 +57,7 @@ export function Section({ title, description, action, count, children, className
     <section className={cn("grid min-w-0 content-start gap-3", className)}>
       <header className="flex min-h-8 items-end justify-between gap-3 border-b border-border/80 pb-2">
         <div className="min-w-0">
-          <h2 className="flex items-baseline gap-2 text-[15px] font-semibold tracking-tight">
+          <h2 className="flex items-baseline gap-2 text-base leading-6 font-semibold tracking-[-0.01em]">
             {title}{count !== undefined && <span className="num text-xs font-normal text-muted-foreground">{count}</span>}
           </h2>
           {description && <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>}
@@ -81,7 +83,7 @@ export function Calm({ title, children, status }: { title?: string; children?: R
 export function EmptyState({ icon, title, children, action }: { icon?: ReactNode; title: string; children?: ReactNode; action?: ReactNode }) {
   return (
     <div className="grid justify-items-center gap-2 rounded-xl border border-dashed px-6 py-12 text-center">
-      {icon && <div className="mb-1 grid size-9 place-items-center rounded-lg bg-muted text-muted-foreground [&_svg]:size-4">{icon}</div>}
+      {icon && <div className="mb-1 grid size-10 place-items-center rounded-lg border bg-card text-muted-foreground shadow-xs [&_svg]:size-5">{icon}</div>}
       <p className="text-sm font-medium">{title}</p>
       {children && <p className="max-w-sm text-[13px] text-muted-foreground">{children}</p>}
       {action && <div className="mt-2">{action}</div>}
@@ -173,16 +175,20 @@ export interface Figure { label: string; value: string; sub?: ReactNode; tone?: 
 export function FigureStrip({ items, label = "Key figures" }: { items: Figure[]; label?: string }) {
   const cols = items.length === 3 ? "lg:grid-cols-3" : items.length === 2 ? "lg:grid-cols-2" : "lg:grid-cols-4"
   return (
-    <section aria-label={label} className={cn("grid grid-cols-2 gap-px overflow-hidden rounded-xl border bg-border", cols)}>
+    <section aria-label={label} className={cn("grid grid-cols-2 gap-3 sm:gap-4", cols)}>
       {items.map(c => {
-        const cls = cn("grid min-w-0 content-start gap-1 bg-card px-4 py-3.5 text-left sm:px-5 sm:py-4", items.length === 3 && "max-lg:last:col-span-2")
+        // A metric card: label (meta), one big number, at most one short line. "unknown" is a word, not a figure.
+        const unknown = c.value === "unknown"
+        const cls = cn("panel grid min-w-0 content-start gap-2 px-4 py-4 text-left sm:px-5 sm:py-5", items.length === 3 && "max-lg:last:col-span-2")
         const body = <>
-          <span className="eyebrow">{c.label}</span>
-          <span className={cn("metric", c.tone === "danger" && "text-destructive", c.tone === "warning" && "text-warning")}>{c.value}</span>
-          {c.sub && <span className="text-xs leading-snug text-pretty text-muted-foreground">{c.sub}</span>}
+          <span className="t-meta flex items-center gap-1.5 font-medium">{(unknown || c.tone === "warning" || c.tone === "danger") &&
+            <Dot tone={unknown ? "warning" : c.tone!} className="size-1.5" />}{c.label}</span>
+          {/* The number stays ink; a warning or danger state is a small dot beside the label, never a coloured figure. */}
+          <span className={cn(unknown ? "text-base leading-8 font-medium" : "metric")}>{c.value}</span>
+          {c.sub && <span className="t-meta text-pretty">{c.sub}</span>}
         </>
         return c.onClick
-          ? <button key={c.label} type="button" onClick={c.onClick} className={cn(cls, "transition-colors duration-150 hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring")}>{body}</button>
+          ? <button key={c.label} type="button" onClick={c.onClick} className={cn(cls, "transition-colors duration-150 hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring")}>{body}</button>
           : <div key={c.label} className={cls}>{body}</div>
       })}
     </section>
@@ -209,7 +215,7 @@ export function ClampText({ children, className }: { children: ReactNode; classN
 /** Detail kept one click away: native <details>, closed by default. The summary says what is inside. */
 export function Disclosure({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
   return (
-    <details className="group grid min-w-0 grid-cols-1 rounded-xl border bg-card open:gap-6 open:pb-5">
+    <details className="panel group grid min-w-0 grid-cols-1 open:gap-6 open:pb-5">
       <summary className="flex min-h-12 min-w-0 cursor-pointer list-none items-center gap-2 rounded-xl px-4 text-[13px] transition-colors hover:bg-muted/40 focus-visible:outline-2 focus-visible:outline-ring [&::-webkit-details-marker]:hidden">
         <ChevronRight aria-hidden className="size-4 text-muted-foreground transition-transform duration-150 group-open:rotate-90" />
         <span className="shrink-0 font-semibold">{title}</span>{hint && <span className="min-w-0 truncate text-xs text-muted-foreground">{hint}</span>}
@@ -276,17 +282,17 @@ export function Panel({ title, action, children, className, description, count, 
   return (
     <section className={cn("grid min-w-0 content-start gap-2.5", className)}>
       {title && (
-        <header className="flex min-h-7 items-end justify-between gap-3 px-0.5">
+        <header className="flex min-h-7 items-center justify-between gap-3 px-0.5">
           <div className="min-w-0">
-            <H className="flex items-baseline gap-2 text-[13px] leading-6 font-semibold tracking-[-0.005em]">
-              {title}{count !== undefined && <span className="num rounded-full bg-muted px-1.5 text-[11px] leading-[18px] font-medium text-muted-foreground">{count}</span>}
+            <H className="flex items-center gap-2 text-base leading-6 font-semibold tracking-[-0.01em]">
+              {title}{count !== undefined && <span className="num rounded-full bg-surface px-2 text-xs leading-[18px] font-medium text-secondary-foreground ring-1 ring-inset ring-border">{count}</span>}
             </H>
             {description && <p className="text-xs text-muted-foreground">{description}</p>}
           </div>
           {action && <div className="flex max-w-[65%] min-w-0 flex-wrap items-center justify-end gap-x-3 text-xs text-muted-foreground">{action}</div>}
         </header>
       )}
-      <div className="panel min-w-0 divide-y divide-border/70">{children}</div>
+      <div className="panel min-w-0 divide-y divide-border">{children}</div>
     </section>
   )
 }

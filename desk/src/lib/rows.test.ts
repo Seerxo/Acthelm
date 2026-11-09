@@ -124,7 +124,7 @@ test("primary navigation targets are at least 44 px tall on touch screens and th
   const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8")
   const app = read("../App.tsx"), css = read("../index.css")
   assert.match(app, /relative flex h-11 items-center gap-1\.5 text-\[13px\]/)          // section tabs: 44 px
-  assert.match(app, /<a href=\{`#\/\$\{p\}`\} onClick=\{close\}/)    // sidebar pages are real links that close the phone sheet
+  assert.match(app, /<a href=\{`#\/\$\{sec\.home\}`\} onClick=\{close\}/)    // sidebar places are real links that close the phone sheet
   assert.match(app, /relative flex h-\[58px\] w-full flex-col/)                         // bottom nav targets
   assert.match(app, /fixed inset-x-0 bottom-0 z-30[^"]*lg:hidden/)                        // bottom nav remains through tablet
   // Dense desktop rows (40 px) grow to 44 px wherever the pointer is coarse, including the sidebar's sub-page links.
@@ -205,8 +205,9 @@ test("PageHeader typography has one source of truth in the responsive design tok
   const css = readFileSync(new URL("../index.css", import.meta.url), "utf8")
   assert.match(component, /<h1>\{title\}<\/h1>/)
   assert.match(component, /<p className="text-muted-foreground">\{description\}<\/p>/)
-  assert.match(css, /\.page-heading h1 \{ font-size: clamp\(1\.75rem, 2\.4vw, 2rem\);/)
-  assert.match(css, /\.page-heading p \{ max-width: 46rem; font-size: \.875rem; line-height: 1\.55; \}/)
+  // Untitled UI scale (2026-11-09): page title 24/32, description 14/20.
+  assert.match(css, /\.page-heading h1 \{ font-size: 1\.5rem; line-height: 2rem;/)
+  assert.match(css, /\.page-heading p \{ max-width: 46rem; font-size: \.875rem; line-height: 1\.25rem; \}/)
 })
 
 test("state-opened dialogs (palette, create task, detail sheet) hand focus back through useReturnFocus", () => {

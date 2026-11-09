@@ -1,14 +1,12 @@
 import { useEffect, useRef, useState } from "react"
 import {
-  Activity, AlertOctagon, ArrowRight, Bot, Brain, Briefcase, CheckSquare, ChevronRight, Cpu, CornerDownLeft, FileText, Gauge, GitPullRequest, HeartPulse, House,
-  KanbanSquare, Keyboard, ListPlus, Menu, Monitor, Moon, Plus, Repeat, RefreshCw, Search, Send, ShieldCheck, Sparkles, Sun, Target, TrendingUp,
+  Activity, AlertOctagon, Bot, Brain, Briefcase, CheckSquare, ChevronRight, CornerDownLeft, FileText, Gauge, GitPullRequest, HeartPulse, House,
+  KanbanSquare, Keyboard, ListPlus, Menu, Monitor, Moon, Plus, Repeat, RefreshCw, Rocket, Search, Send, ShieldCheck, Sparkles, Sun, Target, TrendingUp,
   Wallet, WifiOff,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { ago } from "@/lib/format"
 import { healthSummary, systemChecks } from "@/lib/operating"
-import { nextNeed, shellStatus, type ShellFact } from "@/lib/shell-status"
-import { needAction, useOpenNeed } from "@/lib/needs"
 import { useTheme, type Theme } from "@/lib/theme"
 import { PAGE_LABEL, SECTIONS, pageTitle, sectionOf, visibleTabs, type SectionKey } from "@/lib/nav"
 import { useStageCPresent } from "@/hooks/use-stage-c"
@@ -17,7 +15,7 @@ import { ErrorBoundary } from "@/components/error-boundary"
 import { useReturnFocus } from "@/lib/return-focus"
 import { DeskProvider, useDesk, useDraft, useLink, useNow, useStale, type Page } from "@/state"
 import { handOff } from "@/lib/draft"
-import { CommandTrack, DOT, Dot, Status, TEXT } from "@/components/desk"
+import { CommandTrack, DOT, Dot, Status } from "@/components/desk"
 import { DetailSheet } from "@/components/detail"
 import { CreateTask } from "@/pages/tasks"
 import { Button } from "@/components/ui/button"
@@ -28,8 +26,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { Command, CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList, CommandShortcut } from "@/components/ui/command"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import {
-  Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarMenuSub,
-  SidebarMenuSubButton, SidebarMenuSubItem,
+  Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem,
   SidebarProvider, SidebarTrigger, useSidebar,
 } from "@/components/ui/sidebar"
 import { Overview } from "@/pages/overview"
@@ -44,14 +41,14 @@ import { AgentsPage } from "@/pages/agents"
 import { IncidentsPage } from "@/pages/control"
 import { ActivityPage, HealthPage } from "@/pages/system"
 import { MemoryPage } from "@/pages/memory"
+import { ReleasesPage } from "@/pages/releases"
 
 const SECTION_ICON: Record<SectionKey, typeof Gauge> = {
-  dashboard: House, goals: Target, tasks: KanbanSquare, agents: Bot, approvals: CheckSquare, metrics: TrendingUp, system: Gauge,
+  dashboard: House, goals: Target, tasks: KanbanSquare, agents: Bot, approvals: CheckSquare, releases: Rocket, metrics: TrendingUp, system: Gauge,
 }
-const GLANCE_ICON: Record<ShellFact["key"], typeof Gauge> = { agents: Bot, worker: Cpu, approvals: CheckSquare }
 const PAGE_ICON: Record<Page, typeof Gauge> = {
   overview: House, approvals: CheckSquare, projects: Briefcase, project: Briefcase, growth: TrendingUp, finance: Wallet,
-  tasks: KanbanSquare, agents: Bot, automation: Repeat, "stage-c": GitPullRequest, incidents: AlertOctagon, activity: Activity, health: HeartPulse, memory: Brain,
+  tasks: KanbanSquare, agents: Bot, automation: Repeat, "stage-c": GitPullRequest, incidents: AlertOctagon, activity: Activity, health: HeartPulse, memory: Brain, releases: Rocket,
 }
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const MOD = isMac ? "⌘" : "Ctrl"
@@ -72,77 +69,63 @@ function useCounts() {
   return { tab, section }
 }
 
-/** The mark: an ink square with one Iris point, the accent's only decorative use. */
+/** The mark: an ink square. The Desk is monochrome: no brand hue anywhere. */
 function Mark({ className }: { className?: string }) {
   return (
-    <span aria-hidden className={cn("relative grid size-7 shrink-0 place-items-center rounded-[8px] bg-foreground text-[12px] font-bold tracking-tight text-background", className)}>
-      A<span className="absolute -top-0.5 -right-0.5 size-2 rounded-full bg-brand ring-2 ring-sidebar" />
+    <span aria-hidden className={cn("grid size-8 shrink-0 place-items-center rounded-lg bg-foreground text-[13px] font-semibold tracking-tight text-background shadow-xs", className)}>
+      A
     </span>
   )
 }
 
-function AppSidebar({ onCreate, stageC }: { onCreate: () => void; stageC: boolean }) {
+function AppSidebar({ onCreate }: { onCreate: () => void }) {
   const { data, route } = useDesk()
   const { setOpenMobile } = useSidebar()
-  const { section: count, tab: tabCount } = useCounts()
+  const { section: count } = useCounts()
   const now = useNow("minute")
   const close = () => setOpenMobile(false)
   // A project detail page highlights Portfolio, the list it was opened from.
   const current = route.page === "project" ? "projects" : route.page
   return (
     <Sidebar collapsible="offcanvas">
-      <SidebarHeader className="gap-4 px-3 pt-4 pb-2">
-        <div className="flex items-center gap-2.5 px-1.5">
+      <SidebarHeader className="gap-5 px-4 pt-5 pb-2">
+        <div className="flex items-center gap-3 px-1">
           <Mark />
-          <div className="min-w-0 leading-tight">
-            <div className="truncate text-[13px] font-semibold tracking-tight">Acthelm</div>
-            <div className="truncate text-[11px] text-muted-foreground">Founder Desk</div>
+          <div className="min-w-0">
+            <div className="truncate text-sm leading-5 font-semibold tracking-[-0.01em] text-foreground">Acthelm</div>
+            <div className="truncate text-xs leading-[18px] text-muted-foreground">Founder Desk</div>
           </div>
         </div>
         {data && (
-          <Button variant="outline" className="h-10 justify-start gap-2 bg-background px-3 text-[13px] font-medium shadow-xs" onClick={() => { close(); onCreate() }}>
-            <Plus className="size-4" />New task<Kbd className="ml-auto h-5 text-[10px]">C</Kbd>
+          <Button variant="outline" className="h-10 justify-start gap-2 px-3 text-sm" onClick={() => { close(); onCreate() }}>
+            <Plus className="size-4 text-muted-foreground" />New task<Kbd className="ml-auto h-5 text-[10px]">C</Kbd>
           </Button>
         )}
       </SidebarHeader>
-      <SidebarContent className="gap-0 px-1 pt-1">
+      <SidebarContent className="gap-0 px-2 pt-2">
         {/* The founder's places (lib/nav.ts), each with its other pages beneath it. Phones also get the main
             places as a bottom bar and a place's pages as tabs; on a desktop this list is the navigation. */}
         <nav aria-label="Pages">
           <SidebarGroup className="py-1">
-            <SidebarMenu className="gap-px">
+            <span className="eyebrow px-3 pb-2">Workspace</span>
+            <SidebarMenu className="gap-0.5">
               {SECTIONS.map(sec => {
                 const Icon = SECTION_ICON[sec.key]
-                const here = current === sec.home
+                // A place is active on any of its pages; its other pages are tabs on the page itself (SectionTabs).
+                const here = sectionOf(current).key === sec.key
                 const [n, hot, what] = count[sec.key] ?? []
-                const subs = visibleTabs(sec, stageC).filter(p => p !== sec.home)
                 return (
                   <SidebarMenuItem key={sec.key}>
                     <SidebarMenuButton asChild isActive={here}
-                      className={cn("h-9 gap-2.5 px-2.5 text-[13px] text-sidebar-foreground/75 transition-colors duration-150 hover:bg-sidebar-accent/70 hover:text-sidebar-foreground",
-                        "data-active:bg-sidebar-accent data-active:font-medium data-active:text-sidebar-foreground")}>
+                      className={cn("h-10 gap-3 px-3 text-sm font-medium text-sidebar-foreground transition-colors duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                        "data-active:bg-sidebar-accent data-active:font-semibold data-active:text-foreground")}>
                       {/* Real links: open in a new tab, copy the address. The hash route does the navigation. */}
-                      <a href={`#/${sec.home}`} onClick={close} aria-current={here ? "page" : undefined}>
-                        <Icon className={cn("size-4", sectionOf(current).key === sec.key ? "text-brand" : "text-muted-foreground")} /><span>{sec.label}</span>
+                      <a href={`#/${sec.home}`} onClick={close} aria-current={current === sec.home ? "page" : here ? "true" : undefined}>
+                        <Icon className={cn("size-5!", here ? "text-foreground" : "text-muted-foreground")} /><span>{sec.label}</span>
                         {!!n && <span className="sr-only">, {n} {what}</span>}
                       </a>
                     </SidebarMenuButton>
-                    {!!n && <SidebarMenuBadge aria-hidden className={cn("num rounded-full px-1.5 text-[11px] font-medium text-muted-foreground", hot && "bg-destructive/10 text-destructive")}>{n}</SidebarMenuBadge>}
-                    {!!subs.length && <SidebarMenuSub className="mr-0 gap-px py-0.5">
-                      {subs.map(p => {
-                        const on = current === p, c = tabCount[p]
-                        return (
-                          <SidebarMenuSubItem key={p}>
-                            <SidebarMenuSubButton asChild isActive={on} className="h-8 text-[13px] text-sidebar-foreground/70 data-active:font-medium data-active:text-sidebar-foreground">
-                              <a href={`#/${p}`} onClick={close} aria-current={on ? "page" : undefined}>
-                                <span>{PAGE_LABEL[p]}</span>
-                                {!!c && <span className="num ml-auto text-[11px] text-muted-foreground">{c}</span>}
-                              </a>
-                            </SidebarMenuSubButton>
-                          </SidebarMenuSubItem>
-                        )
-                      })}
-                    </SidebarMenuSub>}
+                    {!!n && <SidebarMenuBadge aria-hidden className={cn("num top-2.5! right-2 rounded-full bg-surface px-2 text-xs font-medium text-secondary-foreground ring-1 ring-inset ring-border", hot && "bg-destructive/8 text-destructive ring-destructive/20")}>{n}</SidebarMenuBadge>}
                   </SidebarMenuItem>
                 )
               })}
@@ -156,63 +139,14 @@ function AppSidebar({ onCreate, stageC }: { onCreate: () => void; stageC: boolea
           // The same checklist System shows (lib/operating.ts healthSummary): only verified checks count as fine.
           const checks = systemChecks(data, now), h = healthSummary(checks)
           return <a href="#/health" onClick={close} aria-label={`Company health: ${h.text}. Open System status`}
-            className="flex min-h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-[13px] transition-colors hover:bg-sidebar-accent/70 focus-visible:outline-2 focus-visible:outline-ring">
+            className="flex min-h-10 w-full items-center gap-2.5 rounded-md px-3 text-left text-sm text-sidebar-foreground transition-colors hover:bg-sidebar-accent focus-visible:outline-2 focus-visible:outline-ring">
             <Dot tone={h.tone} />
-            <span className="min-w-0 truncate">{h.open.length ? `${h.open.length} of ${checks.length} checks not verified` : h.text}</span>
+            <span className="min-w-0 truncate">{h.open.length ? `${h.open.length}/${checks.length} not verified` : h.text}</span>
             <span className="ml-auto text-xs text-muted-foreground">Status</span>
           </a>
         })() : <Skeleton className="h-9 w-full" />}
       </SidebarFooter>
     </Sidebar>
-  )
-}
-
-/** What comes next: the top needs-you item, one tap from where it is resolved. Opening never approves anything.
- *  Hidden when the API did not report the queue; "Nothing needs you" only when it reported an empty one. */
-function NextUp({ compact }: { compact?: boolean }) {
-  const { data } = useDesk()
-  const openNeed = useOpenNeed()
-  if (!data) return null
-  const n = nextNeed(data)
-  if (n === undefined) return null
-  const tone = !n ? "success" : n.level === "critical" ? "danger" : n.level === "warning" ? "warning" : "info"
-  const body = <>
-    <ArrowRight aria-hidden className={cn("size-3.5 shrink-0", TEXT[tone])} />
-    <span className="shrink-0 text-muted-foreground">Next</span>
-    <span className="min-w-0 truncate font-medium">{n ? n.title : "Nothing needs you"}</span>
-    {n && <span className="ml-auto shrink-0 text-muted-foreground">{needAction(n)}</span>}
-  </>
-  const cls = cn("flex min-w-0 items-center gap-1.5 rounded-lg text-xs", compact ? "h-11 w-full border bg-card px-3" : "h-9 max-w-[22rem] px-2.5")
-  return n
-    ? <button type="button" onClick={() => openNeed(n)} aria-label={`Next: ${n.title}. ${needAction(n)}`}
-        className={cn(cls, "text-left transition-colors duration-150 hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring")}>{body}</button>
-    : <div role="status" className={cls}>{body}</div>
-}
-
-/** The shell's at-a-glance line: agents, worker, decisions waiting (lib/shell-status.ts). Each opens its page. Before
- *  the first read nothing is drawn, so a placeholder never reads as 0. */
-function SystemGlance({ compact }: { compact?: boolean }) {
-  const { data, go } = useDesk()
-  const now = useNow("minute")
-  if (!data) return null
-  const facts = shellStatus(data, now)
-  return (
-    <ul aria-label="System at a glance" className={cn("flex items-center", compact ? "grid grid-cols-3 gap-1.5" : "gap-1")}>
-      {facts.map(f => {
-        const Icon = GLANCE_ICON[f.key]
-        return (
-          <li key={f.key} className="min-w-0">
-            <button type="button" onClick={() => go(f.page)} aria-label={`${f.label}: ${f.value}. Open ${pageTitle(f.page)}`} title={`${f.label}: ${f.value}`}
-              className={cn("num flex w-full min-w-0 items-center gap-1.5 rounded-lg text-xs transition-colors duration-150 hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring",
-                compact ? "h-11 justify-center border bg-card px-2" : "h-9 px-2.5")}>
-              <Icon aria-hidden className={cn("size-3.5 shrink-0", TEXT[f.tone])} />
-              <span className={cn("text-muted-foreground", !compact && "max-xl:hidden")}>{f.label}</span>
-              <span className={cn("min-w-0 truncate font-medium", f.tone === "neutral" ? "text-foreground" : TEXT[f.tone])}>{compact ? f.short : <span className="block max-w-[18ch] truncate">{f.value}</span>}</span>
-            </button>
-          </li>
-        )
-      })}
-    </ul>
   )
 }
 
@@ -238,7 +172,7 @@ function MobileNav() {
             <li key={s.key}>
               <button onClick={() => go(s.home)} aria-current={on ? "page" : undefined}
                 className={cn(cls, on ? "text-foreground" : "text-muted-foreground")}>
-                <Icon className={cn("size-[19px]", on && "text-brand")} strokeWidth={on ? 2.2 : 1.8} />{s.label}
+                <Icon className={cn("size-[19px]", on && "text-foreground")} strokeWidth={on ? 2.2 : 1.8} />{s.label}
                 {!!n && <span className={cn("num absolute top-1.5 left-[calc(50%+6px)] min-w-4 rounded-full bg-muted px-1 text-[10px] leading-4 font-semibold", hot && "bg-destructive text-white")}>
                   {n}<span className="sr-only"> {what}</span></span>}
               </button>
@@ -246,10 +180,10 @@ function MobileNav() {
           )
         })}
         <li>
-          {/* Goals, Metrics and System: one tap away in the sheet, which lists every page. */}
+          {/* Goals, Releases, Metrics and System: one tap away in the sheet, which lists every page. */}
           <button onClick={() => setOpenMobile(true)} aria-expanded={openMobile} aria-label={`More pages${elsewhere ? `, now on ${sectionOf(route.page).label}` : ""}`}
             className={cn(cls, elsewhere ? "text-foreground" : "text-muted-foreground")}>
-            <Menu className={cn("size-[19px]", elsewhere && "text-brand")} strokeWidth={elsewhere ? 2.2 : 1.8} />{elsewhere ? sectionOf(route.page).label : "More"}
+            <Menu className={cn("size-[19px]", elsewhere && "text-foreground")} strokeWidth={elsewhere ? 2.2 : 1.8} />{elsewhere ? sectionOf(route.page).label : "More"}
           </button>
         </li>
       </ul>
@@ -356,7 +290,7 @@ function InstructGroup({ instruction, run }: { instruction: string; run: (fn: ()
     <CommandGroup heading="Instruct the CEO">
       {/* Never replaces a draft in progress (lib/draft.ts handOff); the composer takes focus once it is shown. */}
       <CommandItem value="instruct" onSelect={() => run(() => { setDraft(cur => handOff(cur, instruction)); go("overview") })}>
-        <Sparkles className="text-brand" /><span className="min-w-0 flex-1 truncate">Write “{instruction}” as an instruction</span>
+        <Sparkles className="text-muted-foreground" /><span className="min-w-0 flex-1 truncate">Write “{instruction}” as an instruction</span>
         <span className="text-xs text-muted-foreground max-sm:hidden">review, then send from Home</span><CornerDownLeft className="size-3.5! text-muted-foreground" />
       </CommandItem>
     </CommandGroup>
@@ -448,8 +382,8 @@ function useNewVersion() {
 }
 
 const Banner = ({ tone = "neutral", icon, children, action }: { tone?: "neutral" | "warning"; icon: React.ReactNode; children: React.ReactNode; action?: React.ReactNode }) => (
-  <div role="status" className={cn("flex flex-wrap items-center gap-x-2.5 gap-y-1 rounded-xl border px-3.5 py-2.5 text-[13px] [&>svg]:size-4 [&>svg]:shrink-0",
-    tone === "warning" ? "border-warning/25 bg-warning/[0.06] [&>svg]:text-warning" : "bg-surface [&>svg]:text-muted-foreground")}>
+  <div role="status" className={cn("panel flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-sm [&>svg]:size-4 [&>svg]:shrink-0",
+    tone === "warning" ? "[&>svg]:text-warning" : "[&>svg]:text-muted-foreground")}>
     {icon}<span className="min-w-0 flex-1">{children}</span>{action}
   </div>
 )
@@ -470,20 +404,20 @@ function Banners() {
   </>
 }
 
-/** Tabs between the pages of one section, where the sidebar is not on screen (below 1024px). Each tab is its own route. */
+/** Tabs between the pages of one section, at every width: the sidebar lists only the eight places. Each tab is its own route. */
 function SectionTabs({ stageC }: { stageC: boolean }) {
   const { route, go } = useDesk()
   const { tab: count } = useCounts()
   const tabs = visibleTabs(sectionOf(route.page), stageC)
   if (tabs.length < 2 || !tabs.includes(route.page)) return null
   return (
-    <nav aria-label="Section pages" className="-mx-4 -mt-1 overflow-x-auto lg:hidden border-b px-4 [scrollbar-width:none] md:-mx-8 md:px-8">
+    <nav aria-label="Section pages" className="-mt-1 overflow-x-auto border-b [scrollbar-width:none]">
       <ul className="flex gap-5">
         {tabs.map(p => (
           <li key={p}>
             <button onClick={() => go(p)} aria-current={route.page === p ? "page" : undefined}
               className={cn("relative flex h-11 items-center gap-1.5 text-[13px] whitespace-nowrap transition-colors duration-150",
-                route.page === p ? "font-medium text-foreground after:absolute after:inset-x-0 after:-bottom-px after:h-0.5 after:rounded-full after:bg-foreground" : "text-muted-foreground hover:text-foreground")}>
+                route.page === p ? "font-semibold text-foreground after:absolute after:inset-x-0 after:-bottom-px after:h-0.5 after:rounded-full after:bg-foreground" : "font-medium text-muted-foreground hover:text-foreground")}>
               {PAGE_LABEL[p]}{count[p] ? <span className="num text-[11px] text-muted-foreground">{count[p]}</span> : null}
             </button>
           </li>
@@ -521,6 +455,7 @@ function Main() {
     case "activity": return <ActivityPage />
     case "health": return <HealthPage />
     case "memory": return <MemoryPage />
+    case "releases": return <ReleasesPage />
     default: return <Overview />
   }
 }
@@ -585,17 +520,15 @@ function TopBar({ t, onSearch }: { t: ThemeApi; onSearch: () => void }) {
   return (
     <header className="sticky top-0 z-20 flex min-h-14 flex-wrap items-center gap-x-2 border-b bg-background/85 px-3 pt-[env(safe-area-inset-top)] backdrop-blur-xl md:px-6">
       <SidebarTrigger className="size-10 rounded-lg text-muted-foreground lg:hidden" />
-      <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-[13px]">
+      <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1.5 text-sm">
         {crumb && <>
           <button className="inline-flex min-h-7 items-center text-muted-foreground transition-colors hover:text-foreground max-sm:hidden" onClick={() => go(section.home)}>{section.label}</button>
           <ChevronRight className="size-3.5 text-muted-foreground/50 max-sm:hidden" />
         </>}
-        <span className="truncate font-medium" aria-current="page">{here}</span>
+        <span className="truncate font-semibold" aria-current="page">{here}</span>
       </nav>
       <div className="ml-auto flex items-center gap-0.5">
-        <div className="max-2xl:hidden"><NextUp /></div>
-        <div className="max-lg:hidden"><SystemGlance /></div>
-        <span className="mx-1 h-4 w-px bg-border max-lg:hidden" aria-hidden />
+        {/* One compact data-state dot and label; the company's state, next decision and agents live on Home. */}
         <Freshness />
         <span className="mx-1 h-4 w-px bg-border max-sm:hidden" aria-hidden />
         <button onClick={onSearch} aria-label="Search or instruct the CEO" className="hidden h-10 min-w-[220px] items-center gap-2 rounded-lg border bg-card px-3 text-[13px] text-muted-foreground shadow-xs transition-colors hover:border-foreground/20 hover:text-foreground xl:flex">
@@ -606,10 +539,6 @@ function TopBar({ t, onSearch }: { t: ThemeApi; onSearch: () => void }) {
         </button>
         <ThemeToggle t={t} />
       </div>
-      {/* Phones and tablets: the same three facts as a second row, one tap each. */}
-      <div className="grid w-full gap-1.5 pb-2 empty:hidden lg:hidden"><SystemGlance compact /><NextUp compact /></div>
-      {/* Laptops: the next item gets its own row only where the header has no room for it. */}
-      <div className="hidden w-full pb-2 empty:hidden lg:max-2xl:flex"><NextUp /></div>
     </header>
   )
 }
@@ -624,7 +553,7 @@ function Shell({ t }: { t: ThemeApi }) {
   const stageC = useStageCPresent()
   return (
     <SidebarProvider>
-      <AppSidebar onCreate={create} stageC={stageC} />
+      <AppSidebar onCreate={create} />
       <SidebarInset className="min-w-0">
         <TopBar t={t} onSearch={() => setPalette(true)} />
         {/* SidebarInset is the page's one <main> landmark; this is its content column. */}
@@ -658,12 +587,12 @@ function LoadingPage() {
           <Skeleton className="h-4 w-[28rem] max-w-[85vw]" /><Skeleton className="h-4 w-60 sm:hidden" /><Skeleton className="h-3.5 w-72 max-w-[75vw]" /></div>
         <div className="flex gap-2"><Skeleton className="h-10 w-32 rounded-md" /><Skeleton className="h-10 w-28 rounded-md" /></div>
       </div>
-      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border bg-border lg:grid-cols-4">
-        {Array.from({ length: 4 }, (_, i) => <div key={i} className="grid gap-2 bg-card px-5 py-4"><Skeleton className="h-2.5 w-20" /><Skeleton className="h-7 w-12" /><Skeleton className="h-2.5 w-24" /></div>)}
+      <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+        {Array.from({ length: 4 }, (_, i) => <div key={i} className="panel grid gap-2.5 px-5 py-5"><Skeleton className="h-3 w-20" /><Skeleton className="h-8 w-14" /><Skeleton className="h-3 w-24" /></div>)}
       </div>
       <div className="grid min-w-0 gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]">
-        <div className="grid content-start gap-2.5"><Skeleton className="h-3.5 w-28" /><div className="panel divide-y divide-border/70">{rows(5)}</div></div>
-        <div className="grid content-start gap-2.5 max-xl:hidden"><Skeleton className="h-3.5 w-20" /><div className="panel divide-y divide-border/70">{rows(4)}</div></div>
+        <div className="grid content-start gap-2.5"><Skeleton className="h-3.5 w-28" /><div className="panel divide-y divide-border">{rows(5)}</div></div>
+        <div className="grid content-start gap-2.5 max-xl:hidden"><Skeleton className="h-3.5 w-20" /><div className="panel divide-y divide-border">{rows(4)}</div></div>
       </div>
     </div>
   )

@@ -2,12 +2,12 @@
 // supporting facts. Every card reads only /desk/state and /stage-c/state (lib/dashboard.ts); a source that was not
 // reported says "unknown", never 0 or "none". Stage C parts render only where stageCOnHost proves it runs.
 import { useState, type ReactNode } from "react"
-import { ArrowRight, ChevronRight, ExternalLink } from "lucide-react"
+import { ArrowRight, ExternalLink } from "lucide-react"
 import type { Metric, Tone } from "@/lib/api"
 import { ago, fmtNum, humanize, metricName } from "@/lib/format"
 import { freshOf, staleSuffix, dataSummary } from "@/lib/freshness"
-import { healthSummary, systemChecks, vitals } from "@/lib/operating"
-import { useOpenNeed } from "@/lib/needs"
+import { vitals } from "@/lib/operating"
+import { needAction, useOpenNeed } from "@/lib/needs"
 import { retryEventId } from "@/lib/needs-pure"
 import { nextAction, readFreshness, type StageCState } from "@/lib/stage-c"
 import type { StageCRead } from "./use-stage-c"
@@ -23,10 +23,14 @@ const UNKNOWN = "unknown"
 const LEVEL_LABEL: Record<NeedItem["level"], string> = { critical: "Critical", warning: "Needs action", info: "To review" }
 
 // --------------------------------------------------------------------------- shared bits
+/** The action a row leads to, drawn as a secondary button; the row around it is the real target. */
+const ActionLabel = ({ children }: { children: ReactNode }) => (
+  <span className="inline-flex h-8 shrink-0 items-center gap-1.5 self-center rounded-lg border border-input bg-card px-3 text-[13px] font-medium whitespace-nowrap text-secondary-foreground shadow-xs max-sm:h-9">{children}</span>
+)
 const fresh = (m?: { freshness?: string | null } | null): Tone => (freshOf(m) === "VERIFIED" ? "success" : "warning")
 const More = ({ children, onClick }: { children: ReactNode; onClick: () => void }) => (
-  <button type="button" onClick={onClick} className="inline-flex min-h-11 items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring">
-    {children}<ArrowRight className="size-3" aria-hidden />
+  <button type="button" onClick={onClick} className="inline-flex min-h-8 items-center gap-1.5 rounded-md text-sm font-medium max-sm:min-h-11 text-secondary-foreground transition-colors hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring">
+    {children}<ArrowRight className="size-4" aria-hidden />
   </button>
 )
 
@@ -34,16 +38,17 @@ const More = ({ children, onClick }: { children: ReactNode; onClick: () => void 
 function Fig({ label, value, tone, sub }: { label: string; value: ReactNode | null; tone?: Tone; sub?: ReactNode }) {
   const missing = value === null
   return (
-    <div className="grid min-w-0 content-start gap-0.5 px-4 py-3">
-      <dt className="text-xs text-muted-foreground">{label}</dt>
-      <dd className={cn("num truncate text-lg leading-7 font-semibold tracking-[-0.02em]", missing && "text-sm font-medium text-warning",
-        !missing && tone === "danger" && "text-destructive", !missing && tone === "warning" && "text-warning")}>{missing ? UNKNOWN : value}</dd>
+    <div className="grid min-w-0 content-start gap-1 px-4 py-3.5">
+      <dt className="t-meta font-medium">{label}</dt>
+      <dd className={cn("num flex min-w-0 items-center gap-2 text-xl leading-[30px] font-semibold tracking-[-0.02em]", missing && "text-sm font-medium")}>
+        {(missing || tone === "danger" || tone === "warning") && <Dot tone={missing ? "warning" : tone!} className="size-1.5" />}
+        <span className="truncate">{missing ? UNKNOWN : value}</span></dd>
       {sub && <dd className="truncate text-xs text-muted-foreground">{sub}</dd>}
     </div>
   )
 }
 const Figs = ({ children, cols = 2 }: { children: ReactNode; cols?: 2 | 4 }) =>
-  <dl className={cn("grid grid-cols-2 divide-border/70", cols === 4 && "sm:grid-cols-4")}>{children}</dl>
+  <dl className={cn("grid grid-cols-2", cols === 4 && "sm:grid-cols-4")}>{children}</dl>
 
 // --------------------------------------------------------------------------- 1. Now
 /** What the system is doing: tasks executing, then each agent's state and current task. The shell header already
@@ -57,7 +62,7 @@ export function NowCard() {
   const busy = new Set(tasks.map(t => t.key))
   const agents = rows.filter(r => !(r.task && busy.has(r.task.key)))   // an agent shown with its task above is not repeated
   return (
-    <Panel title="Now" description="What the system is doing" action={<More onClick={() => go("agents")}>Agents</More>}>
+    <Panel title="Active operations" count={tasks.length || undefined} action={<More onClick={() => go("agents")}>Agents</More>}>
       {tasks.slice(0, 4).map(t => (
         <PanelRow key={t.key} onClick={() => open({ kind: "task", key: t.key })} label={`${t.title}, in progress`} className="min-h-11 py-2.5"
           lead={<Dot tone="info" live />} title={t.title}
@@ -69,7 +74,7 @@ export function NowCard() {
           meta={<>{r.task ? r.task.title : "No current task"} · {r.lastRun ? `last run ${ago(r.lastRun)} ago` : "no run recorded"}</>}
           trail={<Status value={r.label} label={humanize(r.label)} tone={r.tone ?? BUCKET_TONE[r.bucket]} />} />
       ))}
-      {!tasks.length && !rows.length && <PanelEmpty title="Nothing executing">No task is in progress and the API reported no agents.</PanelEmpty>}
+      {!tasks.length && !rows.length && <PanelEmpty title="Nothing executing">No task in progress; no agents reported.</PanelEmpty>}
     </Panel>
   )
 }
@@ -119,7 +124,7 @@ export function NeedsCard({ sc }: { sc: StageCState | null }) {
     else go(it.target.page as Page)
   }
   return (
-    <Panel title="Needs you" count={items.length}
+    <Panel title="Decisions for you" count={items.length}
       description={unknown.length ? <span className="text-warning">May be incomplete: {unknown.join(", ")} {UNKNOWN}</span> : undefined}
       action={<More onClick={() => go("approvals")}>Approvals</More>}>
       {shown.length ? shown.map(it => {
@@ -130,14 +135,15 @@ export function NeedsCard({ sc }: { sc: StageCState | null }) {
         const meta = <><span className="font-medium text-foreground/80">{LEVEL_LABEL[it.level]}</span> · {it.detail}{it.since && <> · {ago(it.since)} ago</>}</>
         if ("href" in it.target) return (
           <a key={it.id} href={it.target.href} target="_blank" rel="noopener noreferrer"
-            className="flex min-h-11 w-full items-start gap-x-3 px-4 py-2.5 transition-colors hover:bg-muted/50 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring">
-            <span className="mt-[3px] flex w-4 shrink-0 justify-center">{lead}</span>
+            className="flex min-h-11 w-full items-start gap-x-3 px-4 py-3 transition-colors hover:bg-surface focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring max-sm:flex-wrap">
+            <span className="mt-[5px] flex w-4 shrink-0 justify-center">{lead}</span>
             <span className="grid min-w-0 flex-1 gap-0.5"><span className="text-[14px] leading-5 font-medium">{it.title}</span>
               <span className="text-[13px] leading-5 text-muted-foreground">{meta}</span></span>
-            <span className="flex shrink-0 items-center gap-1 self-center text-xs font-medium">Open PR<ExternalLink className="size-3" aria-hidden /><span className="sr-only">(opens GitHub)</span></span>
+            <ActionLabel>Open PR<ExternalLink className="size-3.5" aria-hidden /><span className="sr-only">(opens GitHub)</span></ActionLabel>
           </a>)
-        const row = <PanelRow key={it.id} onClick={() => openItem(it)} lead={lead} title={it.title} meta={meta} className="min-h-11 py-2.5"
-          trail={a || retry !== null ? undefined : <ChevronRight className="size-4 text-muted-foreground/50 max-sm:hidden" aria-hidden />} />
+        // Every row names its one action; the row itself is the target (no nested button).
+        const row = <PanelRow key={it.id} onClick={() => openItem(it)} lead={lead} title={it.title} meta={meta} className="min-h-11 py-3"
+          trail={a || retry !== null ? undefined : <ActionLabel>{it.need ? needAction(it.need) : "Open task"}</ActionLabel>} />
         if (!a && retry === null) return row
         // Decided right here with the same confirmation as Approvals / Activity.
         return <div key={it.id} className="flex items-center gap-x-2 pr-3 max-sm:flex-wrap max-sm:pb-2.5 max-sm:pl-7">
@@ -238,22 +244,21 @@ export function BudgetCard({ sc }: { sc: StageCState | null }) {
   const { go } = useDesk()
   return (
     <Panel title="Budget and cost" description="Only what runs recorded" action={<More onClick={() => go("finance")}>Finance</More>}>
-      <Figs>{costs(d, sc).map(c => <Fig key={c.label} label={c.label} value={c.value} sub={c.note}
+      <Figs>{costs(d, sc).filter(c => c.value !== null).map(c => <Fig key={c.label} label={c.label} value={c.value} sub={c.note}
         tone={c.label === "Quota stops" && c.value !== null && c.value !== "0" ? "warning" : undefined} />)}</Figs>
     </Panel>
   )
 }
 
 // --------------------------------------------------------------------------- 8. Alerts, incidents and running version
+/** Incidents and recent high alerts. Company health is Home's "System status" figure, so it is not repeated here. */
 export function AlertsCard() {
   const d = useData()
   const { go } = useDesk()
   const now = useNow("minute")
-  const health = healthSummary(systemChecks(d, now))
   const events = recentAlerts(d.activity)
   return (
-    <Panel title="Alerts and incidents" count={d.incidents.length || undefined} action={<More onClick={() => go("incidents")}>Incidents</More>}>
-      <PanelRow onClick={() => go("health")} lead={<Dot tone={health.tone} />} title="Company health" meta={health.text} className="min-h-11 py-2.5" />
+    <Panel title="Alerts" count={d.incidents.length || undefined} action={<More onClick={() => go("incidents")}>Incidents</More>}>
       {d.incidents.slice(0, 3).map(i => (
         <PanelRow key={i.key} onClick={() => go("incidents")} className="min-h-11 py-2.5"
           lead={<Dot tone={["SEV0", "SEV1"].includes(i.severity) ? "danger" : "warning"} />} title={i.title}
@@ -275,9 +280,9 @@ export function AlertsCard() {
 function VersionRow() {
   const { go } = useDesk()
   const v = runningVersion(useData())
+  if (!v || (!v.api && !v.worker)) return null   // Home lists "running version" under Not reported instead of a row of "unknown"
   return <PanelRow onClick={() => go("health")} className="min-h-11 py-2.5"
-    lead={<Dot tone={!v || v.agree === null ? "warning" : v.agree ? "success" : "warning"} />} title="Running version"
-    meta={!v ? `${UNKNOWN}: not reported by this API`
-      : <><span className="font-mono">API {v.api ?? UNKNOWN} · worker {v.worker ?? UNKNOWN}</span>
+    lead={<Dot tone={v.agree === null ? "warning" : v.agree ? "success" : "warning"} />} title="Running version"
+    meta={<><span className="font-mono">API {v.api ?? UNKNOWN} · worker {v.worker ?? UNKNOWN}</span>
         {v.agree === false ? ` · ${v.drift[0] ?? "API and worker differ"}` : v.agree ? " · same commit" : ""}</>} />
 }

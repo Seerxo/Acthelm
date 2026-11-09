@@ -10,6 +10,7 @@
     --color-warning: var(--warning);
     --color-info: var(--info);
     --color-brand: var(--brand);
+    --color-primary-hover: var(--primary-hover);
     --color-brand-foreground: var(--brand-foreground);
     --color-surface: var(--surface);
     --color-subtle: var(--subtle);
@@ -50,107 +51,112 @@
     --radius-sm: calc(var(--radius) * 0.6);
     --radius-md: calc(var(--radius) * 0.8);
     --radius-lg: var(--radius);
-    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-xl: var(--radius-panel);
     --radius-2xl: calc(var(--radius) * 1.8);
     --radius-3xl: calc(var(--radius) * 2.2);
     --radius-4xl: calc(var(--radius) * 2.6);
     --shadow-float: var(--float);
+    --shadow-xs: var(--panel-shadow);
     --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-/* Acthelm Desk.
-   Neutral ink and graphite surfaces create a calm operational canvas. One restrained blue accent marks
-   identity, active navigation, focus, and the CEO command
-   surface. Brand is iris (hue ~275), deliberately apart from the info blue (250) so identity never reads as status. It never carries status: success / warning / info / destructive stay semantic and are always
-   paired with a label. Surfaces step by lightness only: background < surface (inline panels) < card/popover. */
+/* Acthelm Desk, Untitled UI / Vercel / Linear visual language (founder 2026-11-09): monochrome, no brand hue.
+   A neutral gray scale (Untitled gray-25…950) carries the whole UI. The primary action is ink: near-black fill with white
+   text in light mode, white fill with near-black text in dark mode. The active nav item is a subtle neutral background
+   with foreground text; focus is a neutral ring (gray-400 at 50%). Semantic colours (success / warning / error / info)
+   appear only as a small dot + text status, always with a label, never as decoration or a coloured block.
+   Surfaces: page (gray-25) < card (white), 1px gray-200 borders, 12px radius on cards and panels, 8px on controls,
+   shadow-xs at most. Contrast (WCAG AA, 14px text): every text token is >= 4.5:1 on its page and card surface. */
 :root {
-    --background: oklch(0.985 0.0021 272);
-    --foreground: oklch(0.205 0.0084 272);
-    --surface: oklch(0.963 0.0035 272);
-    --subtle: oklch(0.94 0.0049 272);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.205 0.0084 272);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.205 0.0084 272);
-    --primary: oklch(0.225 0.0084 272);
-    --primary-foreground: oklch(0.985 0.0014 272);
-    --secondary: oklch(0.958 0.0042 272);
-    --secondary-foreground: oklch(0.225 0.0084 272);
-    --muted: oklch(0.954 0.0042 272);
-    --muted-foreground: oklch(0.45 0.0098 272);
-    --accent: oklch(0.95 0.0056 272);
-    --accent-foreground: oklch(0.225 0.0084 272);
-    --destructive: oklch(0.53 0.21 27);
-    --border: oklch(0.905 0.0056 272);
-    --input: oklch(0.875 0.0070 272);
-    --ring: oklch(0.5 0.22 277 / 50%);
-    --brand: oklch(0.5 0.22 277);
-    --brand-foreground: oklch(0.985 0.005 275);
-    --chart-1: oklch(0.62 0.14 155);
-    --chart-2: oklch(0.74 0.14 75);
-    --chart-3: oklch(0.6 0.19 27);
-    --chart-4: oklch(0.58 0.15 250);
-    --chart-5: oklch(0.6 0.14 300);
-    --success: oklch(0.54 0.13 155);
-    --warning: oklch(0.52 0.12 60);
-    --info: oklch(0.54 0.15 250);
-    --radius: 0.5rem;
+    --background: #FCFCFD;          /* gray-25 */
+    --foreground: #101828;          /* gray-900 */
+    --surface: #F9FAFB;             /* gray-50: inline panels, table header */
+    --subtle: #F2F4F7;              /* gray-100 */
+    --card: #FFFFFF;
+    --card-foreground: #101828;
+    --popover: #FFFFFF;
+    --popover-foreground: #101828;
+    --primary: #101828;             /* gray-900: the primary action */
+    --primary-hover: #344054;       /* gray-700 */
+    --primary-foreground: #FFFFFF;
+    --secondary: #F9FAFB;
+    --secondary-foreground: #344054;  /* gray-700 */
+    --muted: #F2F4F7;               /* gray-100 */
+    --muted-foreground: #667085;    /* gray-500: meta, 4.8:1 on white */
+    --accent: #F9FAFB;
+    --accent-foreground: #182230;
+    --destructive: #D92D20;         /* error-600 */
+    --border: #EAECF0;              /* gray-200 */
+    --input: #D0D5DD;               /* gray-300 */
+    --ring: rgb(152 162 179 / 50%); /* gray-400 at 50% */
+    --brand: #101828;               /* no hue: "brand" stays a token name only, ink */
+    --brand-foreground: #FFFFFF;
+    --chart-1: #17B26A;
+    --chart-2: #F79009;
+    --chart-3: #F04438;
+    --chart-4: #2E90FA;
+    --chart-5: #98A2B3;
+    --success: #067647;             /* success-700 */
+    --warning: #B54708;             /* warning-700 */
+    --info: #175CD3;                /* blue-700 */
+    --radius: 0.5rem;               /* 8px: controls */
     /* One radius for every bordered surface (panel, card, empty state); controls use --radius (8px). */
     --radius-panel: 12px;
     /* Spacing rhythm: Tailwind's 4px scale. Page gutter 16px on phones, 24/32px above; 24px between page blocks. */
-    --float: 0 1px 2px oklch(0.2 0.0070 272 / 5%), 0 12px 28px -8px oklch(0.2 0.0070 272 / 12%);
-    --panel-shadow: 0 1px 2px oklch(0.2 0.0070 272 / 4%);
-    --sidebar: oklch(0.973 0.0028 272);
-    --sidebar-foreground: oklch(0.205 0.0084 272);
-    --sidebar-primary: oklch(0.225 0.0084 272);
-    --sidebar-primary-foreground: oklch(0.985 0.0014 272);
-    --sidebar-accent: oklch(0.94 0.0056 272);
-    --sidebar-accent-foreground: oklch(0.205 0.0084 272);
-    --sidebar-border: oklch(0.91 0.0056 272);
-    --sidebar-ring: oklch(0.55 0.16 275 / 55%);
+    --float: 0 12px 16px -4px rgb(16 24 40 / 8%), 0 4px 6px -2px rgb(16 24 40 / 3%);   /* shadow-lg: overlays only */
+    --panel-shadow: 0 1px 2px rgb(16 24 40 / 5%);                                        /* shadow-xs */
+    --sidebar: #FFFFFF;
+    --sidebar-foreground: #344054;
+    --sidebar-primary: #101828;
+    --sidebar-primary-foreground: #FFFFFF;
+    --sidebar-accent: #F2F4F7;
+    --sidebar-accent-foreground: #182230;
+    --sidebar-border: #EAECF0;
+    --sidebar-ring: rgb(152 162 179 / 50%);
 }
 
 .dark {
-    --background: oklch(0.145 0.0084 272);
-    --foreground: oklch(0.948 0.0042 272);
-    --surface: oklch(0.195 0.0091 272);
-    --subtle: oklch(0.225 0.0098 272);
-    --card: oklch(0.205 0.0091 272);
-    --card-foreground: oklch(0.955 0.0042 272);
-    --popover: oklch(0.2 0.0098 272);
-    --popover-foreground: oklch(0.955 0.0042 272);
-    --primary: oklch(0.94 0.0042 272);
-    --primary-foreground: oklch(0.18 0.0098 272);
-    --secondary: oklch(0.225 0.0098 272);
-    --secondary-foreground: oklch(0.955 0.0042 272);
-    --muted: oklch(0.222 0.0098 272);
-    --muted-foreground: oklch(0.69 0.0084 272);
-    --accent: oklch(0.232 0.0098 272);
-    --accent-foreground: oklch(0.955 0.0042 272);
-    --destructive: oklch(0.69 0.18 24);
-    --border: oklch(1 0 0 / 7.5%);
-    --input: oklch(1 0 0 / 12%);
-    --ring: oklch(0.72 0.13 278 / 60%);
-    --brand: oklch(0.74 0.13 278);
-    --brand-foreground: oklch(0.17 0.03 278);
-    --chart-1: oklch(0.7 0.14 155);
-    --chart-2: oklch(0.79 0.13 75);
-    --chart-3: oklch(0.68 0.18 25);
-    --chart-4: oklch(0.69 0.14 250);
-    --chart-5: oklch(0.7 0.13 300);
-    --success: oklch(0.74 0.14 155);
-    --warning: oklch(0.8 0.13 75);
-    --info: oklch(0.73 0.13 250);
-    --float: 0 1px 2px oklch(0 0 0 / 32%), 0 16px 36px -10px oklch(0 0 0 / 48%);
+    --background: #0C111D;          /* gray-950 */
+    --foreground: #F5F5F6;
+    --surface: #111622;
+    --subtle: #1F242F;
+    --card: #161B26;                /* gray-900 (dark) */
+    --card-foreground: #F5F5F6;
+    --popover: #161B26;
+    --popover-foreground: #F5F5F6;
+    --primary: #F5F5F6;
+    --primary-hover: #CECFD2;
+    --primary-foreground: #0C111D;
+    --secondary: #1F242F;
+    --secondary-foreground: #CECFD2;
+    --muted: #1F242F;
+    --muted-foreground: #94969C;    /* 5.7:1 on card, 6.4:1 on page */
+    --accent: #1F242F;
+    --accent-foreground: #F5F5F6;
+    --destructive: #F97066;
+    --border: rgb(255 255 255 / 8%);
+    --input: rgb(255 255 255 / 14%);
+    --ring: rgb(152 162 179 / 50%);
+    --brand: #F5F5F6;
+    --brand-foreground: #0C111D;
+    --chart-1: #47CD89;
+    --chart-2: #FDB022;
+    --chart-3: #F97066;
+    --chart-4: #53B1FD;
+    --chart-5: #85888E;
+    --success: #47CD89;
+    --warning: #FDB022;
+    --info: #53B1FD;
+    --float: 0 12px 16px -4px rgb(0 0 0 / 40%), 0 4px 6px -2px rgb(0 0 0 / 24%);
     --panel-shadow: 0 0 0 0 transparent;
-    --sidebar: oklch(0.147 0.0084 272);
-    --sidebar-foreground: oklch(0.948 0.0042 272);
-    --sidebar-primary: oklch(0.94 0.0042 272);
-    --sidebar-primary-foreground: oklch(0.18 0.0098 272);
-    --sidebar-accent: oklch(0.2 0.0098 272);
-    --sidebar-accent-foreground: oklch(0.955 0.0042 272);
-    --sidebar-border: oklch(1 0 0 / 6%);
-    --sidebar-ring: oklch(0.72 0.13 278 / 60%);
+    --sidebar: #0C111D;
+    --sidebar-foreground: #CECFD2;
+    --sidebar-primary: #F5F5F6;
+    --sidebar-primary-foreground: #0C111D;
+    --sidebar-accent: #1F242F;
+    --sidebar-accent-foreground: #F5F5F6;
+    --sidebar-border: #1F242F;
+    --sidebar-ring: rgb(152 162 179 / 50%);
 }
 
 @layer base {
@@ -166,7 +172,7 @@
   body {
     @apply bg-background text-foreground;
     font-size: 14px;
-    line-height: 1.5;
+    line-height: 20px;
     font-feature-settings: "cv11", "ss03";
   }
   button:not(:disabled), [role="button"]:not(:disabled) {
@@ -174,9 +180,9 @@
   }
   /* Operational numbers line up; identifiers stay mono, prose never is. */
   .num { font-variant-numeric: tabular-nums; }
-  ::selection { background: color-mix(in oklch, var(--brand) 28%, transparent); }
+  ::selection { background: color-mix(in oklch, var(--foreground) 16%, transparent); }
   :focus-visible { outline-color: var(--ring); }
-  h1, h2, h3 { text-wrap: balance; letter-spacing: -0.025em; }
+  h1, h2, h3 { text-wrap: balance; letter-spacing: -0.02em; }
   p { text-wrap: pretty; }
   /* Quiet scrollbars: present when needed, never a grey slab. */
   * { scrollbar-width: thin; scrollbar-color: color-mix(in oklch, var(--foreground) 16%, transparent) transparent; }
@@ -184,23 +190,25 @@
 
 @layer components {
   /* Small caps-style label above a group: the only uppercase text in the Desk. */
-  .eyebrow { font-size: 11px; line-height: 16px; font-weight: 550; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted-foreground); }
+  .eyebrow { font-size: 11px; line-height: 16px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-foreground); }
   .desk-main { max-width: 1480px; }
-  /* Type roles (desk.tsx header): use these instead of ad-hoc sizes in new code. */
-  .t-page { font-size: 1.375rem; line-height: 1.2; font-weight: 600; letter-spacing: -0.03em; }
-  .t-section { font-size: 13px; line-height: 1.5rem; font-weight: 600; letter-spacing: -0.005em; }
-  .t-body { font-size: 14px; line-height: 1.5; }
-  .t-secondary { font-size: 13px; line-height: 1.25rem; color: var(--muted-foreground); }
-  .t-meta { font-size: 12px; line-height: 1rem; color: var(--muted-foreground); }
+  /* Type roles (desk.tsx header), Geist: page 24/32 600 · section 16/24 600 · body 14/20 · secondary 13/20 · meta 12/18
+     · metric 30/38 600 tabular (24/32 on phones). Use these instead of ad-hoc sizes in new code. */
+  .t-page { font-size: 1.5rem; line-height: 2rem; font-weight: 600; letter-spacing: -0.02em; }
+  .t-section { font-size: 1rem; line-height: 1.5rem; font-weight: 600; letter-spacing: -0.01em; }
+  .t-body { font-size: 14px; line-height: 20px; }
+  .t-secondary { font-size: 13px; line-height: 20px; color: var(--muted-foreground); }
+  .t-meta { font-size: 12px; line-height: 18px; color: var(--muted-foreground); }
   /* The one bordered surface for lists and acted-on objects (Panel, approval, incident); nested surfaces are never boxed again. */
   .panel { border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--card); box-shadow: var(--panel-shadow); }
   .surface-panel { border: 1px solid var(--border); border-radius: var(--radius-panel); background: var(--card); box-shadow: var(--panel-shadow); }
-  .page-heading h1 { font-size: clamp(1.75rem, 2.4vw, 2rem); line-height: 1.1; font-weight: 650; letter-spacing: -.045em; }
+  .page-heading h1 { font-size: 1.5rem; line-height: 2rem; font-weight: 600; letter-spacing: -.02em; }
   /* Headline figures: large, tabular, never decorative. */
-  .metric { font-size: 1.75rem; line-height: 2rem; font-weight: 600; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
-  .page-heading p { max-width: 46rem; font-size: .875rem; line-height: 1.55; }
-  [data-slot="table-head"] { height: 40px; font-size: 11px; font-weight: 600; letter-spacing: 0.035em; text-transform: uppercase; }
-  [data-slot="table-cell"] { padding-block: 13px; }
+  .metric { font-size: 1.5rem; line-height: 2rem; font-weight: 600; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .page-heading p { max-width: 46rem; font-size: .875rem; line-height: 1.25rem; }
+  /* Tables: meta-gray header on gray-50, row dividers only, 56px rows on desktop. */
+  [data-slot="table-head"] { height: 44px; font-size: 12px; line-height: 18px; font-weight: 500; color: var(--muted-foreground); background: var(--surface); }
+  [data-slot="table-cell"] { padding-block: 18px; }
   [data-slot="table-row"]:last-child { border-bottom: 0; }
 }
 
@@ -215,7 +223,7 @@
 @keyframes desk-flash { from { background-color: color-mix(in oklab, var(--info) 14%, transparent); } to { background-color: transparent; } }
 .desk-flash { animation: desk-flash 3s ease-out; }
 
-@media (min-width: 640px) { .metric { font-size: 2rem; line-height: 2.25rem; } }
+@media (min-width: 640px) { .metric { font-size: 1.875rem; line-height: 2.375rem; } }
 
 /* Filter chips scroll sideways at every width; only the fade hint is phone-specific. */
 .task-filters-scroll { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }

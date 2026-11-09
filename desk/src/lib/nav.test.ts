@@ -1,10 +1,10 @@
-// The founder's IA (2026-11-09): seven places; no destination is lost and old links still resolve. `npm test`.
+// The founder's IA (2026-11-09): eight places (Releases added 2026-11-09); no destination is lost and old links still resolve. `npm test`.
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { ALIASES, PAGES, SECTIONS, pageTitle, reachable, resolvePage, sectionOf, visibleTabs } from "./nav.ts"
 
 test("the IA places in the founder's order, each page reachable from exactly one", () => {
-  assert.deepEqual(SECTIONS.map(s => s.label), ["Dashboard", "Goals", "Tasks", "Agents", "Approvals", "Metrics", "System"])
+  assert.deepEqual(SECTIONS.map(s => s.label), ["Dashboard", "Goals", "Tasks", "Agents", "Approvals", "Releases", "Metrics", "System"])
   for (const s of SECTIONS) assert.equal(s.tabs[0], s.home, s.key)
   for (const p of PAGES.filter(p => p !== "project"))
     assert.equal(SECTIONS.filter(s => s.home === p || s.tabs.includes(p)).length, 1, p)
@@ -22,7 +22,8 @@ test("retired routes resolve to their new home; unknown routes do not", () => {
   assert.equal(resolvePage("dashboard"), "overview")
   assert.equal(resolvePage("goals"), "projects")
   assert.equal(resolvePage("metrics"), "growth")
-  assert.equal(resolvePage("releases"), "health")   // running version + release gateway live on System status
+  assert.equal(resolvePage("releases"), "releases")   // a page of its own since 2026-11-09, no longer an alias to System status
+  assert.ok(!("releases" in ALIASES))
   for (const target of Object.values(ALIASES)) assert.ok(PAGES.includes(target))
 })
 
@@ -33,7 +34,7 @@ test("go-to shortcuts are unique letters and titles stand alone", () => {
 })
 
 test("every page that used to be a sidebar link is still a tab of exactly one place", () => {
-  for (const p of ["overview", "approvals", "tasks", "agents", "automation", "activity", "projects", "finance", "growth", "health", "incidents", "memory"] as const)
+  for (const p of ["overview", "approvals", "tasks", "agents", "automation", "activity", "projects", "finance", "growth", "health", "incidents", "memory", "releases"] as const)
     assert.equal(SECTIONS.filter(s => s.tabs.includes(p)).length, 1, p)
   assert.equal(sectionOf("project").key, "goals")     // a unit's page lives beside Portfolio
   assert.equal(sectionOf("approvals").key, "approvals")
