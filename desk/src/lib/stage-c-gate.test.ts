@@ -3,6 +3,9 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { DeskState } from "./api.ts"
 import { stageCPresent } from "./stage-c-gate.ts"
+import { stageCOnHost as homeStageC } from "./dashboard.ts"
+import { stageCOnHost as pageStageC } from "./qa-status.ts"
+import { parseStageC } from "./stage-c.ts"
 
 const SHA = "a".repeat(40)
 // What production answers: the watchdog's failing preflight (recorded on every host), no acceptance, no tasks, no grants.
@@ -39,4 +42,15 @@ test("error or junk: hidden, never a crash", () => {
   for (const junk of ["<html>", 42, [], true]) assert.equal(stageCPresent(junk), false)
   const hostile = new Proxy({}, { get() { throw new Error("boom") } })
   assert.equal(stageCPresent(hostile), false)
+})
+
+test("write flag alone agrees in nav, Home and Stage C despite failed preflight", () => {
+  for (const flag of [true, false, null, undefined, "true"]) {
+    const raw = withRt({ write_enabled: flag })
+    const parsed = parseStageC(raw)
+    const expected = flag === true
+    assert.equal(stageCPresent(raw), expected)
+    assert.equal(homeStageC(parsed), expected ? parsed : null)
+    assert.equal(pageStageC(parsed), expected)
+  }
 })

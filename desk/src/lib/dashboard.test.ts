@@ -2,7 +2,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { DeskState, Need } from "./api.ts"
-import { agentRows, autonomy, costs, doingNow, mergedVerified, needsYou, recentlyFinished, runningVersion, stageCOnHost, upNext } from "./dashboard.ts"
+import { agentRows, autonomy, costs, doingNow, mergedVerified, needsYou, recentlyFinished, runCount, runningVersion, stageCOnHost, upNext } from "./dashboard.ts"
 import { parseStageC } from "./stage-c.ts"
 
 const NOW = Date.parse("2026-11-09T12:00:00Z")
@@ -16,6 +16,13 @@ const state = (over: Partial<DeskState> = {}) => ({
   control: { agents_paused: false }, worker: { status: "HEALTHY", heartbeat_at: "2026-11-09T11:59:00Z" }, needs_you: [],
   tasks: [], agents: [], ...over,
 }) as unknown as DeskState
+
+test("run count: missing history is unknown, reported empty history is zero", () => {
+  assert.equal(runCount(undefined), null)
+  assert.equal(runCount([]), 0)
+  assert.equal(runCount([{ day: "2026-11-09", STARTED: 1, SUCCEEDED: 2, FAILED: 3, ESCALATED: 4 },
+    { day: "2026-11-08", STARTED: 0, SUCCEEDED: 1, FAILED: 0, ESCALATED: 0 }]), 11)
+})
 
 test("needs you: critical first, then the API rank, Desk items placed among them, oldest first", () => {
   const d = state({

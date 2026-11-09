@@ -187,6 +187,10 @@ export const doingNow = (tasks: TaskRow[]) => tasks.filter(t => t.status === "IN
  *  is the latest few, never a total. */
 export const recentlyFinished = (tasks: TaskRow[], n = 5) => tasks.filter(t => t.status === "DONE").sort(newest).slice(0, n)
 
+/** Missing run history is unknown; only a reported series can prove zero runs. */
+export const runCount = (series: DeskState["run_series"]): number | null =>
+  series?.reduce((t, x) => t + x.SUCCEEDED + x.FAILED + x.ESCALATED + x.STARTED, 0) ?? null
+
 /** Up next: queued work by priority (P0 first), then the oldest waiting longest. */
 export const upNext = (tasks: TaskRow[], n = 5) => tasks.filter(t => t.status === "READY" || t.status === "QUEUED")
   .sort((a, b) => PRIORITY(a.priority) - PRIORITY(b.priority) || a.updated_at.localeCompare(b.updated_at)).slice(0, n)

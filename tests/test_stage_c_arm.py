@@ -97,16 +97,19 @@ FAKE_DOCKER = """#!/bin/sh
 echo "docker $*" >> "$FAKE_LOG"
 case "$*" in
   "exec -i -e PGOPTIONS"*) cat > "$FAKE_SNIPPET"; echo "$FAKE_DECISION" ;;
-  "exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE") cat "$FAKE_STATE" ;;
+  "exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE")
+    [ "$FAKE_ERROR" != flag ] && [ "$FAKE_ERROR" != stopped ] || exit 1
+    cat "$FAKE_STATE" ;;
   "exec company-api printenv CODER_PAUSE_FENCE_ENABLED") echo true ;;
-  inspect*) echo true ;;
-  compose*) env | grep '^COMPANY_OS_' | sort >> "$FAKE_LOG"
+  inspect*) [ "$FAKE_ERROR" != inspect ] || exit 1; [ "$FAKE_ERROR" = stopped ] && echo false || echo true ;;
+  compose*) [ "$FAKE_COMPOSE_FAIL" != 1 ] || exit 1
+    env | grep '^COMPANY_OS_' | sort >> "$FAKE_LOG"
     case "$*" in *stage-c-pilot*) echo true > "$FAKE_STATE" ;; *) echo false > "$FAKE_STATE" ;; esac ;;
 esac
 """
 
 
-def _run(tmp_path, decision, armed, *args):
+def _run(tmp_path, decision, armed, *args, error="", compose_fail=False):
     bin_, host, root = tmp_path / "bin", tmp_path / "opt", tmp_path / "root"
     for d in (bin_, host, root):
         d.mkdir(exist_ok=True)
@@ -120,6 +123,7 @@ def _run(tmp_path, decision, armed, *args):
     env = {"PATH": f"{bin_}:/usr/bin:/bin", "STAGE_C_ARM_DIR": str(host),
            "STAGE_C_ARM_OVERRIDE": str(root / "stage-c-pilot.compose.yml"), "FAKE_LOG": str(tmp_path / "log"),
            "FAKE_STATE": str(tmp_path / "state"), "FAKE_DECISION": decision,
+           "FAKE_ERROR": error, "FAKE_COMPOSE_FAIL": str(int(compose_fail)),
            "FAKE_SNIPPET": str(tmp_path / "snippet.py")}
     out = subprocess.run(["bash", str(ROOT / "scripts/stage-c-arm"), *args], env=env, capture_output=True,
                          text=True, timeout=30)
@@ -147,6 +151,23 @@ def test_sh_arm(tmp_path):
     assert log2.count("compose") == log.count("compose")
 
 
+@pytest.mark.parametrize("error", ["inspect", "flag"], ids=["i", "f"])
+@pytest.mark.parametrize("arm", [False, True], ids=["d", "a"])
+@pytest.mark.parametrize("fail", [False, True], ids=["ok", "stop"])
+@pytest.mark.parametrize("armed", ["true", "false"], ids=["on", "off"])
+def test_sh_unknown(tmp_path, error, arm, fail, armed):
+    (tmp_path / "root").mkdir()
+    (tmp_path / "root/stage-c-pilot.compose.yml").write_text(OVERRIDE_JSON)
+    decision = "ARM TASK-0100" if arm else "DISARM stage_c_authorization_missing"
+    out, log, ovr = _run(tmp_path, decision, armed, error=error, compose_fail=fail)
+    assert out.returncode == (1 if arm else 0), out.stderr
+    assert not ovr.exists()
+    assert ("docker compose -p company-os --env-file .env -f docker-compose.yml "
+            "up -d --no-deps --no-build --pull never company-worker") in log
+    assert ("docker stop company-worker" in log) == fail
+    assert f"action={'DISARM_STOP' if fail else 'DISARM'} " in log
+
+
 @pytest.mark.parametrize("decision", ["DISARM stage_c_authorization_missing", "junk"], ids=["auth", "junk"])
 def test_sh_disarm(tmp_path, decision):
     (tmp_path / "root").mkdir()
@@ -160,3 +181,12 @@ def test_sh_disarm(tmp_path, decision):
     assert f"action=DISARM reason={reason} task=-" in log
     out, log2, _ = _run(tmp_path, decision, "false")                        # already off: nothing more
     assert log2.count("compose") == log.count("compose")
+
+
+def test_sh_stopped(tmp_path):
+    """A verified-stopped worker is off (printenv fails on it): DISARM leaves it stopped, never restarts it."""
+    (tmp_path / "root").mkdir()
+    (tmp_path / "root/stage-c-pilot.compose.yml").write_text(OVERRIDE_JSON)
+    out, log, ovr = _run(tmp_path, "DISARM stage_c_authorization_missing", "true", error="stopped")
+    assert out.returncode == 0, out.stderr
+    assert not ovr.exists() and "compose" not in log and "docker stop" not in log

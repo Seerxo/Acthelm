@@ -16,7 +16,7 @@ import { Button } from "@/components/ui/button"
 import { AgentsSwitch } from "@/components/controls"
 import { CommandComposer } from "@/components/command-composer"
 import { AlertsCard, AutonomyCard, BudgetCard, FinishedCard, GoalsCard, NeedsCard, NextCard, NowCard } from "@/components/dashboard/home"
-import { agentRows, autonomy, costs, doingNow, needsYou, recentlyFinished, runningVersion, stageCOnHost, upNext } from "@/lib/dashboard"
+import { agentRows, autonomy, costs, doingNow, needsYou, recentlyFinished, runCount, runningVersion, stageCOnHost, upNext } from "@/lib/dashboard"
 import { nextAction } from "@/lib/stage-c"
 import { useStageC } from "@/components/dashboard/use-stage-c"
 
@@ -104,17 +104,17 @@ export function Overview() {
 
   // What has content is drawn; the rest is one quiet line.
   const pr = sc ? autonomy(d, sc).lastPr : null
-  const runs = (d.run_series ?? []).reduce((t, x) => t + x.SUCCEEDED + x.FAILED + x.ESCALATED + x.STARTED, 0)
-  const hasFinished = recentlyFinished(d.tasks).length > 0 || runs > 0 || !!pr
+  const runs = runCount(d.run_series)
+  const hasFinished = recentlyFinished(d.tasks).length > 0 || (runs !== null && runs > 0) || !!pr
   const version = runningVersion(d)
   const hasNext = upNext(d.tasks).length > 0 || !!d.current_priority || !!(sc && nextAction(sc))
   const r = d.revenue
   const hasGoals = (r != null && (r.mrr ?? r.month) != null) || (d.portfolio ?? []).some(u => u.metrics.length)
   const cost = costs(d, sc)
   const hasCost = cost.some(c => c.value !== null)
-  const calm = [!hasFinished && "Nothing finished recently, no agent runs in 14 days", !hasNext && "Nothing queued",
+  const calm = [!hasFinished && runs === 0 && "Nothing finished recently, no agent runs in 14 days", !hasNext && "Nothing queued",
     !hasGoals && r === null && "No verified revenue source"].filter(Boolean) as string[]
-  const missing = [...needs.unknown, r === undefined && "revenue", d.portfolio === undefined && "business metrics",
+  const missing = [...needs.unknown, runs === null && "agent run history", r === undefined && "revenue", d.portfolio === undefined && "business metrics",
     d.current_priority === undefined && "current priority", (!version || (!version.api && !version.worker)) && "running version",
     ...cost.filter(c => c.value === null).map(c => c.label.toLowerCase())].filter(Boolean) as string[]
 

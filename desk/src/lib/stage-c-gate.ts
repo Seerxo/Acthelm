@@ -16,14 +16,14 @@ export function stageCPresent(raw: unknown, desk?: Pick<DeskState, "runtime"> | 
 // Founder rule (2026-11-09): only the host's CURRENT capability counts, never history. Old rows (a past acceptance
 // for another commit, finished tasks, consumed/expired/revoked grants) stay in a database after Stage C is gone.
 export function stageCEvidence(s: {
-  runtime: { api_sha: string | null; acceptance: { source_sha: string | null }; preflight: { status: string } }
+  runtime: { api_sha: string | null; write_enabled: boolean | null; acceptance: { source_sha: string | null }; preflight: { status: string } }
   authorizations: { one_task?: { status: string } | null; standing?: { status: string } | null }
 }): boolean {
   const rt = s.runtime, a = s.authorizations
   // A live grant (or one that could not be read) keeps Revoke reachable; any settled grant is history.
   const live = (g: { status: string } | null | undefined) =>
     g === undefined || (g !== null && (g.status === "ACTIVE" || g.status === "UNKNOWN"))
-  return rt.preflight.status === "PASS"                                   // the watchdog's current check passes here
+  return rt.write_enabled === true || rt.preflight.status === "PASS"      // current flag or passing watchdog check
     || (!!rt.acceptance.source_sha && rt.acceptance.source_sha === rt.api_sha)   // accepted for the running code
     || live(a.one_task) || live(a.standing)
 }

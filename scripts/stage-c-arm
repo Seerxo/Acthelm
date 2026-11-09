@@ -60,8 +60,8 @@ TASK=-; REASON=$DETAIL
 if [ "$ACTION" = ARM ]; then TASK=$DETAIL; REASON=authorized; fi
 
 # ---------------------------------------------------------------- current worker state
-ARMED=$(docker exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE 2>/dev/null || echo unknown)
-RUNNING=$(docker inspect -f '{{.State.Running}}' company-worker 2>/dev/null || echo false)
+ARMED=$(docker exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE 2>/dev/null) || ARMED=UNKNOWN
+RUNNING=$(docker inspect -f '{{.State.Running}}' company-worker 2>/dev/null) || RUNNING=UNKNOWN
 
 if [ "$DRY" = 1 ]; then
   echo "decision: $DECISION"
@@ -88,11 +88,20 @@ disarm() {
   fi
 }
 
+# An unreadable flag or container inspection never proves the worker is safely off. A worker verified as not
+# running is off (printenv fails on a stopped container): leave it stopped, the founder may have stopped it.
+if [[ "$RUNNING" != false && ( "$ARMED" != true && "$ARMED" != false || "$RUNNING" != true ) ]]; then
+  if [ "$ACTION" = ARM ]; then REASON=worker_state_unknown; fi
+  disarm
+  if [ "$ACTION" = ARM ]; then exit 1; fi
+  exit 0
+fi
+
 if [ "$ACTION" = ARM ]; then
   [ "$ARMED" = true ] && exit 0
   if [ "$(docker exec company-api printenv CODER_PAUSE_FENCE_ENABLED 2>/dev/null || true)" != true ]; then
     REASON=pause_fence_off
-    if [ "$ARMED" != false ] && [ "$RUNNING" = true ]; then disarm; else log ARM_REFUSED "$REASON" "$TASK"; fi
+    disarm
     exit 1
   fi
   if [ -L "$OVERRIDE" ]; then log ARM_REFUSED override_symlink "$TASK"; exit 1; fi
@@ -111,7 +120,7 @@ if [ "$ACTION" = ARM ]; then
 fi
 
 # DISARM. Already off (or no running worker, which writes nothing): only make sure no override is left behind.
-if [ "$ARMED" = false ] || [ "$RUNNING" != true ]; then
+if [ "$ARMED" = false ] || [ "$RUNNING" = false ]; then
   rm -f -- "$OVERRIDE"
   exit 0
 fi

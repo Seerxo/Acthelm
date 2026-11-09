@@ -1,4 +1,4 @@
-// Releases: what runs in production and the delivery evidence behind it, from data the Desk already has (lib/releases.ts).
+// Releases: what runs on the current host and its delivery evidence, from data the Desk already has (lib/releases.ts).
 // The release gateway's ledger is root-only and not in this read model, so it reads "Not reported": a merged pull
 // request or a green CI is never shown as a deployment, and a PR number appears only for a verified publication.
 import { ago, when } from "@/lib/format"
@@ -16,9 +16,9 @@ export function ReleasesPage() {
   return <>
     <PageHeader title="Releases" meta={v ? <span className="num">Running <span className="font-mono text-foreground">{v.api}</span>{v.startedAt && ` · started ${ago(v.startedAt)} ago`}</span> : undefined} />
     <div className="grid min-w-0 grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
-      <section aria-label="Running in production" className="panel grid min-w-0 content-start gap-4 p-5">
+      <section aria-label="Current host" className="panel grid min-w-0 content-start gap-4 p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-[15px] font-semibold">Production</h2>
+          <h2 className="text-[15px] font-semibold">Current host</h2>
           {v ? <Status value={v.drift.length ? "DRIFT" : "RUNNING"} tone={v.tone} label={v.drift.length ? "Drift" : v.api === "unknown" ? "Version unknown" : "Running"} />
             : <Status value="UNKNOWN" tone="warning" label="Not reported" />}
         </div>
