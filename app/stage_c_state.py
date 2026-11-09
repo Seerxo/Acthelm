@@ -53,6 +53,7 @@ GRANT_STATUS = {None: "ACTIVE", "stage_c_authorization_consumed": "CONSUMED", "s
 _SHA = re.compile(r"[a-f0-9]{40}")
 _FP = re.compile(r"[a-f0-9]{64}")
 _TASK_KEY = re.compile(r"[A-Z]+-[0-9]{1,6}")
+_CHECK = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
 def _sha(v):
@@ -135,6 +136,7 @@ def _runtime(db, api_sha, now):
                 preflight = "STALE"  # too old, another SHA, or not written by the watchdog
         except Exception:
             preflight = "STALE"
+    failed = r_value.get("failed")
     return {
         "api_sha": api_sha, "worker_sha": worker_sha,
         # Agreement across all three processes cannot be proven without the reasoner's SHA.
@@ -144,7 +146,10 @@ def _runtime(db, api_sha, now):
         "acceptance": {"source_sha": _sha(acc_value.get("source_sha")), "accepted_at": _ts(acc_value.get("issued_at")),
                        "valid": control.acceptance_valid(db, api_sha or "") if acc is not None else None},
         "preflight": {"status": preflight, "checked_at": _ts(r_value.get("checked_at")),
-                      "source_sha": _sha(r_value.get("source_sha"))},
+                      "source_sha": _sha(r_value.get("source_sha")),
+                      # The watchdog's failing check names (watchdog.record_stage_c_readiness): fixed codes only.
+                      "failed": [f for f in failed[:10] if isinstance(f, str) and _CHECK.fullmatch(f)]
+                      if isinstance(failed, list) else None},
         # No process records the reasoner's deployed source in the database: never guessed.
         "reasoner_sha": None,
         "host_facts": {"host_checks": "NOT_VERIFIED", "reasoner_sha": "NOT_VERIFIED",
@@ -419,4 +424,6 @@ def build(db, now: datetime | None = None) -> dict:
     return {"version": VERSION, "generated_at": now.isoformat(), "state": state, "blockers": blockers,
             "next_action": _next_action(blockers), "last_ready_pr": _last_ready_pr(db), "runtime": runtime,
             "authorizations": {"one_task": one_task, "standing": standing},
-            "tasks": tasks, "metrics": _metrics(all_tasks, runs, truncated)}
+            "tasks": tasks, "metrics": _metrics(all_tasks, runs, truncated),
+            # What the Desk's code-task form may offer as write scope (POST /stage-c/tasks re-checks it).
+            "code_task_paths": stage_c_worker.task_paths()}

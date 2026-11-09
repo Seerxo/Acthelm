@@ -390,3 +390,12 @@ test("runtime reasoner SHA and last ready PR use the emitted contract, including
   assert.equal(lastReadyPr(parseStageC(raw({ last_ready_pr: { number: 61, stage: "UNTRUSTED" } }))), null)
   assert.equal(parseStageC(raw({ runtime: { reasoner_sha: "short" } })).runtime.reasoner_sha, null)
 })
+
+test("preflight failures and code task paths are codes and plain paths only", () => {
+  const s = parseStageC(raw({ code_task_paths: ["app/goals.py", "../etc", "https://x"],
+    runtime: { ...raw().runtime, preflight: { status: "FAIL", checked_at: NOW, source_sha: SHA, failed: ["launcher", "bad name", 3] } } }))
+  assert.deepEqual(s.runtime.preflight.failed, ["launcher"])
+  assert.deepEqual(s.code_task_paths, ["app/goals.py"])
+  assert.equal(parseStageC(raw()).runtime.preflight.failed, null)
+  assert.equal(parseStageC(raw()).code_task_paths, null)
+})

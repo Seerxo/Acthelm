@@ -21,3 +21,11 @@ export function readyNote(t: Pick<TaskDetail, "context"> & { retry_count?: numbe
 }
 
 export const isCodeWrite = (t: Pick<TaskDetail, "context">) => (t.context as { write?: unknown } | null)?.write === true
+
+/** Why Mark READY waits on a code task: Authorize Stage C comes first. `stage_c_authorization` is what the API's READY
+ *  check will say (null = an authorization covers it); absent on an older API, where the API's refusal still applies. */
+export function readyBlock(t: Pick<TaskDetail, "context" | "stage_c_authorization">): string | null {
+  const why = t.stage_c_authorization
+  return isCodeWrite(t) && typeof why === "string"
+    ? `Authorize Stage C first: no valid authorization covers this task yet (${why}).` : null
+}

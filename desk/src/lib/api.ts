@@ -150,6 +150,8 @@ export interface TaskDetail {
   approval_required: boolean; dependencies: { key: string; status: string }[]; runs: Run[]
   /** Attempts used and allowed (absent on older APIs). */
   retry_count?: number; max_attempts?: number
+  /** Code tasks only: null when a Stage C authorization covers it, else the API's fixed denial code. */
+  stage_c_authorization?: string | null
   artifacts: unknown; result: string | null; error: string | null
   supervisor: { verdict: string; notes: string | null } | null
   created_at: string; started_at: string | null; completed_at: string | null

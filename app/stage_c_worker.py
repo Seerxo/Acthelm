@@ -101,22 +101,33 @@ def admission(db, task):
         return "stage_c_repository_refused"
     if policy["branches"].get(repository) != profile["target_branch"]:
         return "stage_c_branch_refused"
-    scope = ctx.get("stage_c")
+    return "stage_c_scope_refused" if scope_refused(ctx.get("stage_c"), profile_paths) else None
+
+
+def scope_refused(scope, profile_paths) -> bool:
+    """A task's `context.stage_c` is refused: write paths outside the profile, or read-only context that is not."""
     paths = scope.get("paths") if isinstance(scope, dict) else None
     if (not isinstance(paths, list) or not 1 <= len(paths) <= 20
             or not all(isinstance(p, str) and coder_source._safe_path(p) and p in profile_paths
                        for p in paths) or len(set(paths)) != len(paths)
             or not {"paths"} <= set(scope) <= {"paths", "context"}):
-        return "stage_c_scope_refused"
+        return True
     # Read-only context: any safe repository file the coder may read; never write scope (run() refuses edits).
     context = scope.get("context", [])
-    if (not isinstance(context, list) or len(context) > stage_c_runner.MAX_CONTEXT_FILES
+    return (not isinstance(context, list) or len(context) > stage_c_runner.MAX_CONTEXT_FILES
             or len(paths) + len(context) > 20     # coder_source exports at most 20 files in all
             or not all(isinstance(p, str) and coder_source._safe_path(p) and p not in paths
                        and p.startswith(("app/", "tests/")) and p.endswith(".py") for p in context)
-            or len(set(context)) != len(context)):
-        return "stage_c_scope_refused"
-    return None
+            or len(set(context)) != len(context))
+
+
+def task_paths() -> list[str]:
+    """The files a founder may name as a new code task's write scope: the current executor profile ∩ SAFE_FILES."""
+    try:
+        executor = project_profiles.current_executor(project_profiles.load(), REPOSITORY, "sez-company")
+    except Exception:
+        return []
+    return sorted(set(executor["allowed_paths"]) & SAFE_FILES) if executor else []
 
 
 def publication_role() -> tuple[str, str]:

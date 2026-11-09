@@ -63,13 +63,15 @@ export interface StageCState {
     worker_heartbeat: (typeof HEARTBEAT)[number] | U; write_enabled: boolean | null; worker_ready: boolean | null
     agents_paused: boolean | null
     acceptance: { source_sha: string | null; accepted_at: string | null; valid: boolean | null }
-    preflight: { status: (typeof PREFLIGHT)[number] | U; checked_at: string | null; source_sha: string | null }
+    preflight: { status: (typeof PREFLIGHT)[number] | U; checked_at: string | null; source_sha: string | null; failed: string[] | null }
     host_facts: "NOT_VERIFIED"
   }
   /** null = explicitly absent; undefined = missing or malformed, existence unknown. */
   authorizations: { one_task: OneTask | null | undefined; standing: Standing | null | undefined }
   tasks: Task[] | null
   metrics: Metrics
+  /** The files a new code task may change (POST /stage-c/tasks re-checks); null = not reported. */
+  code_task_paths: string[] | null
 }
 
 // --------------------------------------------------------------------------- primitives
@@ -145,7 +147,8 @@ export function parseStageC(raw: unknown): StageCState {
       worker_heartbeat: oneOf(rt.worker_heartbeat, HEARTBEAT), write_enabled: bool(rt.write_enabled),
       worker_ready: bool(rt.worker_ready), agents_paused: bool(rt.agents_paused),
       acceptance: { source_sha: sha(acc.source_sha), accepted_at: ts(acc.accepted_at), valid: bool(acc.valid) },
-      preflight: { status: oneOf(pre.status, PREFLIGHT), checked_at: ts(pre.checked_at), source_sha: sha(pre.source_sha) },
+      preflight: { status: oneOf(pre.status, PREFLIGHT), checked_at: ts(pre.checked_at), source_sha: sha(pre.source_sha),
+        failed: Array.isArray(pre.failed) ? pre.failed.map(code).filter((c): c is string => c !== null) : null },
       host_facts: "NOT_VERIFIED",   // the API cannot see host facts; whatever it sends, the Desk does not claim them
     },
     authorizations: { one_task: one, standing },
@@ -157,6 +160,7 @@ export function parseStageC(raw: unknown): StageCState {
       model_calls: count(calls), minutes: num(m.minutes), tokens: count(m.tokens), usd_recorded: num(m.usd_recorded),
       quota_stops: count(m.quota_stops), truncated: bool(m.truncated),
     },
+    code_task_paths: Array.isArray(r.code_task_paths) ? r.code_task_paths.map(path).filter((p): p is string => p !== null) : null,
   }
 }
 

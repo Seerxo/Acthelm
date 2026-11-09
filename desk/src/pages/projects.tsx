@@ -12,7 +12,12 @@ import { EventList } from "@/pages/system"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { DataRows } from "@/components/data-rows"
 import { TrendGrid } from "@/components/trend"
-import { ChevronRight } from "lucide-react"
+import { ChevronRight, Plus } from "lucide-react"
+import { useState, type ComponentProps } from "react"
+import { goalBody } from "@/lib/founder-forms"
+import { Button } from "@/components/ui/button"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 
 function useUnitFacts() {
@@ -198,6 +203,50 @@ function UnitStats({ u }: { u: Unit }) {
   )
 }
 
+/** New goal (POST /goals, verified founder only): recorded PROPOSED for one of this unit's projects. */
+function NewGoal({ projects }: { projects: { key: string; name: string }[] }) {
+  const { act } = useDesk()
+  const blank = { title: "", metric: "", target: "", baseline: "", project: projects[0]?.key ?? "" }
+  const [f, setF] = useState(blank)
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const built = goalBody(f)
+  const field = (k: keyof typeof blank, label: string, props: ComponentProps<"input"> = {}) => (
+    <label className="grid gap-1.5 text-[13px] font-medium">{label}
+      <Input value={f[k]} onChange={e => setF(x => ({ ...x, [k]: e.target.value }))} className="font-normal" {...props} /></label>)
+  const submit: ComponentProps<"form">["onSubmit"] = async e => {
+    e.preventDefault()
+    if (!built.body || busy) return
+    setBusy(true)
+    const ok = await act("/goals", built.body, "Goal recorded as PROPOSED")
+    setBusy(false)
+    if (ok) { setF(blank); setOpen(false) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={o => { if (!busy) setOpen(o) }}>
+      <DialogTrigger asChild><Button size="sm" variant="outline" className="h-8"><Plus />New goal</Button></DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <form onSubmit={submit} className="grid gap-4">
+          <DialogHeader><DialogTitle>New goal</DialogTitle>
+            <DialogDescription>Recorded as PROPOSED; work is measured against it once it is active.</DialogDescription></DialogHeader>
+          <fieldset disabled={busy} className="grid min-w-0 gap-4">
+            {field("title", "Title", { required: true, minLength: 3, maxLength: 300, placeholder: "e.g. Reach 10k monthly views" })}
+            {field("metric", "Metric", { required: true, minLength: 2, maxLength: 200, placeholder: "What is measured" })}
+            <div className="grid gap-3 sm:grid-cols-2">
+              {field("baseline", "Baseline (optional)", { maxLength: 100 })}
+              {field("target", "Target", { required: true, maxLength: 100 })}
+            </div>
+            {projects.length > 1 && <label className="grid gap-1.5 text-[13px] font-medium">Project
+              <select value={f.project} onChange={e => setF(x => ({ ...x, project: e.target.value }))}
+                className="h-9 rounded-md border bg-transparent px-2 font-normal">{projects.map(p => <option key={p.key} value={p.key}>{p.name}</option>)}</select></label>}
+          </fieldset>
+          <DialogFooter><Button type="submit" disabled={busy || !built.body} className="h-10 px-4">{busy ? "Recording…" : "Record goal"}</Button></DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /** Goals this unit's projects serve, and the projects themselves (from the Desk catalog). */
 function UnitGoals({ u }: { u: Unit }) {
   const d = useData()
@@ -207,7 +256,7 @@ function UnitGoals({ u }: { u: Unit }) {
   const goals = d.catalog.goals.filter(g => g.project && keys.has(g.project))
   return (
     <div className="grid gap-10 lg:grid-cols-2">
-      <Section title="Goals" action={<span className="num">{goals.length}</span>}>
+      <Section title="Goals" action={<span className="flex items-center gap-2"><span className="num">{goals.length}</span>{projects.length > 0 && <NewGoal projects={projects} />}</span>}>
         {goals.length ? <ul className="grid grid-cols-1 divide-y divide-border/70" aria-label="Goals">{goals.map(g => (
           <li key={g.id} className="flex items-start justify-between gap-3 py-2 text-sm first:pt-0">
             <span className="min-w-0 break-words">{g.title}</span><Status value={g.status} />

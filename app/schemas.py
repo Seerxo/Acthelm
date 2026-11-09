@@ -314,5 +314,14 @@ class StageCStanding(BaseModel):
     max_per_day: int = Field(default=1, ge=1, le=3)
 
 
+class StageCTask(BaseModel):
+    """A founder's code task from the Desk. Write paths are re-checked against the allowed Stage C files."""
+    title: str = Field(min_length=3, max_length=200)
+    objective: str = Field(min_length=3, max_length=2000)
+    success_criteria: str = Field(min_length=3, max_length=2000)
+    paths: list[str] = Field(min_length=1, max_length=20)
+    context: list[str] = Field(default_factory=list, max_length=10)
+
+
 class StageCRevoke(BaseModel):
     reason: str = Field(default="revoked", max_length=300)

@@ -204,7 +204,7 @@ export function RevokeStanding({ onDone }: { onDone: () => void }) {
 /** "Mark READY": hand a stopped or not-yet-released task to the worker (POST /tasks/{key}/status, verified founder
  *  only; lib/ready.ts decides when it is offered). The dialog names the task, its current status and what READY does;
  *  the API's refusal (an open run, or for code writes a missing Stage C condition) is shown as returned, never as done. */
-export function MarkReady({ taskKey, status, codeWrite, note }: { taskKey: string; status: string; codeWrite: boolean; note?: string | null }) {
+export function MarkReady({ taskKey, status, codeWrite, note, blocked }: { taskKey: string; status: string; codeWrite: boolean; note?: string | null; blocked?: boolean }) {
   const { act } = useDesk()
   const [busy, setBusy] = useState(false)
   return (
@@ -215,7 +215,7 @@ export function MarkReady({ taskKey, status, codeWrite, note }: { taskKey: strin
         {codeWrite && <p>This task writes code. The API makes it READY only if agents are running, autonomous code writing is on, the host acceptance and preflight are current for the deployed commit, an unexpired Stage C authorization covers it, and no published pull request owns it. Otherwise it refuses and says why.</p>}
       </>}
       onConfirm={() => { setBusy(true); void act(`/tasks/${encodeURIComponent(taskKey)}/status`, { status: "READY", actor: "founder", reason: "Marked READY from Founder Desk" }, `${taskKey} is READY`).finally(() => setBusy(false)) }}>
-      <Button size="sm" className="h-9" disabled={busy}>{busy ? <Loader2 className="animate-spin" /> : <Play />}Mark READY</Button>
+      <Button size="sm" className="h-9" disabled={busy || blocked}>{busy ? <Loader2 className="animate-spin" /> : <Play />}Mark READY</Button>
     </Confirm>
   )
 }

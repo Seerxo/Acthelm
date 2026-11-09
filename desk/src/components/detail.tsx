@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { ErrorBoundary } from "@/components/error-boundary"
 import { checkAgentDetail, checkTaskDetail } from "@/lib/validate"
-import { canOfferReady, isCodeWrite, readyNote } from "@/lib/ready"
+import { canOfferReady, isCodeWrite, readyBlock, readyNote } from "@/lib/ready"
 import { AuthorizeStageC, MarkReady } from "@/components/controls"
 import { taskPipeline, type StepState } from "@/lib/pipeline"
 import { deliverableItems } from "@/lib/deliverable"
@@ -156,10 +156,12 @@ function StandsNow({ t }: { t: TaskDetail }) {
                 {t.assigned_agent ? "Reassign" : "Assign"}
               </Button>
             </>}
-            {canOfferReady(t) && <MarkReady taskKey={t.key} status={t.status} codeWrite={isCodeWrite(t)} note={readyNote(t)} />}
+            {/* A code task's order is explicit: Authorize Stage C, then Mark READY (the API refuses READY without it). */}
+            {isCodeWrite(t) && !["DONE", "CANCELLED"].includes(t.status) && <AuthorizeStageC taskKey={t.key} />}
+            {canOfferReady(t) && <MarkReady taskKey={t.key} status={t.status} codeWrite={isCodeWrite(t)} note={readyNote(t)} blocked={!!readyBlock(t)} />}
             {s.founder.includes("follow-up") && <Button size="sm" variant="outline" className="h-9" onClick={() => { open(null); compose(true) }}>New follow-up task</Button>}
-            {(t.context as { write?: unknown } | null)?.write === true && !["DONE", "CANCELLED"].includes(t.status) && <AuthorizeStageC taskKey={t.key} />}
           </div>
+          {canOfferReady(t) && readyBlock(t) && <p className="text-xs text-warning">{readyBlock(t)}</p>}
           <p className="text-[11px] text-muted-foreground">Closing or cancelling a task is not available in the Desk yet.</p>
         </div>
       )}

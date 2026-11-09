@@ -141,6 +141,9 @@ function Overview({ s }: { s: StageCState }) {
           ["Host acceptance", <span key="ac" className="flex flex-wrap items-center gap-2"><Badge v={acceptanceView(rt.acceptance.valid)} /><Sha s={rt.acceptance.source_sha} /></span>],
           ["Preflight", <span key="p" className="flex flex-wrap items-center gap-2"><Badge v={preflightView(rt.preflight)} />
             {rt.preflight.checked_at && <Muted>checked {ago(rt.preflight.checked_at)} ago</Muted>}<Sha s={rt.preflight.source_sha} /></span>],
+          // Why the worker is not ready: the watchdog's failing checks, as recorded (fixed check names only).
+          ...(rt.preflight.failed?.length ? [["Failing checks", <span key="f" className="flex flex-wrap gap-1.5">
+            {rt.preflight.failed.map(c => <code key={c} className="rounded bg-muted px-1.5 font-mono text-xs">{c}</code>)}</span>] as [string, ReactNode]] : []),
           ["Host facts", <Badge key="hf" v={{ badge: "NOT_VERIFIED", label: "Not verified by the API" }} />],
         ]} />
       </div>

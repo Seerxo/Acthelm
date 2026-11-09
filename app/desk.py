@@ -13,7 +13,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from pathlib import Path
 
-from app import business_reconciler, enums, goals, metrics_store, models, reconciler_heartbeat, watchdog, worker
+from app import business_reconciler, control, enums, goals, metrics_store, models, reconciler_heartbeat, watchdog, worker
 from app.notify import NotificationService
 from app.redact import MAX_SCAN_CHARS, redact
 
@@ -821,6 +821,9 @@ def task_detail(db: Session, task: models.Task) -> dict:
         "approval_required": task.approval_required,
         # Attempts used and allowed: the worker stops retrying at the limit (the Desk says so before Mark READY).
         "retry_count": task.retry_count, "max_attempts": task.max_attempts,
+        # A code task's Stage C authorization as Mark READY will check it: null when one covers it, else a fixed code.
+        "stage_c_authorization": control.write_authorization_denial(db, task, os.environ.get("COMPANY_OS_GIT_SHA", ""))
+        if isinstance(task.context, dict) and task.context.get("write") is True else None,
         "dependencies": [{"key": d.key, "status": d.status.value} for d in dependencies],
         "runs": [_run(r, task.key) for r in run_rows],
         "artifacts": _artifacts_view(task.artifacts), "result": _clean(task.result), "error": _clean(task.error),
