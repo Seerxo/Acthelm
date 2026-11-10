@@ -124,7 +124,7 @@ test("primary navigation targets are at least 44 px tall on touch screens and th
   const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8")
   const app = read("../App.tsx"), css = read("../index.css")
   assert.match(app, /relative flex h-11 items-center gap-1\.5 text-\[13px\]/)          // section tabs: 44 px
-  assert.match(app, /<a href=\{`#\/\$\{sec\.home\}`\} onClick=\{\(\) => setOpenMobile\(false\)\}/)    // sidebar places are real links
+  assert.match(app, /<a href=\{`#\/\$\{sec\.home\}`\} onClick=\{close\}/)    // sidebar places are real links that close the phone sheet
   assert.match(app, /relative flex h-\[58px\] w-full flex-col/)                         // bottom nav targets
   assert.match(app, /fixed inset-x-0 bottom-0 z-30[^"]*lg:hidden/)                        // bottom nav remains through tablet
   // Dense desktop rows (40 px) grow to 44 px wherever the pointer is coarse, including the sidebar's sub-page links.
@@ -176,14 +176,18 @@ test("a long current task wraps in full on agent cards; it is never truncated", 
 test("the Overview headline comes from lib/operating, never from the API's optimistic system_health", () => {
   // overview.system_health is HEALTHY unless a SEV0/1 or failing service exists; it ignores a stopped worker and backups.
   const overview = readFileSync(new URL("../pages/overview.tsx", import.meta.url), "utf8")
-  assert.match(overview, /operating\(d, \{ stale, now \}\)/)
+  assert.match(overview, /operating\(d, \{ stale, now, decisions: needs\.items \}\)/)
   assert.doesNotMatch(overview, /system_health/)
 })
 
 test("work rows say what happens next and, for stopped work, the recorded reason", () => {
   const tasks = readFileSync(new URL("../pages/tasks.tsx", import.meta.url), "utf8")
   assert.match(tasks, /const reasons = useReasons\(d\)/)
-  assert.match(tasks, /nextLine\(t, \{ reason, paused \}\)/)
+  assert.match(tasks, /const merged = rowMerged\(t\.status, mission\)/)   // a merged PR is not "agent finished"...
+  assert.match(tasks, /nextLine\(t, \{ reason, paused, merged \}\)/)
+  assert.match(tasks, /<Status value=\{t\.status\} tone=\{tone\} label=\{merged \? "Merged" : undefined\} \/>/)   // ...nor "In review"
+  // The row's accessible name reads the same words as its visible status, never a raw code like IN_PROGRESS.
+  assert.match(tasks, /label=\{`\$\{t\.title\}, \$\{merged \? "Merged" : humanize\(t\.status\)\}`\}/)
   assert.match(tasks, /flex min-w-0 items-center gap-2/)   // title and its priority/risk tags stay together
 })
 
@@ -203,8 +207,9 @@ test("PageHeader typography has one source of truth in the responsive design tok
   const css = readFileSync(new URL("../index.css", import.meta.url), "utf8")
   assert.match(component, /<h1>\{title\}<\/h1>/)
   assert.match(component, /<p className="text-muted-foreground">\{description\}<\/p>/)
-  assert.match(css, /\.page-heading h1 \{ font-size: clamp\(1\.75rem, 2\.4vw, 2rem\);/)
-  assert.match(css, /\.page-heading p \{ max-width: 46rem; font-size: \.875rem; line-height: 1\.55; \}/)
+  // Untitled UI scale (2026-11-09): page title 24/32, description 14/20.
+  assert.match(css, /\.page-heading h1 \{ font-size: 1\.5rem; line-height: 2rem;/)
+  assert.match(css, /\.page-heading p \{ max-width: 46rem; font-size: \.875rem; line-height: 1\.25rem; \}/)
 })
 
 test("state-opened dialogs (palette, create task, detail sheet) hand focus back through useReturnFocus", () => {
@@ -241,8 +246,10 @@ test("task and agent sheets give their content an explicit shrinkable column", (
 // Live data (2026-10-16): 27 tasks in review made the Work page 3,700 px and buried Up next and Waiting outside.
 test("Work collapses groups in overview filters, but never Needs attention, and a search opens what it finds", () => {
   const tasks = readFileSync(new URL("../pages/tasks.tsx", import.meta.url), "utf8")
-  assert.match(tasks, /const open = isOpen\(g\.key, g\.tasks, \{ overview, searching, manual: manual\[g\.key\] \}\)/)
+  // Lanes (lib/task-lanes.ts): Needs you holds Needs attention, so it opens as attention does.
+  assert.match(tasks, /const open = isOpen\(g\.key === "needs" \? "attention" : "running", g\.tasks, \{ overview, searching, manual: manual\[g\.key\] \}\)/)
   assert.match(tasks, /const searching = q !== "" \|\| unit !== "all"/)
-  assert.match(tasks, /aria-expanded=\{open\} disabled=\{g\.key === "attention"\}/)
+  assert.match(tasks, /g\.key === "needs" \? <h2/)   // Needs you is a heading, never a disabled toggle
+  assert.match(tasks, /<button type="button" aria-expanded=\{open\}/)
   assert.doesNotMatch(tasks, /slice\(0, CAP\)/)                      // nothing is cut: a closed group opens in full
 })

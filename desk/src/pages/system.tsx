@@ -33,7 +33,7 @@ export function EventList({ events, grouped, onTask }: { events: Event[]; groupe
           )}
           <div className={cn("grid grid-cols-[48px_10px_minmax(0,1fr)] items-baseline gap-x-3 rounded-md py-1.5", changes[`event:${e.id}`] && "desk-flash")}>
             <span className="num text-xs text-muted-foreground">{new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}</span>
-            <span className={cn("size-1.5 translate-y-[-1px] self-center rounded-full",
+            <span role="img" aria-label={`${e.severity.toLowerCase()} severity`} title={e.severity} className={cn("size-1.5 translate-y-[-1px] self-center rounded-full",
               ["CRITICAL", "HIGH"].includes(e.severity) ? "bg-destructive" : e.severity === "MEDIUM" ? "bg-warning" : "bg-muted-foreground/40")} />
             <div className="min-w-0">
               <div className="text-sm leading-snug [overflow-wrap:anywhere]">{e.title} <ChangeMark c={changes[`event:${e.id}`]} className="align-[1px]" /></div>
@@ -73,7 +73,7 @@ export function ActivityPage() {
   const changes = useChanges()
   const mode = view ?? (hasRepeats(events) ? "grouped" : "timeline")
   return <>
-    <PageHeader title="Activity" description="Recent recorded events, newest first. Older history is not paged here." />
+    <PageHeader title="Activity" />
     {events.length > 0 && <FigureStrip label="Activity at a glance" items={[
       { label: "Recent events", value: String(events.length), sub: `newest ${ago(events.reduce((m, e) => (e.at > m ? e.at : m), events[0].at))} ago` },
       { label: "High or critical", value: String(n("high")), tone: n("high") ? "danger" : undefined, sub: n("high") ? "worth a look" : "none recorded", onClick: () => setSev("high") },
@@ -84,9 +84,9 @@ export function ActivityPage() {
       <nav aria-label="Filter by severity" className="task-filters-scroll -mx-1 flex flex-nowrap gap-1 px-1">
         {(["all", "high", "medium", "other"] as const).map(f => (
           <button key={f} type="button" aria-current={sev === f ? "true" : undefined} onClick={() => setSev(f)}
-            className={cn("inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-[13px] transition-colors duration-150",
-              sev === f ? "border-foreground/15 bg-foreground text-background" : "border-border bg-card text-muted-foreground hover:text-foreground", !n(f) && sev !== f && "border-dashed")}>
-            {({ all: "All", high: "High+", medium: "Medium", other: "Other" })[f]}<span className={cn("num text-xs", sev === f ? "text-background/70" : "text-muted-foreground")}>{n(f)}</span>
+            className={cn("inline-flex h-11 shrink-0 items-center gap-1.5 rounded-lg px-3 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-ring sm:h-9",
+              sev === f ? "bg-muted text-foreground" : "text-muted-foreground hover:bg-muted/50 hover:text-foreground", !n(f) && sev !== f && "opacity-60")}>
+            {({ all: "All", high: "High+", medium: "Medium", other: "Other" })[f]}<span className="num text-xs text-muted-foreground">{n(f)}</span>
           </button>))}
       </nav>
       <Input type="search" value={q} onChange={e => setQ(e.target.value)} placeholder="Find an event, type or task…" aria-label="Find an event" className="h-10" />
@@ -105,7 +105,7 @@ export function ActivityPage() {
               : `${shown.length}${filtered ? ` of ${events.length}` : ""} recent events, newest first`}</span>
             <div role="group" aria-label="Activity view" className="inline-flex rounded-md border bg-card p-0.5">
               {(["grouped", "timeline"] as const).map(v => <button key={v} type="button" aria-pressed={mode === v} onClick={() => setView(v)}
-                className={cn("h-7 rounded-[5px] px-2.5 text-xs font-medium transition-colors", mode === v ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground")}>
+                className={cn("h-10 rounded-[5px] px-2.5 text-xs font-medium transition-colors focus-visible:outline-2 focus-visible:outline-ring sm:h-7", mode === v ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground")}>
                 {v === "grouped" ? "Grouped" : "Timeline"}</button>)}
             </div>
           </div>}
@@ -143,39 +143,13 @@ function InstallApp() {
     if (serviceWorker) void serviceWorker.then(() => setReady(true)).catch(() => setError("Service worker registration failed. Reload while online, then try again."))
   }, [])
   return <Section title="Install on your phone">
-    {standalone ? <p className="text-sm">SEZ Company is running as an installed app.</p>
+    {standalone ? <p className="text-sm">Acthelm Desk is running as an installed app.</p>
       : !serviceWorker ? <p className="text-sm text-muted-foreground">Installation is unavailable here. Open this site over HTTPS in a browser that supports service workers.</p>
         : <div className="grid gap-2 text-sm">
             <p>{ios ? "In Safari, tap Share, then Add to Home Screen, then Add." : "Open your browser menu and choose Install app or Add to Home Screen."}</p>
-            <p className="text-xs text-muted-foreground">The installed app needs a connection and your Cloudflare Access sign-in to show company data.</p>
             {error ? <p role="alert" className="text-destructive">{error}</p> : <p className="text-xs text-muted-foreground">{ready ? "App support ready" : "Checking app support…"}</p>}
           </div>}
   </Section>
-}
-
-const sha7 = (v: string | null | undefined) => (v && /^[0-9a-f]{7,40}$/.test(v) ? v.slice(0, 7) : null)
-
-/** What runs in production, from the runtime facts the API reports. A release gateway, ledger or founder signature is
- *  not in this API's read model, so it is named as not reported: a merged PR or a green CI is never shown as a deploy. */
-function Releases() {
-  const d = useData()
-  const r = d.runtime
-  const api = sha7(r?.api.git_sha), worker = sha7(r?.worker.git_sha)
-  const schemaOk = !!r && !!r.migration.database && r.migration.database === r.migration.code_head
-  return (
-    <Panel title="Releases" description="What runs in production, from the API's own runtime facts">
-      <PanelRow lead={<Dot tone={!r ? "warning" : r.drift.length ? "danger" : api ? "success" : "warning"} />}
-        title={<span className="flex min-w-0 flex-wrap items-baseline gap-x-3"><span>Running version</span>
-          <span className="num font-mono text-[13px]">{api ?? "unknown"}</span></span>}
-        meta={!r ? "Runtime facts are missing from this API" : [
-          r.api.started_at && `API started ${ago(r.api.started_at)} ago`,
-          worker ? (worker === api ? "worker on the same commit" : `worker on ${worker}`) : "worker commit unknown",
-          schemaOk ? `schema ${r.migration.database} matches the code` : `schema ${r.migration.database ?? "unknown"} · code head ${r.migration.code_head ?? "unknown"}`,
-          ...r.drift].filter(Boolean).join(" · ")} />
-      <PanelRow lead={<Dot tone="neutral" />} title="Release gateway"
-        meta="Not reported by this API: no candidate, review, signature, host verification or ledger state is visible to the Desk. A merged pull request or green CI is not a deployment; the running version above is the only deployment evidence shown." />
-    </Panel>
-  )
 }
 
 export function HealthPage() {
@@ -200,14 +174,15 @@ export function HealthPage() {
         <span className={cn("truncate text-[13px] font-medium", c.tone === "danger" ? "text-destructive" : c.tone === "warning" ? "text-warning" : c.tone === "success" ? "text-success" : "text-muted-foreground")}>{c.value}</span></span>}
       meta={c.detail} trail={c.page ? <ChevronRight className="size-4 text-muted-foreground/50" /> : undefined} />)
   return <>
-    <PageHeader title="System status" description="What needs attention first; every verified check, with its evidence, below." />
+    <PageHeader title="System status" />
     {/* Problems first. Anything not verified (failing, late or unknown) is a problem; only verified checks fold away. */}
-    {problems.length > 0 ? <Panel title="Needs attention" count={problems.length} description="Failing, late or not proven by evidence">{problems.map(row)}</Panel>
-      : checks.length ? <Calm title="Every check is verified">Each one is backed by recorded evidence.</Calm>
-      : <Calm title="No checks reported">This API reported nothing to verify; that is not a healthy result.</Calm>}
+    {problems.length > 0 ? <Panel title="Needs attention" count={problems.length}>{problems.map(row)}</Panel>
+      : checks.length ? <Calm title="Every check is verified" status={<Dot tone="success" />} />
+      : <Calm title="No checks reported" status={<Dot tone="warning" />}>Not a healthy result.</Calm>}
     {verified.length > 0 && <div className="-mt-2"><Expandable summary={<span className="text-[13px]"><span className="font-medium">{verified.length} of {checks.length} checks verified</span>
       <Muted> · {verified.map(c => c.label).join(", ")}</Muted></span>}><Panel title="Verified">{verified.map(row)}</Panel></Expandable></div>}
-    <Releases />
+    {/* The running version, release gateway and delivery evidence have their own page (pages/releases.tsx). */}
+    <p className="text-[13px] text-muted-foreground">Running version and delivery evidence: <button type="button" className="inline-flex min-h-11 items-center font-medium text-foreground underline-offset-2 hover:underline focus-visible:underline sm:min-h-6" onClick={() => go("releases" as Page)}>Releases</button></p>
     <Disclosure title="Details" hint="host, services, watchdog conditions, backup and restore, phone install">
     <Section title="Host" action={seen ? <span className={cn("num", stale && "text-warning")} title={`Watchdog reading · ${when(r.at)}`}>
       {stale ? `Stale · read ${ago(r.at)} ago · watchdog may not be running` : `Read ${ago(r.at)} ago`}</span> : <span>No metrics persisted</span>}>
@@ -223,7 +198,7 @@ export function HealthPage() {
           </div>
         ))}
       </div>
-      <p className="text-xs text-muted-foreground">The latest watchdog reading only: host history is not recorded, so no trend is drawn.</p>
+      <p className="text-xs text-muted-foreground">Latest watchdog reading only; no history is recorded.</p>
       <Facts items={[
         ["Container snapshot", <Status key="snapshot" value={collection.containers}
           label={collection.containers === "OK" ? "Complete" : "Unknown"}
@@ -235,6 +210,7 @@ export function HealthPage() {
     </Section>
     <div className="grid grid-cols-1 gap-10 lg:grid-cols-[1.4fr_1fr]">
       <Section title="Services">
+        {!services.length && <Calm title="No services registered" />}
         {services.map(s => <ServiceRow key={s.key} name={s.name} sub={`${s.key} · ${s.last_verified ? `verified ${ago(s.last_verified)} ago` : "not verified yet"}`} risk={s.risk} status={s.last_verified ? <Status value={s.status} /> : <Status value="UNKNOWN" label="Registered, not verified" />} />)}
       </Section>
       <Section title="Active watchdog conditions" action={<span className={cn("num text-xs", watchdog.reported ? "text-muted-foreground" : "text-warning")}>{watchdog.count}</span>}>
@@ -242,7 +218,7 @@ export function HealthPage() {
           {watchdogConditions.map(condition => <div key={`${condition.event_id}:${condition.episode}`} className="grid gap-1 border-b border-border/70 py-3 last:border-0">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0"><div className="text-sm font-medium [overflow-wrap:anywhere]">{condition.title}</div>
-                <div className="text-xs text-muted-foreground">{condition.type} · episode {condition.episode} · {condition.delivery_status}</div></div>
+                <div className="text-xs [overflow-wrap:anywhere] text-muted-foreground">{condition.type} · episode {condition.episode} · {condition.delivery_status}</div></div>
               <Status value={condition.severity} />
             </div>
             {condition.detail && <div className="text-xs text-muted-foreground [overflow-wrap:anywhere]">{condition.detail}</div>}
@@ -262,8 +238,8 @@ export function HealthPage() {
           {b ? <Facts items={[["Target", b.target], ["Last run", `${when(b.at)} · ${ago(b.at)} ago`],
             ["Run succeeded", b.ok ? "Yes" : "No"], ["Uploaded off-site", b.uploaded == null ? "Unknown" : b.uploaded ? "Yes" : "No"],
             ["Integrity reported", b.integrity_verified ? "Yes" : "No"],
-            ["Verified event linked", b.verified === true ? "Yes" : "No"]]} />
-            : <Calm title="No backup recorded">Nothing proves a restorable copy exists.</Calm>}
+            ["Verified event linked", b.verified == null ? "Unknown" : b.verified ? "Yes" : "No"]]} />
+            : <Calm title="No backup recorded" status={<Dot tone="warning" />} />}
         </Section>
         <Section title="Restore test" action={restore ? <Status
           value={!restore.ok ? "FAILED" : restore.integrity_verified ? "PASSED" : "UNKNOWN"}
@@ -272,11 +248,11 @@ export function HealthPage() {
           {restore ? <Facts items={[["Target", restore.target], ["Last attempt", `${when(restore.at)} · ${ago(restore.at)} ago`],
             ["Outcome", !restore.ok ? "Failed" : restore.integrity_verified ? "Passed" : "Unverified"],
             ["Source", restore.uploaded === true ? "Off-site copy" : restore.uploaded === false ? "Local copy" : "Unknown"]]} />
-            : <Calm title="No restore test recorded">Backup integrity checks do not prove a restore succeeded.</Calm>}
+            : <Calm title="No restore test recorded" status={<Dot tone="warning" />} />}
         </Section>
       </div>
     </div>
-    <p className="text-sm text-muted-foreground">Worker, providers and loops: <button className="inline-flex min-h-6 items-center underline-offset-2 hover:text-foreground hover:underline" onClick={() => go("automation")}>Automation</button> · Costs: <button className="inline-flex min-h-6 items-center underline-offset-2 hover:text-foreground hover:underline" onClick={() => go("finance")}>Finance</button></p>
+    <p className="text-sm text-muted-foreground">Worker, providers and loops: <button type="button" className="inline-flex min-h-11 items-center underline-offset-2 hover:text-foreground hover:underline focus-visible:underline sm:min-h-6" onClick={() => go("automation")}>Automation</button> · Costs: <button type="button" className="inline-flex min-h-11 items-center underline-offset-2 hover:text-foreground hover:underline focus-visible:underline sm:min-h-6" onClick={() => go("finance")}>Finance</button></p>
     <InstallApp />
     </Disclosure>
   </>

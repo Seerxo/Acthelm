@@ -2,7 +2,7 @@
 // lifecycle; this page parses and shows it (lib/stage-c.ts) and never upgrades missing evidence to success. Its one
 // action is the emergency revoke of the standing grant. Green CI here is a PR check, not a production deploy.
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
-import { ExternalLink, RefreshCw } from "lucide-react"
+import { ChevronRight, ExternalLink, RefreshCw } from "lucide-react"
 import { api } from "@/lib/api"
 import { ago, humanize, when } from "@/lib/format"
 import { freshLabel } from "@/lib/freshness"
@@ -12,6 +12,7 @@ import {
   type LoadError, type StageCState, type StepState, type Task, type View,
 } from "@/lib/stage-c"
 import { cn } from "@/lib/utils"
+import { stageCOnHost, taskStatusView } from "@/lib/qa-status"
 import { useDesk, useNow } from "@/state"
 import { EmptyState, Facts, FigureStrip, Muted, PageHeader, Panel, PanelEmpty, Section, Status, TaskKey } from "@/components/desk"
 import { RevokeStanding } from "@/components/controls"
@@ -23,8 +24,15 @@ const POLL_MS = 30_000
 const Badge = ({ v, pill }: { v: View; pill?: boolean }) => <Status value={v.badge} label={v.label} tone={BADGE_TONE[v.badge]} pill={pill} />
 const Sha = ({ s }: { s: string | null }) => s ? <span className="font-mono text-xs" title={s}>{short(s)}</span> : <Muted>Not reported</Muted>
 const At = ({ t }: { t: string | null }) => t ? <span title={when(t)}>{when(t)} <Muted>({ago(t)} ago)</Muted></span> : <Muted>Not reported</Muted>
-const Note = ({ children }: { children: ReactNode }) =>
-  <p className="max-w-3xl rounded-lg border border-border/70 bg-surface/70 px-3.5 py-3 text-[13px] leading-5 text-muted-foreground">{children}</p>
+const Note = ({ children }: { children: ReactNode }) => <p className="text-[13px] text-warning">{children}</p>
+/** SHAs, fingerprints and check names: one click away, closed by default. */
+const More = ({ children }: { children: ReactNode }) => (
+  <details className="group text-[13px]">
+    <summary className="flex min-h-11 cursor-pointer list-none items-center gap-1.5 text-muted-foreground hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring sm:min-h-8 [&::-webkit-details-marker]:hidden">
+      <ChevronRight aria-hidden className="size-4 transition-transform group-open:rotate-90" />Details</summary>
+    <div className="pt-2 pl-5">{children}</div>
+  </details>
+)
 
 const STEP: Record<StepState, [string, "success" | "info" | "danger" | "neutral" | "warning"]> = {
   completed: ["Completed", "success"], in_progress: ["In progress", "info"], failed: ["Failed", "danger"], pending: ["Pending", "neutral"], unknown: ["Unknown", "warning"],
@@ -72,12 +80,12 @@ export function StageCPage() {
 
   const fresh = state ? readFreshness(state, fetchedAt, now, !!failure) : null
   const marker = fresh ? freshLabel(fresh) : ""
-  const header = <PageHeader title="Stage C" description="The autonomous coding loop, as the backend reports it. Missing evidence reads unknown, never done."
+  const header = <><PageHeader title="Stage C"
     meta={state && <span className={cn("num", marker && "text-warning")} role="status">
       {marker ? `${humanize(marker)} · ` : ""}{fetchedAt ? `read ${ago(fetchedAt)} ago` : ""}</span>}>
     <Button variant="outline" className="h-11" onClick={() => void read()} disabled={loading} aria-label="Refresh Stage C state">
       <RefreshCw className={cn(loading && "animate-spin")} />Refresh</Button>
-  </PageHeader>
+  </PageHeader></>
 
   if (!state) return <>
     {header}
@@ -90,13 +98,19 @@ export function StageCPage() {
           </div>}>
           {failure.kind === "forbidden" ? "This read is founder only; a Desk token cannot open it."
             : failure.kind === "unavailable" ? "The deployed API does not serve /stage-c/state yet."
-            : `${failure.message}. Nothing is shown until the API answers; no value is guessed.`}</EmptyState></div>}
+            : failure.message}</EmptyState></div>}
+  </>
+
+  // Production runs the same Desk with no Stage C: say so once instead of a page of unknowns and controls.
+  if (!stageCOnHost(state)) return <>
+    {header}
+    <EmptyState title="Stage C is not on this host">No host acceptance, preflight, task or grant is reported here.</EmptyState>
   </>
 
   return <>
     {header}
     {failure && <p role="alert" className="text-[13px] text-warning">Refresh failed ({failure.message}); showing the last read, marked stale.</p>}
-    {!state.version_ok && <Note>This API reports a contract version this Desk does not know. Fields it could not read show as unknown.</Note>}
+    {!state.version_ok && <Note>Unknown contract version: unreadable fields show as unknown.</Note>}
     <Overview s={state} />
     <StandingPanel s={state} onRevoked={() => void read()} />
     <Pipeline tasks={state.tasks} />
@@ -110,10 +124,10 @@ function Overview({ s }: { s: StageCState }) {
   const last = lastReadyPr(s)
   const next = nextAction(s)
   const mode = rt.agents_paused === true ? "Agents paused" : rt.agents_paused === null ? "Not reported"
-    : rt.write_enabled === true ? "Agents running · code-write flag on" : rt.write_enabled === false ? "Agents running · code-write flag off" : "Agents running · code-write flag not reported"
+    : rt.write_enabled === true ? "Agents not paused · code-write flag on" : rt.write_enabled === false ? "Agents not paused · code-write flag off" : "Agents not paused · code-write flag not reported"
   const grant = (g: Parameters<typeof grantView>[0]) => <Badge v={grantView(g)} />
   return (
-    <Section title="Autonomy overview" description="Every value as reported; the code-write flag is a permission, not readiness."
+    <Section title="Overview"
       action={<Badge v={{ badge: s.state, label: humanize(s.state) }} pill />}>
       <div className="grid gap-4 lg:grid-cols-2">
         <Facts items={[
@@ -134,16 +148,23 @@ function Overview({ s }: { s: StageCState }) {
           ["Operating mode", mode],
           ["Worker heartbeat", <Badge key="h" v={heartbeatView(rt.worker_heartbeat)} />],
           ["Worker readiness", <Badge key="r" v={workerReadyView(rt.worker_ready)} />],
-          ["API commit", <Sha key="a" s={rt.api_sha} />],
-          ["Worker commit", <Sha key="w" s={rt.worker_sha} />],
-          ["Reasoner commit", <Sha key="rs" s={rt.reasoner_sha} />],
           ["Drift", <Badge key="d" v={driftView(rt)} />],
-          ["Host acceptance", <span key="ac" className="flex flex-wrap items-center gap-2"><Badge v={acceptanceView(rt.acceptance.valid)} /><Sha s={rt.acceptance.source_sha} /></span>],
+          ["Host acceptance", <Badge key="ac" v={acceptanceView(rt.acceptance.valid)} />],
           ["Preflight", <span key="p" className="flex flex-wrap items-center gap-2"><Badge v={preflightView(rt.preflight)} />
-            {rt.preflight.checked_at && <Muted>checked {ago(rt.preflight.checked_at)} ago</Muted>}<Sha s={rt.preflight.source_sha} /></span>],
+            {rt.preflight.checked_at && <Muted>checked {ago(rt.preflight.checked_at)} ago</Muted>}</span>],
           ["Host facts", <Badge key="hf" v={{ badge: "NOT_VERIFIED", label: "Not verified by the API" }} />],
         ]} />
       </div>
+      <More><Facts items={[
+        ["API commit", <Sha key="a" s={rt.api_sha} />],
+        ["Worker commit", <Sha key="w" s={rt.worker_sha} />],
+        ["Reasoner commit", <Sha key="rs" s={rt.reasoner_sha} />],
+        ["Acceptance commit", <Sha key="ac" s={rt.acceptance.source_sha} />],
+        ["Preflight commit", <Sha key="ps" s={rt.preflight.source_sha} />],
+        // Why the worker is not ready: the watchdog's failing checks, as recorded (fixed check names only).
+        ["Failing checks", rt.preflight.failed?.length ? <span key="f" className="flex flex-wrap gap-1.5">
+          {rt.preflight.failed.map(c => <code key={c} className="rounded bg-muted px-1.5 font-mono text-xs break-all">{c}</code>)}</span> : <Muted key="f">None reported</Muted>],
+      ]} /></More>
     </Section>
   )
 }
@@ -159,31 +180,31 @@ function StandingPanel({ s, onRevoked }: { s: StageCState; onRevoked: () => void
   const g = s.authorizations.standing
   const revoked = isRevoked(g)
   return (
-    <Section title="Standing authorization" description="Issued and renewed on the host by the founder; the Desk can only withdraw it."
+    <Section title="Standing authorization" description="Issued on the host; the Desk can only withdraw it."
       action={canRevokeStanding(g) ? <RevokeStanding onDone={onRevoked} /> : undefined}>
-      {g === null ? <PanelEmpty title="No standing grant">The API explicitly reports no standing authorization.</PanelEmpty>
-        : g === undefined ? <PanelEmpty title="UNKNOWN">The API did not report a readable standing grant. Its existence is unknown; Revoke remains available.</PanelEmpty>
+      {g === null ? <PanelEmpty title="No standing grant" />
+        : g === undefined ? <PanelEmpty title="UNKNOWN">No readable standing grant was reported; Revoke stays available.</PanelEmpty>
         : <Facts items={[
           ["Status", <Badge key="s" v={grantView(g)} pill />],
           ["Revoked", g.revoked === null ? <Muted key="r">Not reported</Muted> : revoked ? "Yes" : "No"],
-          ["Source commit", <Sha key="sha" s={g.source_sha} />],
           ["Paths", g.paths === null ? <Muted key="p">Not reported</Muted> : g.paths.length
-            ? <ul key="p" className="grid gap-0.5 font-mono text-xs">{g.paths.map(p => <li key={p}>{p}</li>)}</ul> : <Muted key="p">None</Muted>],
+            ? <ul key="p" className="grid gap-0.5 font-mono text-xs break-all">{g.paths.map(p => <li key={p}>{p}</li>)}</ul> : <Muted key="p">None</Muted>],
           ["Expires", <At key="e" t={g.expires_at} />],
           ["Per-day cap", na(g.max_per_day)],
           ["Used today", na(g.used_today)],
           ["Remaining today", na(g.remaining_today)],
           ["Issuer role", humanize(g.issuer)],
         ]} />}
+      {g && <More><Facts items={[["Source commit", <Sha key="sha" s={g.source_sha} />]]} /></More>}
     </Section>
   )
 }
 
 function Pipeline({ tasks }: { tasks: Task[] | null }) {
   return (
-    <Section title="Pipeline" count={tasks?.length} description="Newest first. CI passing on a PR is not a production deploy; merging and releasing stay with the founder and the release gateway.">
-      {tasks === null ? <PanelEmpty title="Not reported">This API did not report Stage C tasks.</PanelEmpty>
-        : !tasks.length ? <PanelEmpty title="No Stage C tasks yet">Nothing has run under Stage C.</PanelEmpty>
+    <Section title="Pipeline" count={tasks?.length} description="Green CI on a PR is not a deploy; merge and release stay with the founder.">
+      {tasks === null ? <PanelEmpty title="Not reported" />
+        : !tasks.length ? <PanelEmpty title="No Stage C tasks yet" />
         : <div className="grid gap-3">{tasks.map((t, i) => <TaskCard key={t.key ?? `unknown-${i}`} t={t} />)}</div>}
     </Section>
   )
@@ -193,7 +214,7 @@ function TaskCard({ t }: { t: Task }) {
   const ci = ciView(t)
   return (
     <Panel title={<span className="flex flex-wrap items-center gap-2">{t.key ? <TaskKey k={t.key} /> : <Muted>Unknown key</Muted>}
-      <Status value={t.status} />{t.needs_founder && <Status value="NEEDS_FOUNDER" label="Needs you" tone="warning" />}</span>}
+      <Status {...taskStatusView(t.status, t.stage)} />{t.needs_founder && <Status value="NEEDS_FOUNDER" label="Needs you" tone="warning" />}</span>}
       description={t.stage === "ABANDONED" ? "Abandoned" : t.stage === null ? "No lifecycle recorded" : undefined}>
       <div className="grid gap-4 p-4">
         <ol className="flex flex-wrap gap-x-4 gap-y-2" aria-label={`Pipeline of ${t.key ?? "task"}`}>
@@ -202,18 +223,22 @@ function TaskCard({ t }: { t: Task }) {
               <Status value={x.state} label={label} tone={tone} live={x.state === "in_progress"} /></li> })}
         </ol>
         <Facts items={[
-          ["Attempts", na(t.attempts)], ["Repairs", na(t.repairs)],
           ["Tests", <Badge key="t" v={testView(t)} />],
           ["Independent review", <Badge key="r" v={reviewView(t)} />],
-          ["Fingerprint", <span key="f" className="font-mono text-xs" title={[t.tested_fingerprint, t.reviewed_fingerprint].filter(Boolean).join(" / ") || undefined}>
-            tested {short(t.tested_fingerprint, 12) ?? "n/a"} · reviewed {short(t.reviewed_fingerprint, 12) ?? "n/a"}</span>],
-          ["Pull request", t.pr ? <span key="pr" className="flex flex-wrap items-center gap-2"><PrLink number={t.pr.number} /><Muted>head</Muted><Sha s={t.pr.head_sha} /></span> : <Muted key="pr">Not opened</Muted>],
-          ["CI", <span key="ci" className="flex flex-wrap items-center gap-2"><Status value={ci.kind} label={ci.label} tone={ci.tone} />
-            {ci.sha && <><Muted>on</Muted><Sha s={ci.sha} /></>}</span>],
-          ["Last outcome", t.last_outcome ? privacyGateLabel(t.last_outcome) ?? humanize(t.last_outcome) : <Muted key="o">None recorded</Muted>],
-          ["Failure", t.failure_category ? <span key="fc" className="text-destructive">{privacyGateLabel(t.failure_category) ?? humanize(t.failure_category)}</span> : <Muted key="fc">None recorded</Muted>],
+          ["Pull request", t.pr ? <PrLink key="pr" number={t.pr.number} /> : <Muted key="pr">Not opened</Muted>],
+          ["CI", <Status key="ci" value={ci.kind} label={ci.label} tone={ci.tone} />],
+          ...(t.failure_category ? [["Failure", <span key="fc" className="text-destructive">{privacyGateLabel(t.failure_category) ?? humanize(t.failure_category)}</span>] as [string, ReactNode]] : []),
           ["Updated", <At key="u" t={t.updated_at} />],
         ]} />
+        <More><Facts items={[
+          ["Attempts", na(t.attempts)], ["Repairs", na(t.repairs)],
+          ["Tested fingerprint", <span key="tf" className="font-mono text-xs [overflow-wrap:anywhere]">{t.tested_fingerprint ?? "n/a"}</span>],
+          ["Reviewed fingerprint", <span key="rf" className="font-mono text-xs [overflow-wrap:anywhere]">{t.reviewed_fingerprint ?? "n/a"}</span>],
+          ["PR head", <Sha key="ph" s={t.pr?.head_sha ?? null} />],
+          ["CI commit", <Sha key="cs" s={ci.sha ?? null} />],
+          ["Last outcome", t.last_outcome ? privacyGateLabel(t.last_outcome) ?? humanize(t.last_outcome) : <Muted key="o">None recorded</Muted>],
+          ["Failure", t.failure_category ? privacyGateLabel(t.failure_category) ?? humanize(t.failure_category) : <Muted key="fc">None recorded</Muted>],
+        ]} /></More>
       </div>
     </Panel>
   )
@@ -222,7 +247,7 @@ function TaskCard({ t }: { t: Task }) {
 function MetricsPanel({ s }: { s: StageCState }) {
   const m = s.metrics
   return (
-    <Section title="Metrics" description="Stage C tasks and attempts are separate counts. n/a means not recorded, never zero.">
+    <Section title="Metrics" description="n/a means not recorded, never zero.">
       <div className="grid gap-4">
         <FigureStrip label="Stage C tasks" items={[
           { label: "Tasks started", value: na(m.tasks.started) },

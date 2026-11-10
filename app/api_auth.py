@@ -55,7 +55,7 @@ YOUTUBE = [("POST", r"/webhooks/youtube-auto"), ("POST", r"/metrics/observations
 FOUNDER_SCOPE = [("POST", r"/control/agents"), ("POST", r"/tasks/[A-Za-z0-9_-]+/status"),
                  ("POST", r"/tasks/[A-Za-z0-9_-]+/run-report"), ("POST", r"/phases/[0-9]+"),
                  ("POST", r"/learnings/[0-9]+/approve"), ("POST", r"/stage-c/authorization"),
-                 ("POST", r"/stage-c/authorization/revoke"),
+                 ("POST", r"/stage-c/authorization/revoke"), ("POST", r"/stage-c/tasks"),
                  ("POST", r"/stage-c/reconcile-refresh"),
                  ("POST", r"/stage-c/standing"), ("POST", r"/stage-c/standing/revoke"), ("POST", r"/stage-c/acceptance"),
                  ("POST", r"/notifications/[0-9]+/retry"),
@@ -120,7 +120,7 @@ ENFORCE_ALWAYS = [("POST", r"/approvals/[A-Za-z0-9_-]+"), ("POST", r"/learnings/
                   ("POST", r"/webhooks/youtube-auto"), ("POST", r"/incidents"), ("POST", r"/metrics/observations"),
                   ("POST", r"/goals"), ("PATCH", r"/goals/[0-9]+"), ("POST", r"/backups"),
                   ("POST", r"/stage-c/authorization"), ("POST", r"/stage-c/authorization/revoke"),
-                  ("POST", r"/stage-c/reconcile-refresh"), ("POST", r"/experiments"),
+                  ("POST", r"/stage-c/reconcile-refresh"), ("POST", r"/stage-c/tasks"), ("POST", r"/experiments"),
                   ("POST", r"/stage-c/standing"), ("POST", r"/stage-c/standing/revoke"), ("POST", r"/stage-c/acceptance"),
                   ("POST", r"/experiments/[A-Za-z0-9_-]+/[a-z-]+"),
                   ("POST", r"/notifications/[0-9]+/retry")]

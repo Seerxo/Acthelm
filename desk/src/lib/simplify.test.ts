@@ -7,7 +7,7 @@ import { PAGES } from "./nav.ts"
 
 const read = (p: string) => readFileSync(new URL(p, import.meta.url), "utf8")
 const app = read("../App.tsx"), composer = read("../components/command-composer.tsx")
-const controls = read("../components/controls.tsx"), overview = read("../pages/overview.tsx")
+const controls = read("../components/controls.tsx"), overview = read("../pages/overview.tsx") + read("../components/dashboard/home.tsx")   // Home's cards live there
 
 test("search (⌘K) never submits a command: it only hands the text to the Home composer", () => {
   const group = app.slice(app.indexOf("function InstructGroup"), app.indexOf("\n}\n", app.indexOf("function InstructGroup")))

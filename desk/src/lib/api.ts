@@ -46,6 +46,8 @@ export interface Improvement {
   pr_state: string | null; ci_state: string | null; failed_check: string | null
   repairs: string | null; review_verdict: string | null; risk: string | null
   expected_effect: string | null; verified_at: string | null
+  /** The PR passes the backend's verified-publication rule (app/desk.py _pull_request). Absent on older APIs. */
+  pr_verified?: boolean
 }
 export interface Worker {
   status: "HEALTHY" | "PAUSED" | "STALE" | "DEGRADED" | "NO_DATA" | string
@@ -150,6 +152,11 @@ export interface TaskDetail {
   approval_required: boolean; dependencies: { key: string; status: string }[]; runs: Run[]
   /** Attempts used and allowed (absent on older APIs). */
   retry_count?: number; max_attempts?: number
+  /** Code tasks only: null when a Stage C authorization covers it, else the API's fixed denial code. */
+  stage_c_authorization?: string | null
+  /** The backend-verified PR (app/desk.py _pull_request); url and number only when verified. Absent on older APIs. */
+  pull_request?: { verified: boolean; merged: boolean; commit: string | null; merge_commit: string | null
+    number?: number; url?: string } | null
   artifacts: unknown; result: string | null; error: string | null
   supervisor: { verdict: string; notes: string | null } | null
   created_at: string; started_at: string | null; completed_at: string | null
@@ -212,6 +219,11 @@ export async function api<T>(path: string, body?: unknown): Promise<T> {
 
 export async function apiText(path: string): Promise<string> {
   const response = await fetch(path)
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
+  if (!response.ok) throw new ApiError(response.status, response.statusText)
+  // As api(): an Access login page (HTML after a redirect) is a lost session, and any non-plain-text body is refused,
+  // never shown as the text the founder asked for.
+  if (!response.headers.get("content-type")?.startsWith("text/plain"))
+    throw accessLogin(response) ? new ApiError(0, "Sign in again, then reload", true)
+      : new ApiError(0, "Unexpected (non-text) API response; reload", false)
   return response.text()
 }

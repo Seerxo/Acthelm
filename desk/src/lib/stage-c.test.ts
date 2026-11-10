@@ -390,3 +390,28 @@ test("runtime reasoner SHA and last ready PR use the emitted contract, including
   assert.equal(lastReadyPr(parseStageC(raw({ last_ready_pr: { number: 61, stage: "UNTRUSTED" } }))), null)
   assert.equal(parseStageC(raw({ runtime: { reasoner_sha: "short" } })).runtime.reasoner_sha, null)
 })
+
+test("preflight failures and code task paths are codes and plain paths only", () => {
+  const s = parseStageC(raw({ code_task_paths: ["app/goals.py", "../etc", "https://x"],
+    runtime: { ...raw().runtime, preflight: { status: "FAIL", checked_at: NOW, source_sha: SHA, failed: ["launcher", "bad name", 3] } } }))
+  assert.deepEqual(s.runtime.preflight.failed, ["launcher", "other", "other"])
+  assert.deepEqual(s.code_task_paths, ["app/goals.py"])
+  assert.equal(parseStageC(raw()).runtime.preflight.failed, null)
+  assert.equal(parseStageC(raw()).code_task_paths, null)
+})
+
+test("preflight ids", () => {
+  const failed = ["acceptance:claude_edit", "acceptance:codex_review_probe", "acceptance:unknown", "unknown_check"]
+  const parse = (failed: unknown[]) => parseStageC(raw({ runtime: { preflight: { failed } } })).runtime.preflight.failed
+  assert.deepEqual(parse(failed), ["acceptance:claude_edit", "acceptance:codex_review_probe", "other", "other"])
+  assert.deepEqual(parse(Array(11).fill("launcher")), Array(10).fill("launcher"))
+})
+
+test("revoke toasts follow the API's answer; minutes clamp only when sent", async () => {
+  const { pilotRevokeMessage, standingRevokeMessage, clampMinutes } = await import("./stage-c.ts")
+  assert.match(pilotRevokeMessage({ revoked: true }), /revoked$/)
+  assert.match(pilotRevokeMessage({ revoked: false }), /nothing was revoked/)
+  assert.match(standingRevokeMessage({ revoked: false }), /nothing was revoked/)
+  for (const bad of [{}, { revoked: "yes" }, null]) assert.throws(() => pilotRevokeMessage(bad))
+  assert.deepEqual(["", " ", "abc", "0", "5", "5.6", "90"].map(clampMinutes), [null, null, null, 1, 5, 6, 60])
+})
