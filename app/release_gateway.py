@@ -46,6 +46,8 @@ NS_RECOVERY = "seerxo-ledger-recovery"            # founder only: rebuild a lost
 NS_RECONCILE = "seerxo-ledger-reconcile"          # founder only: close a `pending` release (applied/failed/abandoned)
 NS_REBASE = "seerxo-ledger-rebase"                 # founder only: move the release chain to another repository
 NS_REVIEW_REQUEST = "seerxo-review-request"      # the gateway key: only the gateway may ask for a release review
+NS_DESK_BUILD = "seerxo-desk-build"              # the gateway key only: its own rebuild of desk/ (evidence.desk_build)
+DESK_PROOF_FIELDS = {"runner", "sha", "desk_tree", "files", "passed"}
 MANIFEST_VERSION = 2
 # The verifier and the root-side driver are installed as one versioned bundle; both carry this integer and refuse
 # to run when they disagree (release_host.bundle_problem).
@@ -631,22 +633,31 @@ def verify_review(review, packet: dict, policy: dict, now: datetime) -> dict:
     return att
 
 
-def _check_desk_build(m: dict, generated) -> None:
+def desk_proof_bytes(proof: dict) -> bytes:
+    """What the gateway signs for its desk/ rebuild (NS_DESK_BUILD): every proof field except the signature."""
+    return canonical({k: proof[k] for k in DESK_PROOF_FIELDS})
+
+
+def _check_desk_build(m: dict, generated, policy: dict) -> None:
     """For every signer: when desk/ or app/static changes, the gateway's rebuild of desk/ at this commit must have
     produced exactly the app/static files this verifier hashed from its own clone (same set, same bytes). The host
-    cannot rebuild (that runs agent-written build code); the rebuild result is trusted-check evidence, like
-    `trusted_checks.passed`, and the reviewed packet's header names the same hashes."""
+    cannot rebuild (that runs agent-written build code); the rebuild result is trusted-check evidence, signed by the
+    gateway key in its own namespace, so a manifest author (even the founder) cannot supply the proof: a founder
+    signature over the manifest does not make a forged rebuild true. The reviewed header names the same hashes."""
     if not isinstance(generated, dict) or not isinstance(generated.get("files"), dict):
         raise Refused("the verifier could not read the generated app/static files")
     if generated.get("required") is False:
         return
     proof = m["evidence"].get("desk_build")
-    if (not isinstance(proof, dict) or proof.get("runner") != "gateway" or proof.get("sha") != m["sha"]
-            or proof.get("passed") is not True):
+    if not isinstance(proof, dict) or set(proof) != DESK_PROOF_FIELDS | {"signature"}:
         raise Refused("no passing gateway rebuild of desk/ for this exact commit")
-    if not isinstance(generated.get("desk_tree"), str) or proof.get("desk_tree") != generated["desk_tree"]:
+    if not verify(desk_proof_bytes(proof), proof["signature"], policy["gateway_key"], NS_DESK_BUILD):
+        raise Refused("the desk/ rebuild proof is not signed by the gateway key")
+    if proof["runner"] != "gateway" or proof["sha"] != m["sha"] or proof["passed"] is not True:
+        raise Refused("no passing gateway rebuild of desk/ for this exact commit")
+    if not isinstance(generated.get("desk_tree"), str) or proof["desk_tree"] != generated["desk_tree"]:
         raise Refused("the desk/ rebuild was made from other sources than this commit's desk/")
-    if proof.get("files") != generated["files"]:
+    if proof["files"] != generated["files"]:
         raise Refused("the generated app/static files differ from the rebuild of the reviewed desk/ sources")
 
 
@@ -659,7 +670,7 @@ def _check_evidence(m: dict, policy: dict, diff, now: datetime, base: str | None
     if (checks.get("runner") != "gateway" or checks.get("sha") != m["sha"]
             or checks.get("payload_digest") != m["payload_digest"] or checks.get("passed") is not True):
         raise Refused("no passing trusted checks run by the gateway for this exact commit and payload")
-    _check_desk_build(m, generated)
+    _check_desk_build(m, generated, policy)
     review = m["evidence"].get("review")
     nonce = review.get("nonce") if isinstance(review, dict) else None
     if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32,64}", nonce):

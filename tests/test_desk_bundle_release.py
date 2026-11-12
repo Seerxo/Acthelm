@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -56,17 +58,27 @@ def test_desk_ok(hw):
 
 
 @pytest.mark.parametrize("signer", ["founder", "gateway"])
-@pytest.mark.parametrize("bad", ["drop", "files", "tree", "sha", "fail"])
+@pytest.mark.parametrize("bad", ["drop", "files", "tree", "sha", "fail", "nosig", "fsig", "edit"])
 def test_bad_proof(hw, signer, bad):
+    """Field cases are re-signed with the gateway key (its content checks still hold); nosig/fsig/edit keep the right
+    content but no gateway signature over it: a founder signature on the manifest does not repair a forged proof."""
     desk_commit(hw)
     hw.tick()
     d = draft(hw)
     proof = d["evidence"]["desk_build"]
+    assert rg.verify(rg.desk_proof_bytes(proof), proof["signature"], hw.keys["gateway"][1], rg.NS_DESK_BUILD)
     if bad == "drop":
         del d["evidence"]["desk_build"]
+    elif bad == "nosig":
+        del proof["signature"]
+    elif bad == "fsig":
+        proof["signature"] = rg.sign(rg.desk_proof_bytes(proof), hw.keys["founder"][0], rg.NS_DESK_BUILD)
+    elif bad == "edit":
+        proof["files"] = {"app/static/desk.html": "0" * 64}
     else:
         proof.update({"files": {"files": {"app/static/desk.html": "0" * 64}}, "tree": {"desk_tree": "5" * 40},
                       "sha": {"sha": "6" * 40}, "fail": {"passed": False}}[bad])
+        proof["signature"] = rg.sign(rg.desk_proof_bytes(proof), hw.keys["gateway"][0], rg.NS_DESK_BUILD)
     d["approver"] = signer
     raw = rg.canonical(d)
     hw.cfg.outbox.mkdir(parents=True, exist_ok=True)
@@ -74,6 +86,43 @@ def test_bad_proof(hw, signer, bad):
     (hw.cfg.outbox / "000007-x.sig").write_text(rg.sign(raw, hw.keys[signer][0], rg.NS_RELEASE))
     out = step(hw)
     assert out["outcome"] == "REJECTED" and "desk/" in out["reason"] and hw.runs == []
+
+
+def test_gateway_approve_checks_proof_signature(hw):
+    """gateway_approve (the other verifier) refuses an unsigned proof too."""
+    desk_commit(hw)
+    hw.tick()
+    d = draft(hw)
+    del d["evidence"]["desk_build"]["signature"]
+    policy = json.loads((hw.tmp / "policy.json").read_text())
+    with pytest.raises(rg.Refused, match="desk/"):
+        rg._check_desk_build(d, {"required": True, "files": {}, "desk_tree": "x"}, policy)
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts/release-gateway-desk-build"
+
+
+def run_script(*args, **env):
+    return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True,
+                          env={"PATH": os.environ["PATH"], **env})
+
+
+@pytest.mark.parametrize("env", [{"SUDO_UID": "1000"}, {"SUDO_USER": "gateway"}], ids=["uid", "user"])
+def test_script_seed_refused_under_sudo(tmp_path, env):
+    (tmp_path / "desk").mkdir()
+    (tmp_path / "desk/package-lock.json").write_text("{}")
+    r = run_script("seed", str(tmp_path), **env)
+    assert r.returncode == 2 and "refused under sudo" in r.stderr
+
+
+def test_script_refuses_symlink(tmp_path):
+    work = tmp_path / "gateway-desk-x"
+    (work / "desk").mkdir(parents=True)
+    (work / "app/static").mkdir(parents=True)
+    (work / "desk/package-lock.json").write_text("{}")
+    os.symlink("/etc/passwd", work / "desk/leak")
+    r = run_script(str(work), SUDO_UID=str(os.getuid()))
+    assert r.returncode == 2 and "symlink" in r.stderr
 
 
 @pytest.mark.parametrize("case", ["bundle", "stale", "extra"])

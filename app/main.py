@@ -762,7 +762,7 @@ def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = D
     # Worker-recorded error markers are facts: a status caller may neither write one nor overwrite one (erasing a
     # "PR closed" marker would turn a closed PR's task back into a retryable repair).
     reserved = (stage_c_worker.REPAIR_INTERRUPTED, stage_c_worker.JOB_UNFINISHED, stage_c_ci.MERGE_NOT_RECORDED,
-                stage_c_worker.PR_CLOSED, "PR_FAILED", "superseded:")
+                stage_c_ci.REFRESH_CONTEXT_NOT_REVIEWED, stage_c_worker.PR_CLOSED, "PR_FAILED", "superseded:")
     if body.error and (body.error.startswith(reserved) or (task.error or "").startswith(reserved)):
         db.rollback()
         raise HTTPException(422, "that error marker is recorded by the worker, not set through the status route")

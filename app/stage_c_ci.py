@@ -34,6 +34,9 @@ from app.commit_statuses import (STATUS_FAILED, STATUS_PAGE, STATUS_QUERY, lates
 
 ACTOR = "stage-c-ci"
 MERGE_NOT_RECORDED = "Merge not recorded: "
+# A refreshed head was merged with the reviewed patch intact, but nobody reviewed it against the changed main:
+# the founder must accept it explicitly (founder-only /tasks/{key}/status); reconciliation never marks it MERGED.
+REFRESH_CONTEXT_NOT_REVIEWED = "Refresh context not reviewed: "
 MAX_REPAIRS = 2
 FAILED = {"failure", "timed_out", "startup_failure"}
 # A fork PR's workflow run that waits for the founder's "Approve and run workflows" has not run: it is pending, never a
@@ -349,20 +352,16 @@ def reconcile_refreshed(db: Session, task: models.Task, request: models.AuditLog
               "merged_by": facts["merged_by"], "merge_method": "squash", "context_review": "not_performed"}
     if not apply:
         return {"outcome": "DRY_RUN", "record": record}
-    event = audit.record(db, actor=ACTOR, action="improvement.refresh_reconciled", entity_type="task",
-                         entity_key=task.key, task_id=task.id,
-                         before={"status": task.status.value, "error": task.error, "blocked_audit_id": block.id},
-                         after=record)
-    db.flush()
-    stage_c.advance(db, task, "MERGED", f"founder (github:{stage_c_merge_gate.FOUNDER}, via founder_github_refreshed)",
-                    {"pr_number": body["pr_number"], "commit": published["commit"],
-                     "final_head": body["final_head"], "refreshed_heads": chain["refreshed_heads"],
-                     "merged_by": facts["merged_by"], "merge_commit": body["merge_commit"],
-                     "branch": "main", "review_audit_id": approval["audit_id"],
-                     "merge_path": "founder_github_refreshed", "reconciliation_audit_id": event.id,
-                     "merge_authorization_id": None})
-    task.status, task.error = enums.TaskStatus.REVIEW, None
-    return {"outcome": "MERGED"}
+    # An identical patch fingerprint and a clean merge prove textual preservation, not behaviour against the
+    # changed main. Without a context review the task stays BLOCKED for the founder's explicit acceptance.
+    before = {"status": task.status.value, "error": task.error, "blocked_audit_id": block.id}
+    task.error = (REFRESH_CONTEXT_NOT_REVIEWED
+                  + "the refreshed head kept the reviewed patch but was not reviewed against the updated main")
+    audit.record(db, actor=ACTOR, action="improvement.refresh_reconciled", entity_type="task",
+                 entity_key=task.key, task_id=task.id, before=before,
+                 after={**record, "status": task.status.value, "stage": stage,
+                        "outcome": "REFRESH_CONTEXT_NOT_REVIEWED"})
+    return {"outcome": "BLOCKED", "reasons": ["REFRESH_CONTEXT_NOT_REVIEWED"]}
 
 
 def ingest(db: Session, task: models.Task, facts: dict, max_repairs: int = MAX_REPAIRS, *,

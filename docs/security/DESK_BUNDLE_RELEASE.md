@@ -18,10 +18,14 @@ running release):
    the same set of files and the same bytes. Otherwise the outcome is `DESK_BUILD_MISMATCH` (or `CHECKS_FAILED` when
    the build fails), the commit is final, and no review is requested.
 3. The manifest carries the proof as
-   `evidence.desk_build = {runner: gateway, sha, desk_tree, files: {path: sha256}, passed: true}`.
-4. Both verifiers (`gateway_approve` and the host's `verify_release`) recompute `desk_tree` and every `app/static`
-   hash from their own clone. They refuse the release, for **every** signer, unless the proof names this commit,
-   this `desk/` tree and exactly those files and hashes.
+   `evidence.desk_build = {runner: gateway, sha, desk_tree, files: {path: sha256}, passed: true, signature}`, where
+   `signature` is the gateway key's SSH signature (namespace `seerxo-desk-build`) over the canonical JSON of the
+   other five fields.
+4. Both verifiers (`gateway_approve` and the host's `verify_release`) verify that signature against the policy's
+   `gateway_key`, then recompute `desk_tree` and every `app/static` hash from their own clone. They refuse the
+   release, for **every** signer, unless the proof is gateway-signed and names this commit, this `desk/` tree and
+   exactly those files and hashes. A founder signature over the manifest does not make an unsigned or forged proof
+   acceptable.
 
 A release that touches neither `desk/` nor `app/static` is unchanged: no header, no proof and the plain diff, so its
 packet is byte-identical to the one the old code builds.
@@ -45,8 +49,9 @@ still needs the founder signature, the independent APPROVE, the identity checks 
   verifies. The LLM could not review the dependency code inside the minified bundle either.
 - **Limit (stated honestly).** The host does not rebuild, because a rebuild runs agent-written build code
   (`vite.config.ts` and npm packages), and that must never run as root on production. The rebuild result is trusted
-  check evidence from the gateway, at the same trust level as `trusted_checks.passed`. A stolen gateway key could
-  forge it, but such a key still cannot ship a HIGH path (`app/static` is HIGH) without the founder's signature.
+  check evidence from the gateway, signed by the gateway key in its own namespace, so no manifest author can supply
+  it. A stolen gateway key could forge it, but such a key still cannot ship a HIGH path (`app/static` is HIGH)
+  without the founder's signature.
 
 ## The checks
 
@@ -56,8 +61,8 @@ still needs the founder signature, the independent APPROVE, the identity checks 
 | `rg.review_diff` / `review_scope` | header + `git diff` with `:(top,literal,exclude)<each generated path>`; `+ desk` after a rebase |
 | `svc.default_desk_build` | exports `desk/` from git objects plus an empty `app/static`, runs `desk_build_command <dir>`, and hashes the output (regular files only) |
 | `svc._tick` | no `desk_build_command` while a proof is required → `WAITING` (no attempt counted); exit 75 or a runner error → bounded retry; failed build → `CHECKS_FAILED`; unequal output → `DESK_BUILD_MISMATCH`; all of these before the review |
-| `rg._check_desk_build` (called from `_check_evidence`) | for every signer: when `required`, a proof with runner, sha, `passed`, `desk_tree` and `files` equal to the verifier's own facts |
-| `scripts/release-gateway-desk-build` | pinned `image@sha256` (root-owned pin file), `--network=none`, read-only, no capabilities, gateway uid, cache mounted read-only, `npm ci --offline --ignore-scripts`, `npm run build`; a missing prerequisite exits 75 |
+| `rg._check_desk_build` (called from `_check_evidence`) | for every signer: when `required`, a proof with exactly runner, sha, `passed`, `desk_tree`, `files` and `signature`; the signature verifies against the policy's `gateway_key` in `seerxo-desk-build`; the fields equal the verifier's own facts |
+| `scripts/release-gateway-desk-build` | pinned `image@sha256` (root-owned pin file), `--network=none`, read-only, no capabilities, gateway uid, cache mounted read-only, `npm ci --offline --ignore-scripts`, `npm run build`; a missing prerequisite exits 75. Root never mounts, writes or reads through the caller's path: `desk/` is read as the gateway uid (`setpriv`) into a fresh root-owned staging dir (`mktemp` under root-owned `/var/lib/release-gateway-desk/stage`); symlinks, hard links and anything but regular files and directories are refused; the container has no writable host mount, builds on a 2 GiB tmpfs and emits `app/static` as a tar on stdout (capped at 64 MiB); the checked regular files are written back as the gateway uid. Unique container `--name`, `timeout -k 15 1500`, and `docker rm -f` on exit, error or signal. `seed` is refused when `SUDO_UID` or `SUDO_USER` is set. |
 
 Tests: `tests/test_desk_bundle_release.py` (real git, the real host step, founder- and gateway-signed refusals).
 
@@ -97,9 +102,18 @@ B and C avoid the public revert; B is cheaper than C. R is the only one that use
 | 2 | **[FOUNDER]** Merge PR-A; merge nothing else before step 6. **[FOUNDER]** `prepare` the images (the image inputs change). | — |
 | 3 | **[FOUNDER]** Sign the queued draft (HIGH: `app/`, `scripts/`). Old verifier, every existing control. | |
 | 4 | **[FOUNDER]** `install-release-bundle.py install <PR-A SHA>`: new verifier and gateway. | — |
-| 5 | **[FOUNDER]** Rebuild set-up: install `scripts/release-gateway-desk-build` as `/usr/local/sbin/release-gateway-desk-build` with a sudoers entry for the gateway user; pin a node 22 image digest in `/etc/release-gateway/desk-build-image` and `docker pull` it; run `release-gateway-desk-build seed <root-owned dir with desk/>` (needs network); add `"desk_build_command": ["/usr/bin/sudo", "-n", "/usr/local/sbin/release-gateway-desk-build"]` to the gateway config. | — |
+| 5 | **[FOUNDER]** Rebuild set-up: install `scripts/release-gateway-desk-build` as `/usr/local/sbin/release-gateway-desk-build` with a sudoers entry for the gateway user (see below); pin a node 22 image digest in `/etc/release-gateway/desk-build-image` and `docker pull` it; from a real root session run `release-gateway-desk-build seed <root-owned dir with desk/>` (needs network; under sudo use `sudo env -u SUDO_UID -u SUDO_USER -u SUDO_GID /usr/local/sbin/release-gateway-desk-build seed <dir>`); add `"desk_build_command": ["/usr/bin/sudo", "-n", "/usr/local/sbin/release-gateway-desk-build"]` to the gateway config. | — |
 | 6 | PR-B onto `main`: the #78 Desk again. The new gateway rebuilds, compares and reviews `desk/` plus the header. | new code: see table |
 | 7 | **[FOUNDER]** `prepare`, then sign the draft (HIGH: `app/static`). | |
+
+Sudoers entry (the gateway's `TemporaryDirectory` lives in its `TMPDIR`, `/tmp` by default; adjust the prefix if
+the gateway unit sets another `TMPDIR`):
+
+    <gateway-user> ALL=(root) NOPASSWD: /usr/local/sbin/release-gateway-desk-build /tmp/gateway-desk-*
+
+The first argument must start with `/tmp/gateway-desk-`, so `seed` cannot be the first argument. A sudoers `*` can
+also match spaces, so this line alone is not a proof; the script independently refuses `seed` whenever `SUDO_UID`
+or `SUDO_USER` is set, and refuses two arguments in build mode.
 
 A later lockfile change misses the read-only cache: the build fails closed until the founder runs `seed` again.
 
@@ -131,4 +145,4 @@ Production changes only when the host applies a signed manifest, so every failur
 | this fix | caab3d3 → `main` + this fix in one release (only possible once the rule is installed) | 638,064 | yes | 410,512 |
 
 Not verified here: the Docker path of `scripts/release-gateway-desk-build` (`npm ci --offline` in the pinned
-image), the real reviewer's verdicts, and how the old Desk renders against the newer backend.
+image, the staging, tmpfs, copy-back and cleanup paths: only `bash -n` and the early refusals are tested), the real reviewer's verdicts, and how the old Desk renders against the newer backend.

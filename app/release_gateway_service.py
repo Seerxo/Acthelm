@@ -376,6 +376,7 @@ def _tick(cfg: Config, *, now, clock, checks, review, fetch, desk_build) -> dict
                            "app/static differs from the rebuild of desk/ at this commit", now)
         desk_proof = {"runner": "gateway", "sha": sha, "desk_tree": generated["desk_tree"],
                       "files": built["files"], "passed": True}
+        desk_proof["signature"] = rg.sign(rg.desk_proof_bytes(desk_proof), cfg.gateway_key, rg.NS_DESK_BUILD)
     nonce = secrets.token_hex(16)
     packet = rg.review_packet(cfg.repository, running, sha, diff, nonce)   # the diff's own base: what runs
     try:
