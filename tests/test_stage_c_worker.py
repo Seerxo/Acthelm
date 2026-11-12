@@ -853,6 +853,43 @@ def test_pausing_during_review_prevents_publishing(monkeypatch, tmp_path):
     assert subprocess.run(["git", "--git-dir", str(remote), "show-ref"], capture_output=True).returncode != 0
 
 
+@pytest.mark.parametrize("value", [None, "", "1", "yes", "TRUE ", "false"])
+def test_publication_is_off_unless_exactly_enabled(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("STAGE_C_PUBLISH_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("STAGE_C_PUBLISH_ENABLED", value)
+    assert stage_c_runner.publication_enabled() is False
+
+
+def test_approved_result_is_held_without_any_push_when_publication_is_off(monkeypatch, tmp_path):
+    remote = pipeline(monkeypatch, tmp_path)
+    monkeypatch.delenv("STAGE_C_PUBLISH_ENABLED")
+    calls = []
+    # The pre-coder published_guard still runs; nothing after approval may touch GitHub or the fork.
+    monkeypatch.setattr(stage_c_worker, "publication_role", lambda *a, **k: calls.append("publication_role"))
+    monkeypatch.setattr(stage_c_runner, "publish", lambda *a, **k: calls.append("publish"))
+    db = _db()
+    task = write_task(db)
+    out = worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+    assert out["verdict"] == "HELD_BEFORE_PUBLISH" and calls == []
+    assert task.status == enums.TaskStatus.WAITING_APPROVAL
+    approval = task.context["improvement"]["approval"]
+    assert task.artifacts["held"] == {"fingerprint": approval["fingerprint"], "review_audit_id": approval["audit_id"]}
+    assert "pr" not in task.artifacts
+    assert subprocess.run(["git", "--git-dir", str(remote), "show-ref"], capture_output=True).returncode != 0
+    # Held is not dispatchable: a second tick does not rerun or publish it.
+    worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+    assert task.status == enums.TaskStatus.WAITING_APPROVAL and calls == []
+
+
+def test_publish_itself_refuses_when_publication_is_off(monkeypatch):
+    monkeypatch.delenv("STAGE_C_PUBLISH_ENABLED")
+    # Defense in depth: even a caller that skipped the worker's hold gets no push, lease or GitHub call.
+    out = stage_c_runner.publish(None, None, None, b"", Path("/nonexistent"), "ext::x", None)
+    assert out == {"outcome": "HELD_BEFORE_PUBLISH"}
+
+
 def test_host_provenance_is_sha_only_and_stale_or_mismatched_evidence_waits(monkeypatch):
     from app import watchdog
     from datetime import timedelta

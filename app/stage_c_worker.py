@@ -401,6 +401,8 @@ def execute(db, task, spec, usable):
                             or task_context_files(task) != job.context
                             or task.objective != original_objective or task.success_criteria != job.success_criteria):
                         out = {"outcome": "WAITING_BEFORE_PUBLISH"}
+                    elif not stage_c_runner.publication_enabled():
+                        out = {"outcome": "HELD_BEFORE_PUBLISH"}
                     else:
                         # Authoritative PR state is re-read before any push or PR update: a merge or
                         # takeover during the review must stop the publication, never extend the PR.
@@ -504,6 +506,16 @@ def execute(db, task, spec, usable):
             task.status = enums.TaskStatus.REVIEW
             task.result = "Stage C PR opened; waiting for CI and the founder"
             task.artifacts = {**(task.artifacts or {}), "pr": out["pr"], "commit": out["commit"], "run_id": run.id}
+        run.status = enums.AgentRunStatus.SUCCEEDED
+        run.supervisor_verdict = enums.SupervisorVerdict.APPROVED
+    elif outcome == "HELD_BEFORE_PUBLISH":
+        # Reviewed and approved, nothing pushed: the founder decides on publication separately.
+        if owns_attempt:
+            approval = task.context["improvement"]["approval"]
+            task.status = enums.TaskStatus.WAITING_APPROVAL
+            task.result = "Stage C review approved; publication is disabled on this host, nothing was pushed"
+            task.artifacts = {**(task.artifacts or {}), "run_id": run.id, "held": {
+                "fingerprint": approval["fingerprint"], "review_audit_id": approval["audit_id"]}}
         run.status = enums.AgentRunStatus.SUCCEEDED
         run.supervisor_verdict = enums.SupervisorVerdict.APPROVED
     elif outcome == "PUBLISHED_PR_REFUSED":
