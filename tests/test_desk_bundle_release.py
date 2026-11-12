@@ -231,3 +231,24 @@ def test_rebase_scope():
     assert scope[:2] == ("--", rg.DEPLOY_PATHS[0]) and rg.DESK_DIR in scope
     assert scope[-2:] == (":(top,literal,exclude)app/static/a", ":(top,literal,exclude)app/static/b")
     assert rg.review_scope({}, g)[:2] == ("--", ":(top)")
+
+
+def _py(code):
+    import sys
+    return [sys.executable, "-c", code]
+
+
+def test_desk_build_output_is_drained_not_kept_and_capped():
+    from app import release_gateway_service as svc
+    noisy = _py("import sys\nwhile True: sys.stderr.write('x' * 65536)")
+    assert svc._run_drained(noisy, timeout=60, cap=1 << 20) == "output"
+    assert svc._run_drained(_py("import sys; print('ok'); sys.exit(3)"), timeout=60, cap=1 << 20) == 3
+    assert svc._run_drained(_py("import time; time.sleep(30)"), timeout=1, cap=1 << 20) == "timeout"
+
+
+def test_a_noisy_desk_build_fails_closed_before_review(hw):
+    packets = capture(hw)
+    desk_commit(hw)
+    hw.cfg.desk_build_command = _py("import sys\nwhile True: sys.stdout.write('y' * 65536)")
+    out = hw.tick()
+    assert out["outcome"] == "CHECKS_FAILED" and "bytes of output" in out["detail"] and packets == []

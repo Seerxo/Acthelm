@@ -19,6 +19,7 @@ import json
 import socket
 import os
 import secrets
+import select
 import stat
 import subprocess
 import sys
@@ -33,6 +34,7 @@ MANIFEST_LIFETIME = timedelta(hours=2)
 REVIEW_TIMEOUT_S = 900
 MAX_BUILD_RECORD = 1 << 20           # a build record is a few KiB; the gateway reads nothing bigger
 DESK_BUILD_UNAVAILABLE = 75          # EX_TEMPFAIL from scripts/release-gateway-desk-build: retried, bounded
+DESK_BUILD_OUTPUT_CAP = 1 << 20      # bytes of build output the gateway drains (never stores); more fails the build
 
 
 class Config:
@@ -179,15 +181,55 @@ def default_desk_build(cfg: Config, sha: str) -> dict:
             target.write_bytes(data)
             target.chmod(0o755 if mode == "100755" else 0o644)
         (root / rg.GENERATED_DIR).mkdir(parents=True)
-        try:
-            r = subprocess.run([*cfg.desk_build_command, d], capture_output=True, text=True, timeout=1800)
-        except subprocess.TimeoutExpired:
+        code = _run_drained([*cfg.desk_build_command, d], timeout=1800, cap=DESK_BUILD_OUTPUT_CAP)
+        if code == "timeout":
             return {"passed": False, "summary": "desk build timed out"}
-        if r.returncode == DESK_BUILD_UNAVAILABLE:   # the wrapper's own prerequisites (image, cache): infrastructure
+        if code == "output":
+            return {"passed": False, "summary": f"desk build wrote more than {DESK_BUILD_OUTPUT_CAP} bytes of output"}
+        if code == DESK_BUILD_UNAVAILABLE:   # the wrapper's own prerequisites (image, cache): infrastructure
             raise RuntimeError("desk build toolchain unavailable")
-        if r.returncode != 0:
-            return {"passed": False, "summary": f"desk build exit {r.returncode}"}
+        if code != 0:
+            return {"passed": False, "summary": f"desk build exit {code}"}
         return {"passed": True, "summary": "exit 0", "files": built_files(root)}
+
+
+def _run_drained(argv: list, *, timeout: float, cap: int):
+    """Run the build with its stdout and stderr drained and discarded, never kept: memory stays bounded whatever the
+    candidate's build prints. Returns the exit code, "timeout", or "output" when more than `cap` bytes arrive. On
+    either failure the pipe is closed first (the wrapper then dies on SIGPIPE and its trap removes the container) and
+    the child is killed if this process may signal it."""
+    import time
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    deadline, seen, verdict = time.monotonic() + timeout, 0, None
+    try:
+        while verdict is None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                verdict = "timeout"
+            elif select.select([p.stdout], [], [], min(left, 1.0))[0]:
+                chunk = os.read(p.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                seen += len(chunk)
+                if seen > cap:
+                    verdict = "output"
+    finally:
+        p.stdout.close()
+        if verdict is not None:
+            try:
+                p.kill()
+            except (PermissionError, ProcessLookupError):
+                pass   # the sudo'd wrapper is root: the closed pipe and its own timeout end it
+    if verdict is not None:
+        try:
+            p.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+        return verdict
+    try:
+        return p.wait(timeout=max(1.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        return "timeout"
 
 
 def built_files(root: Path) -> dict:
