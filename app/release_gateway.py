@@ -191,6 +191,77 @@ def git_blob_sha256(git_dir: Path, sha: str, path: str) -> str | None:
     return hashlib.sha256(out.stdout).hexdigest() if out.returncode == 0 else None
 
 
+# --------------------------------------------------------------------------- generated Desk bundle
+# app/static is written by `npm run build --prefix desk` (vite-plugin-singlefile): desk.html is ~1.3 MB of minified
+# code that no reviewer can read and that no reviewer input can hold once it changes. When desk/ or app/static
+# changes, the reviewer reads the desk/ sources instead, and the release needs the gateway's rebuild of desk/ at the
+# exact commit, byte-equal to every app/static file (docs/security/DESK_BUNDLE_RELEASE.md). Both verifiers compute
+# all of this from their own clone; nothing the manifest says about it is trusted except the rebuild's own result.
+GENERATED_DIR = "app/static"
+DESK_DIR = "desk"
+
+
+def tree_blobs(git_dir: Path, sha: str, prefix: str):
+    """(path, mode, bytes) of every file under `prefix` at `sha`, read from git objects (no .gitattributes, no
+    checkout). Only regular files: a symlink, submodule or odd path is refused (a build never needs one)."""
+    out = subprocess.run(["git", "-C", str(git_dir), "-c", "core.quotePath=false", "ls-tree", "-r", "-z", "--full-tree",
+                          sha, "--", prefix], check=True, capture_output=True).stdout
+    for entry in (e for e in out.split(b"\0") if e):
+        meta, raw = entry.split(b"\t", 1)
+        mode, _kind, obj = meta.decode().split()
+        path = raw.decode("utf-8", "surrogateescape")
+        if mode not in ("100644", "100755") or any(c in ("", ".", "..") for c in path.split("/")):
+            raise Refused(f"{path} under {prefix}/ is not a plain regular file")
+        yield path, mode, subprocess.run(["git", "-C", str(git_dir), "cat-file", "blob", obj], check=True,
+                                         capture_output=True).stdout
+
+
+def generated_facts(git_dir: Path, parent: str, sha: str) -> dict:
+    """What a verifier knows about the generated files from its own clone: `required` is True when desk/ or app/static
+    differs between what runs and the candidate; `files` is {path: sha256} of app/static at the candidate."""
+    def files(rev):
+        return {p: hashlib.sha256(data).hexdigest() for p, _m, data in tree_blobs(git_dir, rev, GENERATED_DIR)}
+
+    def desk_tree(rev):
+        out = subprocess.run(["git", "-C", str(git_dir), "ls-tree", "-z", "--full-tree", rev, "--", DESK_DIR],
+                             check=True, capture_output=True).stdout.rstrip(b"\0").decode()
+        meta = out.split("\t", 1)[0].split()
+        return meta[2] if len(meta) == 3 and meta[:2] == ["040000", "tree"] else None
+
+    old, new = files(parent), files(sha)
+    tree = desk_tree(sha)
+    return {"required": old != new or desk_tree(parent) != tree, "desk_tree": tree, "files": new,
+            "parent_files": old}
+
+
+def review_scope(state: dict, generated: dict) -> tuple[str, ...]:
+    """Pathspec of the reviewed diff: diff_scope, plus the desk/ sources after a rebase, minus exactly the generated
+    files (each named in the header the reviewer reads) when a rebuild proves them."""
+    scope = diff_scope(state)
+    if not generated["required"]:
+        return scope
+    paths = sorted(set(generated["files"]) | set(generated["parent_files"]))
+    include = (*scope[1:], DESK_DIR) if scope else (":(top)",)
+    return ("--", *include, *(f":(top,literal,exclude){p}" for p in paths))
+
+
+def review_diff(git_dir: Path, parent: str, sha: str, state: dict, generated: dict) -> str:
+    """The exact text the reviewer must see and every verifier re-hashes. Unchanged desk/ and app/static: the plain
+    release diff. Otherwise a header naming each generated file and its sha256 (computed here, never taken from the
+    manifest) followed by the diff without them; the desk/ sources that produce them stay in the diff."""
+    diff = git_release_diff(git_dir, parent, sha, review_scope(state, generated))
+    if not generated["required"]:
+        return diff
+    old, new = generated["parent_files"], generated["files"]
+    lines = ["# Generated files, not shown below: app/static is built from desk/ by `npm ci` and `npm run build "
+             "--prefix desk`.",
+             f"# The release gateway rebuilt it offline from desk/ at this commit (desk tree {generated['desk_tree']}) "
+             "and the release is refused unless every file below is byte-identical to that rebuild.",
+             "# Review the desk/ sources in the diff below; they are what produces these bytes."]
+    lines += [f"# generated {p} {old.get(p, 'absent')} -> {new.get(p, 'absent')}" for p in sorted(set(old) | set(new))]
+    return "\n".join(lines) + "\n" + diff
+
+
 _FUNCTION_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 _COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
@@ -560,7 +631,26 @@ def verify_review(review, packet: dict, policy: dict, now: datetime) -> dict:
     return att
 
 
-def _check_evidence(m: dict, policy: dict, diff, now: datetime, base: str | None = None) -> None:
+def _check_desk_build(m: dict, generated) -> None:
+    """For every signer: when desk/ or app/static changes, the gateway's rebuild of desk/ at this commit must have
+    produced exactly the app/static files this verifier hashed from its own clone (same set, same bytes). The host
+    cannot rebuild (that runs agent-written build code); the rebuild result is trusted-check evidence, like
+    `trusted_checks.passed`, and the reviewed packet's header names the same hashes."""
+    if not isinstance(generated, dict) or not isinstance(generated.get("files"), dict):
+        raise Refused("the verifier could not read the generated app/static files")
+    if generated.get("required") is False:
+        return
+    proof = m["evidence"].get("desk_build")
+    if (not isinstance(proof, dict) or proof.get("runner") != "gateway" or proof.get("sha") != m["sha"]
+            or proof.get("passed") is not True):
+        raise Refused("no passing gateway rebuild of desk/ for this exact commit")
+    if not isinstance(generated.get("desk_tree"), str) or proof.get("desk_tree") != generated["desk_tree"]:
+        raise Refused("the desk/ rebuild was made from other sources than this commit's desk/")
+    if proof.get("files") != generated["files"]:
+        raise Refused("the generated app/static files differ from the rebuild of the reviewed desk/ sources")
+
+
+def _check_evidence(m: dict, policy: dict, diff, now: datetime, base: str | None = None, generated=None) -> None:
     """Evidence must be about THIS commit and payload: the gateway's own checks, and a signed independent review of
     the exact diff from the applied release (`diff` is computed by whoever verifies, never taken from the manifest).
     CI results from repository workflows and review rows in the agents' database are not accepted here."""
@@ -569,6 +659,7 @@ def _check_evidence(m: dict, policy: dict, diff, now: datetime, base: str | None
     if (checks.get("runner") != "gateway" or checks.get("sha") != m["sha"]
             or checks.get("payload_digest") != m["payload_digest"] or checks.get("passed") is not True):
         raise Refused("no passing trusted checks run by the gateway for this exact commit and payload")
+    _check_desk_build(m, generated)
     review = m["evidence"].get("review")
     nonce = review.get("nonce") if isinstance(review, dict) else None
     if not isinstance(nonce, str) or not re.fullmatch(r"[0-9a-f]{32,64}", nonce):
@@ -590,7 +681,7 @@ def _check_time(m: dict, now: datetime) -> None:
         raise Refused("manifest lifetime exceeds the maximum")
 
 
-def gateway_approve(manifest: dict, policy: dict, *, now: datetime, diff: str) -> None:
+def gateway_approve(manifest: dict, policy: dict, *, now: datetime, diff: str, generated: dict) -> None:
     """What the gateway service checks before it signs a LOW-risk release on its own. Raises Refused otherwise.
     The host re-checks all of it, so a gateway bug or a stolen gateway key still cannot ship a HIGH-risk change."""
     _check_shape(manifest)
@@ -605,7 +696,7 @@ def gateway_approve(manifest: dict, policy: dict, *, now: datetime, diff: str) -
     if classify(manifest["changed_paths"], policy) != "low":
         raise Refused("high-risk change: needs the founder's signature")
     _check_time(manifest, now)
-    _check_evidence(manifest, policy, diff, now)      # the gateway never signs after a rebase: parent is what runs
+    _check_evidence(manifest, policy, diff, now, generated=generated)   # never after a rebase: parent is what runs
 
 
 # --------------------------------------------------------------------------- host verifier
@@ -678,7 +769,7 @@ def verify_release(manifest_bytes: bytes, signature: str, *, policy: dict, found
                    state: dict, now: datetime, history=None) -> dict:
     """The production host's decision. `host_facts` are computed by the host from its own fetch of the commit:
     {"repository", "branch", "sha", "payload_digest", "changed_paths" (git_changed_paths), "ancestor_of_parent",
-     "diff" (git_release_diff from parent_sha to sha)}.
+     "diff" (review_diff from the running release to sha), "generated" (generated_facts)}.
     `state` is the host's root-owned ledger (see `release_transaction`). With no applied release recorded, only the
     founder may sign: a lost or deleted ledger never re-opens automatic release. `history` loads the host's
     append-only release history; it is read only for a manifest that declares `rollback_to` (see _check_rollback).
@@ -720,7 +811,7 @@ def verify_release(manifest_bytes: bytes, signature: str, *, policy: dict, found
     if sorted(host_facts.get("changed_paths") or []) != sorted(m["changed_paths"]):
         raise Refused("changed paths differ from the host's own diff")
     _check_time(m, now)
-    _check_evidence(m, policy, host_facts.get("diff"), now, state["last_sha"])
+    _check_evidence(m, policy, host_facts.get("diff"), now, state["last_sha"], host_facts.get("generated"))
     if ROLLBACK_FIELD in m:
         _check_rollback(m, host_facts, state, history)
     else:
