@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Offline rebuild of app/static from desk/ for the release gateway (docs/security/DESK_BUNDLE_RELEASE.md).
+# Founder-installed as /usr/local/sbin/release-gateway-desk-build (root:root 0755) and allowed to the gateway user
+# by sudoers, exactly like release-gateway-checks. The gateway calls it as `desk_build_command` with one argument: its
+# own fresh directory holding only desk/ (read from git objects) and an empty app/static. It never sees the
+# committed bundle. The gateway hashes what lands in app/static and compares; this script decides nothing.
+#
+#   release-gateway-desk-build <dir>          build: pinned node image, --network=none, npm ci --offline, npm run build
+#   release-gateway-desk-build seed <dir>     founder only, needs network: fill the npm cache from <dir>/desk's lockfile
+#
+# Exit 75 (EX_TEMPFAIL) = a prerequisite of this host is missing (image pin, image, cache): the gateway retries,
+# bounded, and never treats it as a pass. Any other non-zero exit is a failed build of that commit.
+set -euo pipefail
+
+PIN_FILE=/etc/release-gateway/desk-build-image     # one line: <image>@sha256:<64 hex>, root-owned, founder-set
+CACHE=/var/lib/release-gateway-desk/npm-cache      # root-owned; filled only by `seed`; mounted read-only for builds
+
+unavailable() { echo "release-gateway-desk-build: $*" >&2; exit 75; }
+
+[[ -f $PIN_FILE && ! -L $PIN_FILE && $(stat -c %u "$PIN_FILE") == 0 ]] || unavailable "no root-owned image pin"
+IMAGE=$(<"$PIN_FILE")
+[[ $IMAGE =~ ^[a-z0-9./_-]+(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$ ]] || unavailable "image pin is not a digest"
+docker image inspect "$IMAGE" >/dev/null 2>&1 || unavailable "pinned image is not present (founder: docker pull)"
+
+mode=build
+if [[ ${1:-} == seed ]]; then mode=seed; shift; fi
+[[ $# == 1 ]] || { echo "usage: $0 [seed] <dir>" >&2; exit 2; }
+work=$(realpath -e -- "$1")
+[[ -d $work/desk && -f $work/desk/package-lock.json ]] || { echo "no desk/package-lock.json in $work" >&2; exit 2; }
+
+if [[ $mode == seed ]]; then
+  # Founder only: the lockfile to seed from must sit in a root-owned directory, which the gateway user cannot make.
+  # (npm verifies every cached package against the lockfile's integrity hash, so a cache cannot change a build.)
+  [[ $EUID == 0 && $(stat -c %u "$work") == 0 && $(stat -c %u "$work/desk/package-lock.json") == 0 ]] \
+    || { echo "seed is a founder step: <dir> and its lockfile must be root-owned" >&2; exit 2; }
+  install -d -m 0755 -o root -g root "$CACHE"
+  exec docker run --rm --cap-drop=ALL --security-opt=no-new-privileges --read-only --tmpfs /tmp:rw,exec,size=2g \
+    -e HOME=/tmp -v "$CACHE:/cache" -v "$work/desk:/src:ro" "$IMAGE" \
+    sh -euc 'cp -R /src /tmp/desk && cd /tmp/desk && npm ci --cache /cache --ignore-scripts --no-audit --no-fund'
+fi
+
+# The gateway's own directory: named by default_desk_build, owned by the calling (gateway) user.
+[[ $(basename "$work") == gateway-desk-* && $(stat -c %u "$work") == "${SUDO_UID:-x}" ]] \
+  || { echo "refusing a directory the gateway did not create: $work" >&2; exit 2; }
+[[ -d $work/app/static && -z $(ls -A "$work/app/static") ]] || { echo "app/static must start empty" >&2; exit 2; }
+[[ -d $CACHE && ! -L $CACHE && $(stat -c %u "$CACHE") == 0 ]] || unavailable "no root-owned npm cache (founder: seed)"
+
+exec docker run --rm --network=none --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  --pids-limit=1024 --memory=4g --user "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" \
+  --tmpfs /tmp:rw,exec,size=2g -e HOME=/tmp -e npm_config_update_notifier=false \
+  -v "$CACHE:/cache:ro" -v "$work:/w" -w /w/desk "$IMAGE" \
+  sh -euc 'cp -R /cache /tmp/npm-cache && npm ci --offline --cache /tmp/npm-cache --ignore-scripts --no-audit --no-fund && npm run build'
