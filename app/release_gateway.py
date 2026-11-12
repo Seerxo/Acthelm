@@ -220,9 +220,15 @@ def tree_blobs(git_dir: Path, sha: str, prefix: str):
 
 def generated_facts(git_dir: Path, parent: str, sha: str) -> dict:
     """What a verifier knows about the generated files from its own clone: `required` is True when desk/ or app/static
-    differs between what runs and the candidate; `files` is {path: sha256} of app/static at the candidate."""
-    def files(rev):
-        return {p: hashlib.sha256(data).hexdigest() for p, _m, data in tree_blobs(git_dir, rev, GENERATED_DIR)}
+    differs between what runs and the candidate; `files` is {path: sha256} of app/static at the candidate. The proof
+    hashes bytes only and review_scope hides these files, so any candidate mode but 100644 is refused here."""
+    def files(rev, candidate=False):
+        out = {}
+        for p, mode, data in tree_blobs(git_dir, rev, GENERATED_DIR):
+            if candidate and mode != "100644":
+                raise Refused(f"{p} is mode {mode}: generated app/static files must be 100644")
+            out[p] = hashlib.sha256(data).hexdigest()
+        return out
 
     def desk_tree(rev):
         out = subprocess.run(["git", "-C", str(git_dir), "ls-tree", "-z", "--full-tree", rev, "--", DESK_DIR],
@@ -230,7 +236,7 @@ def generated_facts(git_dir: Path, parent: str, sha: str) -> dict:
         meta = out.split("\t", 1)[0].split()
         return meta[2] if len(meta) == 3 and meta[:2] == ["040000", "tree"] else None
 
-    old, new = files(parent), files(sha)
+    old, new = files(parent), files(sha, candidate=True)
     tree = desk_tree(sha)
     return {"required": old != new or desk_tree(parent) != tree, "desk_tree": tree, "files": new,
             "parent_files": old}

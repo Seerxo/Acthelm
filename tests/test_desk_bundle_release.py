@@ -125,6 +125,58 @@ def test_script_refuses_symlink(tmp_path):
     assert r.returncode == 2 and "symlink" in r.stderr
 
 
+def tar_check(tmp_path, cap, *members):
+    """Run the script's own pre-extraction validator (TAR_CHECK) on a tar of `members` (TarInfo, data)."""
+    import io
+    import re
+    import tarfile
+    code = re.search(r"TAR_CHECK=\$\(cat <<'PY'\n(.*?)\nPY\n\)", SCRIPT.read_text(), re.S).group(1)
+    path = tmp_path / "t.tar"
+    with tarfile.open(path, "w", format=tarfile.PAX_FORMAT) as t:
+        for info, data in members:
+            t.addfile(info, io.BytesIO(data) if data else None)
+    return subprocess.run(["python3", "-I", "-c", code, str(path), str(cap)], capture_output=True).returncode
+
+
+def tar_member(name, data=b"", **attrs):
+    import tarfile
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    for k, v in attrs.items():
+        setattr(info, k, v)
+    return info, data
+
+
+@pytest.mark.parametrize("case", ["ok", "sparse", "oversize", "count", "link", "fifo", "abs", "dotdot"])
+def test_script_tar_check(tmp_path, case):
+    import tarfile
+    members = {
+        "ok": [tar_member("d", type=tarfile.DIRTYPE), tar_member("d/a", b"x" * 10)],
+        "sparse": [tar_member("a", b"x", pax_headers={"GNU.sparse.map": "0,1", "GNU.sparse.size": "1"})],
+        "oversize": [tar_member("a", b"x" * 60), tar_member("b", b"x" * 60)],
+        "count": [tar_member(f"f{i}") for i in range(20001)],
+        "link": [tar_member("a", type=tarfile.SYMTYPE, linkname="/etc/passwd")],
+        "fifo": [tar_member("a", type=tarfile.FIFOTYPE)],
+        "abs": [tar_member("/a", b"x")],
+        "dotdot": [tar_member("d/../../a", b"x")],
+    }[case]
+    assert (tar_check(tmp_path, 100, *members) == 0) is (case == "ok")
+
+
+def test_executable_static_refused(tmp_path):
+    """The proof hashes bytes only and review_scope hides app/static: a mode change must not slip through."""
+    w = World(tmp_path)
+    (w.work / "app/static/desk.html").chmod(0o755)
+    sh(w.work, "git", "add", "-A")
+    sh(w.work, "git", "commit", "-qm", "exec")
+    sha = sh(w.work, "git", "rev-parse", "HEAD").strip()
+    with pytest.raises(rg.Refused, match="100755"):
+        rg.generated_facts(w.work, w.base, sha)
+    w.push()
+    out = w.tick()
+    assert out["outcome"] == "REFUSED" and "100644" in out["detail"]
+
+
 @pytest.mark.parametrize("case", ["bundle", "stale", "extra"])
 def test_mismatch(hw, case):
     packets = capture(hw)

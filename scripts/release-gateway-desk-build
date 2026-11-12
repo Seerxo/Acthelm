@@ -83,9 +83,24 @@ name=release-gateway-desk-build-${stage##*/b.}
 
 # A tar from untrusted hands: at most `cap` bytes, only regular files and directories, no absolute or `..` names,
 # extracted by root into `dest` (a fresh root-owned dir) and re-checked on disk.
+# Validated from headers alone before anything is written: the size cap and ulimit -f bound neither the member count
+# nor sparse members, so the sum of sizes, the count and the member types are checked here first.
+TAR_CHECK=$(cat <<'PY'
+import sys, tarfile
+cap, total = int(sys.argv[2]), 0
+with tarfile.open(sys.argv[1], "r:") as t:
+    for n, m in enumerate(t, 1):
+        total += m.size
+        parts = m.name.split("/")
+        if (n > 20000 or total > cap or m.type not in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE)
+                or m.issparse() or m.name.startswith("/") or ".." in parts):
+            sys.exit(f"refused member {n}: {m.name!r}")
+PY
+)
 untar_checked() {  # <tar> <cap> <dest>
   local tar=$1 cap=$2 dest=$3
   (( $(stat -c %s "$tar") <= cap )) || refuse "archive exceeds $cap bytes"
+  python3 -I -c "$TAR_CHECK" "$tar" "$cap" || refuse "archive failed validation (types, sparse, names, size or count)"
   # (no grep -q: under pipefail an early grep exit would SIGPIPE tar and invert the check)
   [[ -z $(tar -tvf "$tar" | grep -v '^[-d]') ]] || refuse "archive holds something other than regular files and directories"
   [[ -z $(tar -tf "$tar" | grep -E '^/|(^|/)\.\.(/|$)') ]] || refuse "archive holds an absolute or .. path"
@@ -118,6 +133,8 @@ status=("${PIPESTATUS[@]}")
 set -e
 [[ ${status[0]} == 0 ]] || { echo "release-gateway-desk-build: build failed (exit ${status[0]})" >&2; exit 1; }
 untar_checked "$stage/out.tar" "$OUT_CAP" "$stage/out"
+find "$stage/out" -type f -exec chmod 0644 -- {} +   # git must see 100644 (generated_facts refuses any other mode)
+find "$stage/out" -type d -exec chmod 0755 -- {} +
 
 # Out: only the checked regular files, written as the caller into its own app/static.
 tar -C "$stage/out" -cf - . | as_caller tar -C "$work/app/static" -xf - --no-same-owner --no-same-permissions
