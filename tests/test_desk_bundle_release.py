@@ -4,12 +4,16 @@ rebuild of desk/ at that exact commit, for every signer. Real git repositories a
 import hashlib
 import json
 import os
+import shutil
 
 import pytest
 
 from app import release_gateway as rg
 from tests.test_release_host import hw, step, tmp_path  # noqa: F401  (fixtures)
 from tests.test_release_gateway_service import World, sh
+
+# Same guard as test_release_gateway_service (whose World this uses): the gateway checks image has no ssh-keygen.
+pytestmark = pytest.mark.skipif(not (shutil.which("ssh-keygen") and shutil.which("git")), reason="needs git, ssh-keygen")
 
 
 def capture(w):
