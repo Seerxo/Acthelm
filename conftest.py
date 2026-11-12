@@ -16,3 +16,11 @@ def pytest_collection_modifyitems(config, items):
     total = sum(len(("PASSED " + item.nodeid + "\n").encode()) for item in items)
     if total > MAX_PASSED_LINES:
         raise pytest.UsageError(f"`PASSED <id>` lines total {total} bytes, over {MAX_PASSED_LINES}: shorten ids")
+
+
+@pytest.fixture(autouse=True)
+def _stage_c_publication_on(monkeypatch):
+    """Production default holds approved Stage C results (STAGE_C_PUBLISH_ENABLED unset). The publication tests
+    exercise the push path, so it is on here; tests of the hold delete it explicitly. Root conftest, so
+    evals/ (which call publish() directly) get it too."""
+    monkeypatch.setenv("STAGE_C_PUBLISH_ENABLED", "true")

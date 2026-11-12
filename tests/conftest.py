@@ -51,9 +51,3 @@ def _fake_tmpfs(monkeypatch):
     monkeypatch.setattr(providers, "swap_off", lambda: True)   # tests with swap on set it back explicitly
     return real
 
-
-@pytest.fixture(autouse=True)
-def _stage_c_publication_on(monkeypatch):
-    """Production default holds approved Stage C results (STAGE_C_PUBLISH_ENABLED unset). The publication tests
-    exercise the push path, so it is on here; tests of the hold delete it explicitly."""
-    monkeypatch.setenv("STAGE_C_PUBLISH_ENABLED", "true")
