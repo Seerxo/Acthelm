@@ -195,11 +195,14 @@ def default_desk_build(cfg: Config, sha: str) -> dict:
 
 def _run_drained(argv: list, *, timeout: float, cap: int):
     """Run the build with its stdout and stderr drained and discarded, never kept: memory stays bounded whatever the
-    candidate's build prints. Returns the exit code, "timeout", or "output" when more than `cap` bytes arrive. On
-    either failure the pipe is closed first (the wrapper then dies on SIGPIPE and its trap removes the container) and
-    the child is killed if this process may signal it."""
+    candidate's build prints. Returns the exit code, "timeout", or "output" when more than `cap` bytes arrive. The
+    child runs in its own process group; on any failure (cap, deadline, or a child that closed its output but keeps
+    running) the pipe is closed and the whole group is killed and reaped. A sudo'd wrapper is root and cannot be
+    signalled from here: the closed pipe (SIGPIPE) and the wrapper's own timeout and trap end it."""
+    import signal
     import time
-    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                         start_new_session=True)
     deadline, seen, verdict = time.monotonic() + timeout, 0, None
     try:
         while verdict is None:
@@ -209,27 +212,28 @@ def _run_drained(argv: list, *, timeout: float, cap: int):
             elif select.select([p.stdout], [], [], min(left, 1.0))[0]:
                 chunk = os.read(p.stdout.fileno(), 65536)
                 if not chunk:
-                    break
+                    break                 # output closed: the child may still be running, waited on below
                 seen += len(chunk)
                 if seen > cap:
                     verdict = "output"
+        if verdict is None:
+            try:
+                return p.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                verdict = "timeout"
+        return verdict
     finally:
         p.stdout.close()
-        if verdict is not None:
+        if p.poll() is None:
+            for kill in (lambda: os.killpg(p.pid, signal.SIGKILL), p.kill):
+                try:
+                    kill()
+                except (PermissionError, ProcessLookupError):
+                    pass
             try:
-                p.kill()
-            except (PermissionError, ProcessLookupError):
-                pass   # the sudo'd wrapper is root: the closed pipe and its own timeout end it
-    if verdict is not None:
-        try:
-            p.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            pass
-        return verdict
-    try:
-        return p.wait(timeout=max(1.0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        return "timeout"
+                p.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
 
 
 def built_files(root: Path) -> dict:

@@ -246,6 +246,30 @@ def test_desk_build_output_is_drained_not_kept_and_capped():
     assert svc._run_drained(_py("import time; time.sleep(30)"), timeout=1, cap=1 << 20) == "timeout"
 
 
+def test_desk_build_that_closes_output_and_hangs_is_killed_with_its_children(tmp_path):
+    """EOF on the pipe is not the end of the build: a child (and its own child) that close their output and keep
+    running are timed out, and the whole process group is killed and reaped."""
+    import time
+    from app import release_gateway_service as svc
+    pidfile = tmp_path / "grandchild.pid"
+    code = ("import os, subprocess, sys, time\n"
+            f"g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], stdout=subprocess.DEVNULL, "
+            f"stderr=subprocess.DEVNULL)\nopen({str(pidfile)!r}, 'w').write(str(g.pid))\n"
+            "os.close(1); os.close(2)\ntime.sleep(60)")
+    started = time.monotonic()
+    assert svc._run_drained(_py(code), timeout=2, cap=1 << 20) == "timeout"
+    assert time.monotonic() - started < 20
+    grandchild = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(grandchild, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("the build's child process survived the timeout")
+
+
 def test_a_noisy_desk_build_fails_closed_before_review(hw):
     packets = capture(hw)
     desk_commit(hw)
