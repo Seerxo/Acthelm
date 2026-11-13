@@ -146,7 +146,7 @@ function FocusPortfolio() {
               <span className="text-xs font-medium text-muted-foreground">Priority {index + 1}</span>
               <h3 className="text-base font-semibold">{group.label}</h3>
             </div>
-            <Status value={group.projects.length ? "ACTIVE" : "UNKNOWN"} />
+            <span className="text-xs text-muted-foreground">{group.projects.length ? "Registered" : "Not registered"}</span>
           </div>
           <p className="text-xs text-muted-foreground">{group.purpose}</p>
           {!d.catalog ? <p className="text-xs text-warning">Project catalog unavailable; not verified.</p>
