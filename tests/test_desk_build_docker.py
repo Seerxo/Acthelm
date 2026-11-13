@@ -54,8 +54,12 @@ def host():
     pulled_id = None   # the image is removed only if this fixture pulled it; a pre-existing image is never touched
     try:
         if sudo("docker", "image", "inspect", IMAGE, check=False).returncode != 0:
+            # The reference may be missing while its image is present (untagged): snapshot every local image id
+            # first (check=True: fail closed) and own the image only if the pull created a new id.
+            before = set(sudo("docker", "images", "-aq", "--no-trunc").stdout.split())
             sudo("docker", "pull", "-q", IMAGE, timeout=600)
-            pulled_id = sudo("docker", "image", "inspect", "-f", "{{.Id}}", IMAGE).stdout.strip()
+            new_id = sudo("docker", "image", "inspect", "-f", "{{.Id}}", IMAGE).stdout.strip()
+            pulled_id = None if new_id in before else new_id
         created.append(Path(sudo("mktemp", "-d", "/root/desk-it-seed.XXXXXX").stdout.strip()))
         seed = created[-1]
         sudo("install", "-m", "0755", "-o", "root", "-g", "root", str(SCRIPT), str(INSTALLED))
