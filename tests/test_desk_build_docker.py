@@ -50,10 +50,12 @@ def host():
     for path in (PIN_FILE.parent, STATE, INSTALLED):
         if sudo("test", "-e", str(path), check=False).returncode == 0 or path.is_symlink():
             pytest.fail(f"{path} already exists on this host: not touching it")
-    if sudo("docker", "image", "inspect", IMAGE, check=False).returncode != 0:
-        sudo("docker", "pull", "-q", IMAGE, timeout=600)
     created = []   # only what this fixture made, removed in reverse order
+    pulled_id = None   # the image is removed only if this fixture pulled it; a pre-existing image is never touched
     try:
+        if sudo("docker", "image", "inspect", IMAGE, check=False).returncode != 0:
+            sudo("docker", "pull", "-q", IMAGE, timeout=600)
+            pulled_id = sudo("docker", "image", "inspect", "-f", "{{.Id}}", IMAGE).stdout.strip()
         created.append(Path(sudo("mktemp", "-d", "/root/desk-it-seed.XXXXXX").stdout.strip()))
         seed = created[-1]
         sudo("install", "-m", "0755", "-o", "root", "-g", "root", str(SCRIPT), str(INSTALLED))
@@ -62,9 +64,9 @@ def host():
         created.append(PIN_FILE.parent)
         sudo("mkdir", "-m", "0755", str(STATE))
         created.append(STATE)
+        created.append(PIN_FILE)   # registered before writing: a half-written pin is still removed
         subprocess.run(["sudo", "-n", "tee", str(PIN_FILE)], input=IMAGE + "\n", check=True, capture_output=True,
                        text=True)
-        created.append(PIN_FILE)
         sudo("cp", "-R", str(ROOT / "desk"), f"{seed}/desk")
         sudo("chown", "-R", "root:root", str(seed))
         yield seed
@@ -76,6 +78,8 @@ def host():
                 sudo("rm", "-f", str(path), check=False)
             else:   # the seed dir, the installed wrapper and STATE (its npm cache and stage) are all ours
                 sudo("rm", "-rf", "--", str(path), check=False)
+        if pulled_id:   # no -f: docker refuses while any container uses it or another tag still references it
+            sudo("docker", "image", "rm", pulled_id, check=False)
 
 
 def caller_dir(src: Path) -> Path:
