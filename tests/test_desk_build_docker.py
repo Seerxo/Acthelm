@@ -45,21 +45,37 @@ def host():
             pytest.fail(f"opted in but {tool} is missing")
     if sudo("true", check=False).returncode != 0:
         pytest.fail("opted in but passwordless sudo is unavailable")
-    if PIN_FILE.exists() or STATE.exists() or INSTALLED.exists():
-        pytest.fail("a desk-build setup already exists on this host: not touching it")
+    # Checked as root (a 0700 root dir would hide its contents from us). Any existing /etc/release-gateway is a real
+    # gateway's config: the test neither writes into it nor removes it, so it refuses to run at all.
+    for path in (PIN_FILE.parent, STATE, INSTALLED):
+        if sudo("test", "-e", str(path), check=False).returncode == 0 or path.is_symlink():
+            pytest.fail(f"{path} already exists on this host: not touching it")
     if sudo("docker", "image", "inspect", IMAGE, check=False).returncode != 0:
         sudo("docker", "pull", "-q", IMAGE, timeout=600)
-    seed = Path(sudo("mktemp", "-d", "/root/desk-it-seed.XXXXXX").stdout.strip())
+    created = []   # only what this fixture made, removed in reverse order
     try:
+        created.append(Path(sudo("mktemp", "-d", "/root/desk-it-seed.XXXXXX").stdout.strip()))
+        seed = created[-1]
         sudo("install", "-m", "0755", "-o", "root", "-g", "root", str(SCRIPT), str(INSTALLED))
-        sudo("install", "-d", "-m", "0755", "-o", "root", "-g", "root", str(PIN_FILE.parent), str(STATE))
+        created.append(INSTALLED)
+        sudo("mkdir", "-m", "0755", str(PIN_FILE.parent))   # plain mkdir: fails rather than adopt an existing dir
+        created.append(PIN_FILE.parent)
+        sudo("mkdir", "-m", "0755", str(STATE))
+        created.append(STATE)
         subprocess.run(["sudo", "-n", "tee", str(PIN_FILE)], input=IMAGE + "\n", check=True, capture_output=True,
                        text=True)
+        created.append(PIN_FILE)
         sudo("cp", "-R", str(ROOT / "desk"), f"{seed}/desk")
         sudo("chown", "-R", "root:root", str(seed))
         yield seed
     finally:
-        sudo("rm", "-rf", str(seed), str(STATE), str(PIN_FILE.parent), str(INSTALLED), check=False)
+        for path in reversed(created):
+            if path == PIN_FILE.parent:
+                sudo("rmdir", str(path), check=False)   # only if still empty: never deletes files it did not create
+            elif path == PIN_FILE:
+                sudo("rm", "-f", str(path), check=False)
+            else:   # the seed dir, the installed wrapper and STATE (its npm cache and stage) are all ours
+                sudo("rm", "-rf", "--", str(path), check=False)
 
 
 def caller_dir(src: Path) -> Path:
