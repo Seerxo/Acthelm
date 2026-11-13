@@ -1,6 +1,7 @@
 // Business numbers with provenance only: a unit with no reported metric says "no verified
 // source", never 0. Every value carries its source and age.
 import { pageTitle } from "@/lib/nav"
+import { focusPortfolio } from "@/lib/focus-portfolio"
 import type { Unit } from "@/lib/api"
 import { ago, fmtNum, humanize, isOpen, metricName, reading, subjects, usd, when } from "@/lib/format"
 import { dataState, dataSummary, freshLabel, isUnverified, staleSuffix } from "@/lib/freshness"
@@ -130,6 +131,53 @@ export function BusinessTable({ only }: { only?: Unit[] } = {}) {
   </>
 }
 
+/** Founder focus: only registered projects and real task/goal evidence appear here.
+ * Project and business-unit keys remain distinct: the catalog is the authority. */
+function FocusPortfolio() {
+  const d = useData()
+  const { open, go } = useDesk()
+  const groups = focusPortfolio(d.catalog, d.tasks)
+  return <Section title="Execution focus" description="Three founder priorities · linked only to recorded projects, goals, and tasks">
+    <div className="grid gap-3 lg:grid-cols-3">
+      {groups.map((group, index) => (
+        <div key={group.key} className="grid content-start gap-3 rounded-xl border border-border/70 p-4">
+          <div className="flex items-start justify-between gap-2">
+            <div className="grid gap-1">
+              <span className="text-xs font-medium text-muted-foreground">Priority {index + 1}</span>
+              <h3 className="text-base font-semibold">{group.label}</h3>
+            </div>
+            <Status value={group.projects.length ? "ACTIVE" : "UNKNOWN"} />
+          </div>
+          <p className="text-xs text-muted-foreground">{group.purpose}</p>
+          {!d.catalog ? <p className="text-xs text-warning">Project catalog unavailable; not verified.</p>
+            : !group.projects.length ? <p className="text-xs text-warning">No matching project registered. Integration not activated.</p>
+            : <>
+              <div className="grid gap-1.5 text-xs">
+                <span>{group.projects.length} registered project{group.projects.length === 1 ? "" : "s"} · {group.goals.length} goals</span>
+                <span>{group.openTasks.length} open tasks{group.attention.length > 0 ? ` · ${group.attention.length} need attention` : ""}</span>
+              </div>
+              {group.projects.map(p => (
+                <button key={p.key} type="button" onClick={() => { if (p.business_unit) go("project", p.business_unit) }}
+                  disabled={!p.business_unit}
+                  className="min-h-9 rounded-md border px-3 py-2 text-left text-xs hover:bg-surface/70 disabled:cursor-default disabled:opacity-60">
+                  <span className="font-medium">{p.name}</span>
+                  <span className="block font-mono text-muted-foreground">{p.key}</span>
+                </button>
+              ))}
+              {group.openTasks.slice(0, 4).map(t => (
+                <button key={t.key} type="button" onClick={() => open({ kind: "task", key: t.key })}
+                  className="flex min-h-9 items-center justify-between gap-2 rounded-md px-2 text-left text-xs hover:bg-surface/70">
+                  <span className="min-w-0 truncate">{t.title}</span>
+                  <Status value={t.status} />
+                </button>
+              ))}
+            </>}
+        </div>
+      ))}
+    </div>
+  </Section>
+}
+
 const LIVE = ["ACTIVE", "EXPERIMENT"]
 
 /** The portfolio: live units first (where agents work and numbers are reported), the rest folded away. */
@@ -143,6 +191,7 @@ export function ProjectsPage() {
   const c = d.current_priority
   return <>
     <PageHeader title={pageTitle("projects")} />
+    <FocusPortfolio />
     {Array.isArray(d.portfolio) && <FigureStrip label="Portfolio at a glance" items={[
       { label: "Live", value: String(live.length), sub: "active business units" },
       { label: "Need attention", value: String(attention), tone: attention ? "warning" : undefined, sub: attention ? "open incidents or stopped work" : "no incident or stopped work" },
