@@ -197,7 +197,8 @@ def _run_drained(argv: list, *, timeout: float, cap: int):
     """Run the build with its stdout and stderr drained and discarded, never kept: memory stays bounded whatever the
     candidate's build prints. Returns the exit code, "timeout", or "output" when more than `cap` bytes arrive. The
     child runs in its own process group; on any failure (cap, deadline, or a child that closed its output but keeps
-    running) the pipe is closed and the whole group is killed and reaped. A sudo'd wrapper is root and cannot be
+    running) the pipe is closed; the whole group is killed and reaped after every run, even when the child itself
+    exited. A sudo'd wrapper is root and cannot be
     signalled from here: the closed pipe (SIGPIPE) and the wrapper's own timeout and trap end it."""
     import signal
     import time
@@ -224,16 +225,17 @@ def _run_drained(argv: list, *, timeout: float, cap: int):
         return verdict
     finally:
         p.stdout.close()
-        if p.poll() is None:
-            for kill in (lambda: os.killpg(p.pid, signal.SIGKILL), p.kill):
-                try:
-                    kill()
-                except (PermissionError, ProcessLookupError):
-                    pass
+        # The group outlives its leader: a descendant may keep running (and close its output) after the direct
+        # child exited, so the group is always killed, on success too; it holds nothing the gateway still needs.
+        for kill in (lambda: os.killpg(p.pid, signal.SIGKILL), p.kill):
             try:
-                p.wait(timeout=30)
-            except subprocess.TimeoutExpired:
+                kill()
+            except (PermissionError, ProcessLookupError):
                 pass
+        try:
+            p.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
 
 
 def built_files(root: Path) -> dict:

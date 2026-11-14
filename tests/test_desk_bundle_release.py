@@ -270,6 +270,33 @@ def test_desk_build_that_closes_output_and_hangs_is_killed_with_its_children(tmp
         raise AssertionError("the build's child process survived the timeout")
 
 
+def _gone(pid):
+    import time
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+@pytest.mark.parametrize("grandchild_output", ["closed", "kept_open"])
+def test_desk_build_descendants_are_killed_after_the_direct_child_exits(tmp_path, grandchild_output):
+    """The direct child exits while a descendant keeps running: with its output closed (the build returns the
+    child's exit code) or still holding the pipe (the deadline hits). Either way the group is killed and the
+    descendant does not outlive _run_drained."""
+    from app import release_gateway_service as svc
+    pidfile = tmp_path / "grandchild.pid"
+    out = "subprocess.DEVNULL" if grandchild_output == "closed" else "None"
+    code = ("import subprocess, sys\n"
+            f"g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], stdout={out}, stderr={out})\n"
+            f"open({str(pidfile)!r}, 'w').write(str(g.pid))\nsys.exit(0)")
+    expected = 0 if grandchild_output == "closed" else "timeout"
+    assert svc._run_drained(_py(code), timeout=2, cap=1 << 20) == expected
+    assert _gone(int(pidfile.read_text())), "a descendant of the build survived after its parent exited"
+
+
 def test_a_noisy_desk_build_fails_closed_before_review(hw):
     packets = capture(hw)
     desk_commit(hw)
