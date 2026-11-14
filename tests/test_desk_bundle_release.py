@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -56,17 +58,27 @@ def test_desk_ok(hw):
 
 
 @pytest.mark.parametrize("signer", ["founder", "gateway"])
-@pytest.mark.parametrize("bad", ["drop", "files", "tree", "sha", "fail"])
+@pytest.mark.parametrize("bad", ["drop", "files", "tree", "sha", "fail", "nosig", "fsig", "edit"])
 def test_bad_proof(hw, signer, bad):
+    """Field cases are re-signed with the gateway key (its content checks still hold); nosig/fsig/edit keep the right
+    content but no gateway signature over it: a founder signature on the manifest does not repair a forged proof."""
     desk_commit(hw)
     hw.tick()
     d = draft(hw)
     proof = d["evidence"]["desk_build"]
+    assert rg.verify(rg.desk_proof_bytes(proof), proof["signature"], hw.keys["gateway"][1], rg.NS_DESK_BUILD)
     if bad == "drop":
         del d["evidence"]["desk_build"]
+    elif bad == "nosig":
+        del proof["signature"]
+    elif bad == "fsig":
+        proof["signature"] = rg.sign(rg.desk_proof_bytes(proof), hw.keys["founder"][0], rg.NS_DESK_BUILD)
+    elif bad == "edit":
+        proof["files"] = {"app/static/desk.html": "0" * 64}
     else:
         proof.update({"files": {"files": {"app/static/desk.html": "0" * 64}}, "tree": {"desk_tree": "5" * 40},
                       "sha": {"sha": "6" * 40}, "fail": {"passed": False}}[bad])
+        proof["signature"] = rg.sign(rg.desk_proof_bytes(proof), hw.keys["gateway"][0], rg.NS_DESK_BUILD)
     d["approver"] = signer
     raw = rg.canonical(d)
     hw.cfg.outbox.mkdir(parents=True, exist_ok=True)
@@ -74,6 +86,95 @@ def test_bad_proof(hw, signer, bad):
     (hw.cfg.outbox / "000007-x.sig").write_text(rg.sign(raw, hw.keys[signer][0], rg.NS_RELEASE))
     out = step(hw)
     assert out["outcome"] == "REJECTED" and "desk/" in out["reason"] and hw.runs == []
+
+
+def test_gateway_approve_checks_proof_signature(hw):
+    """gateway_approve (the other verifier) refuses an unsigned proof too."""
+    desk_commit(hw)
+    hw.tick()
+    d = draft(hw)
+    del d["evidence"]["desk_build"]["signature"]
+    policy = json.loads((hw.tmp / "policy.json").read_text())
+    with pytest.raises(rg.Refused, match="desk/"):
+        rg._check_desk_build(d, {"required": True, "files": {}, "desk_tree": "x"}, policy)
+
+
+SCRIPT = Path(__file__).resolve().parents[1] / "scripts/release-gateway-desk-build"
+
+
+def run_script(*args, **env):
+    return subprocess.run(["bash", str(SCRIPT), *args], capture_output=True, text=True,
+                          env={"PATH": os.environ["PATH"], **env})
+
+
+@pytest.mark.parametrize("env", [{"SUDO_UID": "1000"}, {"SUDO_USER": "gateway"}], ids=["uid", "user"])
+def test_script_seed_refused_under_sudo(tmp_path, env):
+    (tmp_path / "desk").mkdir()
+    (tmp_path / "desk/package-lock.json").write_text("{}")
+    r = run_script("seed", str(tmp_path), **env)
+    assert r.returncode == 2 and "refused under sudo" in r.stderr
+
+
+def test_script_refuses_symlink(tmp_path):
+    work = tmp_path / "gateway-desk-x"
+    (work / "desk").mkdir(parents=True)
+    (work / "app/static").mkdir(parents=True)
+    (work / "desk/package-lock.json").write_text("{}")
+    os.symlink("/etc/passwd", work / "desk/leak")
+    r = run_script(str(work), SUDO_UID=str(os.getuid()))
+    assert r.returncode == 2 and "symlink" in r.stderr
+
+
+def tar_check(tmp_path, cap, *members):
+    """Run the script's own pre-extraction validator (TAR_CHECK) on a tar of `members` (TarInfo, data)."""
+    import io
+    import re
+    import tarfile
+    code = re.search(r"TAR_CHECK=\$\(cat <<'PY'\n(.*?)\nPY\n\)", SCRIPT.read_text(), re.S).group(1)
+    path = tmp_path / "t.tar"
+    with tarfile.open(path, "w", format=tarfile.PAX_FORMAT) as t:
+        for info, data in members:
+            t.addfile(info, io.BytesIO(data) if data else None)
+    return subprocess.run(["python3", "-I", "-c", code, str(path), str(cap)], capture_output=True).returncode
+
+
+def tar_member(name, data=b"", **attrs):
+    import tarfile
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    for k, v in attrs.items():
+        setattr(info, k, v)
+    return info, data
+
+
+@pytest.mark.parametrize("case", ["ok", "sparse", "oversize", "count", "link", "fifo", "abs", "dotdot"])
+def test_script_tar_check(tmp_path, case):
+    import tarfile
+    members = {
+        "ok": [tar_member("d", type=tarfile.DIRTYPE), tar_member("d/a", b"x" * 10)],
+        "sparse": [tar_member("a", b"x", pax_headers={"GNU.sparse.map": "0,1", "GNU.sparse.size": "1"})],
+        "oversize": [tar_member("a", b"x" * 60), tar_member("b", b"x" * 60)],
+        "count": [tar_member(f"f{i}") for i in range(20001)],
+        "link": [tar_member("a", type=tarfile.SYMTYPE, linkname="/etc/passwd")],
+        "fifo": [tar_member("a", type=tarfile.FIFOTYPE)],
+        "abs": [tar_member("/a", b"x")],
+        "dotdot": [tar_member("d/../../a", b"x")],
+    }[case]
+    assert (tar_check(tmp_path, 100, *members) == 0) is (case == "ok")
+
+
+def test_executable_static_refused(tmp_path):
+    """The proof hashes bytes only and review_scope hides app/static: a mode change must not slip through."""
+    w = World(tmp_path)
+    (w.work / "app/static/desk.html").chmod(0o755)
+    sh(w.work, "git", "add", "-A")
+    sh(w.work, "git", "commit", "-qm", "exec")
+    sha = sh(w.work, "git", "rev-parse", "HEAD").strip()
+    with pytest.raises(rg.Refused, match="100755"):
+        rg.generated_facts(w.work, w.base, sha)
+    w.push()
+    out = w.tick()
+    assert out["outcome"] == "REFUSED" and "100644" in out["detail"]
 
 
 @pytest.mark.parametrize("case", ["bundle", "stale", "extra"])
@@ -130,3 +231,48 @@ def test_rebase_scope():
     assert scope[:2] == ("--", rg.DEPLOY_PATHS[0]) and rg.DESK_DIR in scope
     assert scope[-2:] == (":(top,literal,exclude)app/static/a", ":(top,literal,exclude)app/static/b")
     assert rg.review_scope({}, g)[:2] == ("--", ":(top)")
+
+
+def _py(code):
+    import sys
+    return [sys.executable, "-c", code]
+
+
+def test_desk_build_output_is_drained_not_kept_and_capped():
+    from app import release_gateway_service as svc
+    noisy = _py("import sys\nwhile True: sys.stderr.write('x' * 65536)")
+    assert svc._run_drained(noisy, timeout=60, cap=1 << 20) == "output"
+    assert svc._run_drained(_py("import sys; print('ok'); sys.exit(3)"), timeout=60, cap=1 << 20) == 3
+    assert svc._run_drained(_py("import time; time.sleep(30)"), timeout=1, cap=1 << 20) == "timeout"
+
+
+def test_desk_build_that_closes_output_and_hangs_is_killed_with_its_children(tmp_path):
+    """EOF on the pipe is not the end of the build: a child (and its own child) that close their output and keep
+    running are timed out, and the whole process group is killed and reaped."""
+    import time
+    from app import release_gateway_service as svc
+    pidfile = tmp_path / "grandchild.pid"
+    code = ("import os, subprocess, sys, time\n"
+            f"g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], stdout=subprocess.DEVNULL, "
+            f"stderr=subprocess.DEVNULL)\nopen({str(pidfile)!r}, 'w').write(str(g.pid))\n"
+            "os.close(1); os.close(2)\ntime.sleep(60)")
+    started = time.monotonic()
+    assert svc._run_drained(_py(code), timeout=2, cap=1 << 20) == "timeout"
+    assert time.monotonic() - started < 20
+    grandchild = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(grandchild, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("the build's child process survived the timeout")
+
+
+def test_a_noisy_desk_build_fails_closed_before_review(hw):
+    packets = capture(hw)
+    desk_commit(hw)
+    hw.cfg.desk_build_command = _py("import sys\nwhile True: sys.stdout.write('y' * 65536)")
+    out = hw.tick()
+    assert out["outcome"] == "CHECKS_FAILED" and "bytes of output" in out["detail"] and packets == []

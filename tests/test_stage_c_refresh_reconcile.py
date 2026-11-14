@@ -248,17 +248,37 @@ def test_refresh_second_parent_must_be_on_main(blocked_scene, monkeypatch):
                                      pr_commits=[published, first_refresh, final])
 
 
-def test_clean_refresh_records_append_only_merge(scene):
+def test_clean_refresh_records_evidence_but_stays_blocked(scene):
     db, task, _, block, facts, chain, *_ = scene
     old = deepcopy(task.context["improvement"]["history"])
-    assert judge(scene)["outcome"] == "MERGED"
+    assert judge(scene) == {"outcome": "BLOCKED", "reasons": ["REFRESH_CONTEXT_NOT_REVIEWED"]}
     db.commit()
-    assert task.status == enums.TaskStatus.REVIEW and task.error is None
-    assert task.context["improvement"]["history"][:-1] == old
+    assert task.status == enums.TaskStatus.BLOCKED
+    assert task.error.startswith(stage_c_ci.REFRESH_CONTEXT_NOT_REVIEWED)
+    assert task.context["improvement"]["history"] == old
     row = db.scalar(select(models.AuditLog).where(models.AuditLog.action == "improvement.refresh_reconciled"))
     assert row.before["blocked_audit_id"] == block.id
     assert row.after["refreshed_heads"] == [facts["head_sha"]]
     assert row.after["fingerprint"] == task.context["improvement"]["approval"]["fingerprint"]
+    assert row.after["context_review"] == "not_performed" and row.after["status"] == "BLOCKED"
+
+
+def test_refresh_without_context_review_never_reaches_merged(scene):
+    """F1 regression: same fingerprint + clean merge + green CI is not a review of the refreshed context."""
+    db, task, request, _, facts, chain, mirror, *_ = scene
+    judge(scene)
+    db.commit()
+    imp = task.context["improvement"]
+    assert imp["stage"] == "READY_TO_MERGE"
+    assert all(item["stage"] != "MERGED" for item in imp["history"])
+    assert task.status not in (enums.TaskStatus.REVIEW, enums.TaskStatus.DONE)
+    assert stage_c_ci.merge_recovery_block(db, task) is None
+    again = audit.record(db, actor=request.actor, action=request.action, entity_type="task",
+                         entity_key=task.key, task_id=task.id, after=request.after)
+    db.flush()
+    assert "REQUEST_MISMATCH" in stage_c_ci.reconcile_refreshed(db, task, again, facts, chain, mirror,
+        repository="seerxo/acthelm", head_repository="seerxo/acthelm", required_statuses=(), apply=True)["reasons"]
+    assert task.context["improvement"]["stage"] == "READY_TO_MERGE"
 
 
 def test_merge_not_recorded_shape_is_reconciled(scene):
@@ -272,7 +292,7 @@ def test_merge_not_recorded_shape_is_reconciled(scene):
     db.flush()
     assert stage_c_ci.reconcile_refreshed(db, task, newer, facts, chain, mirror,
         repository="seerxo/acthelm", head_repository="seerxo/acthelm",
-        required_statuses=(), apply=True)["outcome"] == "MERGED"
+        required_statuses=(), apply=True) == {"outcome": "BLOCKED", "reasons": ["REFRESH_CONTEXT_NOT_REVIEWED"]}
 
 
 def test_two_refresh_merges_keep_all_heads(scene):
@@ -297,7 +317,7 @@ def test_two_refresh_merges_keep_all_heads(scene):
     assert chain["refreshed_heads"] == [first_update, final]
     assert stage_c_ci.reconcile_refreshed(db, task, request, facts, chain, mirror,
         repository="seerxo/acthelm", head_repository="seerxo/acthelm",
-        required_statuses=(), apply=True)["outcome"] == "MERGED"
+        required_statuses=(), apply=True) == {"outcome": "BLOCKED", "reasons": ["REFRESH_CONTEXT_NOT_REVIEWED"]}
 
 
 def test_worker_request_is_idempotent(scene, monkeypatch):
@@ -310,9 +330,11 @@ def test_worker_request_is_idempotent(scene, monkeypatch):
     monkeypatch.setattr(stage_c_worker, "mirror_path", lambda: mirror)
     monkeypatch.setattr(stage_c_ci, "gh_facts", lambda *args, **kwargs: facts)
     monkeypatch.setattr(stage_c_runner, "refresh_chain", lambda *args, **kwargs: chain)
-    assert stage_c_worker.reconcile(db) == [{"task": task.key, "outcome": "MERGED"}]
+    assert stage_c_worker.reconcile(db) == [{"task": task.key, "outcome": "BLOCKED",
+                                             "reasons": ["REFRESH_CONTEXT_NOT_REVIEWED"]}]
     assert db.scalar(select(models.AuditLog).where(models.AuditLog.action == "improvement.refresh_reconciled"))
-    assert stage_c_worker.reconcile(db) != [{"task": task.key, "outcome": "MERGED"}]
+    assert stage_c_worker.reconcile(db) == []
+    assert task.status == enums.TaskStatus.BLOCKED and task.context["improvement"]["stage"] == "READY_TO_MERGE"
     assert len(db.scalars(select(models.AuditLog).where(
         models.AuditLog.action == "improvement.refresh_reconciled")).all()) == 1
 
