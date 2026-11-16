@@ -105,7 +105,7 @@ def test_explicit_low_risk_active_project_write_is_admitted(monkeypatch):
     "scripts/deploy-company-os.sh", "app/billing.py", "tests/test_api_auth.py",
     "../escape.py", "unknown/file.py",
 ])
-def test_protected_or_unknown_scope_never_admitted(monkeypatch, path):
+def test_scope_refused(monkeypatch, path):
     monkeypatch.setattr(worker, "ENABLE_AUTONOMOUS_CODE_WRITE", True)
     db = _db()
     task = write_task(db)
@@ -575,7 +575,7 @@ def test_saved_approval_is_bound_to_the_original_base_and_checks(saved_review, f
                                     "legacy_approval", "diff", "malformed_history", "pause", "cancel", "metered",
                                     "authorization_missing", "authorization_consumed", "authorization_expired",
                                     "authorization_sha", "write_disabled"])
-def test_saved_review_never_bypasses_current_contract_proof_or_authority(saved_review, monkeypatch, change):
+def test_saved_review_rechecked(saved_review, monkeypatch, change):
     db, task, ps, coded = saved_review
     imp = task.context["improvement"]
     approval = dict(imp["approval"])
@@ -1242,7 +1242,7 @@ def test_an_authorization_is_for_one_task_one_sha_and_a_short_time(monkeypatch, 
                                    {"task_key": "TASK-0100", "repository": "seerxo/acthelm",
                                     "source_sha": SHA_A, "issued_by": "founder", "issued_at": "yesterday",
                                     "expires_at": "tomorrow", "consumed_at": None}])
-def test_malformed_or_unknown_authorization_is_denied(monkeypatch, tmp_path, value):
+def test_bad_authorization_denied(monkeypatch, tmp_path, value):
     db, task, ps = armed(monkeypatch, tmp_path)
     db.add(models.ControlState(key="stage-c-pilot-authorization", value=value, updated_by="founder")); db.commit()
     out, skipped = tick(db, ps)
@@ -2092,7 +2092,7 @@ def test_b5_worker_publishes_to_the_configured_fork_and_opens_the_pr_from_it(mon
     "https://github.com/seerxo/acthelm/pull/abc",
     "https://github.com/seerxo/acthelm/pull/" + "9" * 5000,
 ], ids=lambda u: "url")
-def test_published_pr_identity_rejects_other_repositories_and_malformed_urls(url):
+def test_pr_identity_refused(url):
     db = _db()
     task = _published_task_for_merge_reconciliation(db)
     improvement = task.context["improvement"]
@@ -2232,7 +2232,7 @@ def test_b3_old_repository_pr_is_refused_before_github_lookup(monkeypatch):
 
 @pytest.mark.parametrize("stage", ["PR_OPEN", "CI", "READY_TO_MERGE", "MERGED", "VERIFYING"])
 @pytest.mark.parametrize("history", [None, []])
-def test_published_stage_without_history_is_unreadable(stage, history):
+def test_published_no_history(stage, history):
     # A published stage with no PR_OPEN row cannot be "unpublished": it must never reach the coder.
     imp = {"stage": stage} if history is None else {"stage": stage, "history": history}
     task = SimpleNamespace(context={"improvement": imp})
@@ -2317,7 +2317,7 @@ def _no_progress_attempt(db, clock, minutes):
     return worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
 
 
-def test_no_progress_runs_back_off_before_the_same_task_runs_again(monkeypatch, tmp_path):
+def test_e5_backoff(monkeypatch, tmp_path):
     db, task, clock = _lease_busy_runs(monkeypatch, tmp_path)
     assert _no_progress_attempt(db, clock, 0)["verdict"] == "LEASE_BUSY"
     runs = db.query(models.AgentRun).filter_by(task_id=task.id).count()
@@ -2332,7 +2332,7 @@ def test_no_progress_runs_back_off_before_the_same_task_runs_again(monkeypatch, 
     assert task.status == enums.TaskStatus.READY and task.retry_count == 0
 
 
-def test_the_sixth_consecutive_no_progress_run_stalls_the_task_for_the_founder(monkeypatch, tmp_path):
+def test_e5_stall(monkeypatch, tmp_path):
     db, task, clock = _lease_busy_runs(monkeypatch, tmp_path)
     for attempt in range(worker.MAX_NO_PROGRESS_RUNS):
         assert _no_progress_attempt(db, clock, 30)["verdict"] == "LEASE_BUSY"
@@ -2346,7 +2346,7 @@ def test_the_sixth_consecutive_no_progress_run_stalls_the_task_for_the_founder(m
     assert "verdict" not in out and db.query(models.AgentRun).filter_by(task_id=task.id).count() == runs
 
 
-def test_no_progress_count_and_backoff_survive_a_restart(monkeypatch, tmp_path):
+def test_e5_restart(monkeypatch, tmp_path):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
     engine = create_engine(f"sqlite:///{tmp_path / 'restart.db'}")
@@ -2369,7 +2369,7 @@ def test_no_progress_count_and_backoff_survive_a_restart(monkeypatch, tmp_path):
     assert task.status == enums.TaskStatus.BLOCKED and task.error.startswith("STALLED:")
 
 
-def test_founder_ready_after_a_stall_starts_a_fresh_count(monkeypatch, tmp_path):
+def test_e5_ready_resets(monkeypatch, tmp_path):
     db, task, clock = _lease_busy_runs(monkeypatch, tmp_path)
     for _ in range(worker.MAX_NO_PROGRESS_RUNS):
         _no_progress_attempt(db, clock, 30)
@@ -2386,7 +2386,7 @@ def test_founder_ready_after_a_stall_starts_a_fresh_count(monkeypatch, tmp_path)
                                else enums.TaskStatus.READY)
 
 
-def test_a_progressing_run_resets_the_no_progress_count(monkeypatch, tmp_path):
+def test_e5_progress_resets(monkeypatch, tmp_path):
     db, task, clock = _lease_busy_runs(monkeypatch, tmp_path)
     for _ in range(3):
         _no_progress_attempt(db, clock, 30)

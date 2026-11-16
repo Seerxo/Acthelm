@@ -290,7 +290,7 @@ def test_postgres_takeover_waits_until_the_pr_is_published_and_recorded(db, monk
     assert stage_c_worker.published_pr(fresh) is not None
 
 
-def test_postgres_two_workers_racing_the_sixth_no_progress_run_stall_the_task_once(db, monkeypatch, tmp_path):
+def test_pg_e5_race(db, monkeypatch, tmp_path):
     """E5 under real row locks: with five no-progress runs on record, two workers race for the sixth. Exactly one
     claims and runs it, the task is BLOCKED/STALLED once, and the bound is never exceeded."""
     import threading
