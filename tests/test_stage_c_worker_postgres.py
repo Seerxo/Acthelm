@@ -288,3 +288,41 @@ def test_postgres_takeover_waits_until_the_pr_is_published_and_recorded(db, monk
     fresh = db.query(models.Task).filter_by(key=task.key).one()
     assert fresh.assigned_agent_id == db.query(models.Agent).filter_by(key="ceo").one().id
     assert stage_c_worker.published_pr(fresh) is not None
+
+
+def test_postgres_two_workers_racing_the_sixth_no_progress_run_stall_the_task_once(db, monkeypatch, tmp_path):
+    """E5 under real row locks: with five no-progress runs on record, two workers race for the sixth. Exactly one
+    claims and runs it, the task is BLOCKED/STALLED once, and the bound is never exceeded."""
+    import threading
+    from datetime import datetime, timedelta, timezone
+    from app import stage_c
+    pipeline(monkeypatch, tmp_path)
+    now = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(worker, "_now", lambda: now)
+    task = write_task(db)
+    stage_c.acquire(db, "seerxo/acthelm", "someone-else", timedelta(days=1))   # every attempt: LEASE_BUSY
+    for _ in range(worker.MAX_NO_PROGRESS_RUNS - 1):
+        db.add(models.AgentRun(agent_id=task.assigned_agent_id, task_id=task.id, provider="claude",
+                               status=enums.AgentRunStatus.FAILED, ended_at=now - timedelta(hours=1),
+                               tool_calls={"outcome": "LEASE_BUSY", "attempts": [{"health": "DISABLED"}],
+                                           "capacity_failure": True}))
+    db.commit()
+    task_id, bind = task.id, db.get_bind()
+    start, results = threading.Barrier(2), []
+    def one_worker():
+        with Session(bind) as session:
+            start.wait()
+            results.append(worker.run_once(session, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS))
+    threads = [threading.Thread(target=one_worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert len(results) == 2
+    assert sorted(r.get("verdict", "") for r in results) == ["", "LEASE_BUSY"], results
+    db.expire_all()
+    task = db.get(models.Task, task_id)
+    runs = db.scalars(select(models.AgentRun).where(models.AgentRun.task_id == task_id)).all()
+    assert len(runs) == worker.MAX_NO_PROGRESS_RUNS
+    assert sum(bool((r.tool_calls or {}).get("stalled")) for r in runs) == 1
+    assert task.status == enums.TaskStatus.BLOCKED and task.error.startswith("STALLED:")
