@@ -349,8 +349,10 @@ def status_refusal(task: models.Task, status: enums.TaskStatus, now: datetime | 
     remote = _remote(task)
     if remote is None:
         return None
-    if status in (enums.TaskStatus.READY, enums.TaskStatus.QUEUED, enums.TaskStatus.IN_PROGRESS):
-        return "a task handed to Stage C never runs on production"
+    if status not in (enums.TaskStatus.CANCELLED, enums.TaskStatus.DONE, enums.TaskStatus.WAITING_EXTERNAL):
+        # Leaving WAITING_EXTERNAL any other way would stop sync while Stage C may still be running it: only
+        # cancellation (which withdraws it remotely) or an evidenced DONE closes a handed-off task.
+        return "a task handed to Stage C stays WAITING_EXTERNAL until it is cancelled or accepted as DONE"
     if status == enums.TaskStatus.DONE:
         view = desk_view(task, now)
         snap = (view or {}).get("snapshot") or {}

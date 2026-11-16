@@ -218,6 +218,9 @@ def test_e2e(w):
     assert w.sync()["requests"][0]["outcome"] == "DELIVERED"
     [imp] = w.sc_tasks()
     assert imp.status == enums.TaskStatus.BACKLOG and imp.created_by == h.SERVICE
+    from app import worker
+    with Session(w.sc) as s:   # the production-side "never run it here" guard does not touch Stage C imports
+        assert worker._admission_gate(s, s.get(models.Task, imp.id), {})[0] != "handed_off_to_stage_c"
     assert imp.context["remote_stage_c"] == {"id": hid, "origin": "production", "origin_task_key": "TASK-0001",
                                              "payload_sha256": sha}
     packet = w.prod_task().context["remote_stage_c"]["packet"]
@@ -474,8 +477,11 @@ def test_review_fixes(w):
             "herdr_state": {"created_at": "2026-11-10T10:00:00+00:00", "status": "running"}})
         assert r.status_code == 409, r.text
         assert w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL
+        for status in ("BLOCKED", "BACKLOG", "REVIEW", "FAILED"):   # would silently stop sync: refused
+            assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
+                                   json={"status": status, "actor": "founder"}).status_code == 409, status
         assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
-                               json={"status": "BLOCKED", "actor": "founder"}).status_code == 200
+                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 200
     assert h._backoff(10_000) == h.MAX_BACKOFF
     with Session(w.prod) as s:
         rows = s.scalars(select(models.AuditLog.after)).all() + s.scalars(select(models.AuditLog.before)).all()
