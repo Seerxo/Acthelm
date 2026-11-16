@@ -297,6 +297,25 @@ def test_desk_build_descendants_are_killed_after_the_direct_child_exits(tmp_path
     assert _gone(int(pidfile.read_text())), "a descendant of the build survived after its parent exited"
 
 
+def test_desk_build_that_ignores_sigterm_is_killed_after_the_grace(tmp_path, monkeypatch):
+    """SIGTERM first (the root wrapper's way out); a group member that ignores it is SIGKILLed after the grace."""
+    from app import release_gateway_service as svc
+    monkeypatch.setattr(svc, "DESK_BUILD_STOP_GRACE", 1.0)
+    monkeypatch.setattr(svc._stop_group, "__defaults__", (1.0,))
+    pidfile = tmp_path / "stubborn.pid"
+    code = ("import os, signal, sys, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            f"open({str(pidfile)!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)")
+    assert svc._run_drained(_py(code), timeout=2, cap=1 << 20) == "timeout"
+    assert _gone(int(pidfile.read_text()))
+
+
+def test_a_desk_build_group_that_cannot_be_stopped_raises_instead_of_returning(monkeypatch):
+    from app import release_gateway_service as svc
+    monkeypatch.setattr(svc, "_stop_group", lambda p, grace=0: (p.kill(), p.wait(), False)[-1])
+    with pytest.raises(RuntimeError, match="did not stop"):
+        svc._run_drained(_py("print('ok')"), timeout=10, cap=1 << 20)
+
+
 def test_a_noisy_desk_build_fails_closed_before_review(hw):
     packets = capture(hw)
     desk_commit(hw)

@@ -6,12 +6,17 @@ Opt-in only: ACTHELM_DESK_BUILD_DOCKER_IT=1 on a disposable Linux host with pass
 wrapper through sudo exactly as the gateway does, and removes everything again. It refuses to run on a production
 host (release ledger present) or over an existing desk-build setup. Standard library + pytest only (run with
 --noconftest), so it needs no app dependencies."""
+import ast
 import hashlib
+import json
 import os
+import select
 import shutil
 import stat
 import subprocess
 import tempfile
+import time
+import types
 from pathlib import Path
 
 import pytest
@@ -125,4 +130,57 @@ def test_a_symlink_in_the_callers_tree_is_refused(host):
         assert out.returncode == 2 and "symlink" in out.stderr
         assert list((work / "app/static").iterdir()) == []
     finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _gateway_drain():
+    """The committed _run_drained/_stop_group/_group_alive from app/release_gateway_service.py, loaded without the
+    app's dependencies (this file runs with the standard library and pytest only)."""
+    src = (ROOT / "app/release_gateway_service.py").read_text()
+    names = {"_run_drained", "_stop_group", "_group_alive"}
+    tree = ast.parse(src)
+    nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    nodes += [n for n in tree.body if isinstance(n, ast.Assign) and any(
+        isinstance(t, ast.Name) and t.id == "DESK_BUILD_STOP_GRACE" for t in n.targets)]
+    ns = {"os": os, "select": select, "subprocess": subprocess}
+    exec(compile(ast.Module(sorted(nodes, key=lambda n: n.lineno), []), "release_gateway_service.py", "exec"), ns)
+    return types.SimpleNamespace(**{k: ns[k] for k in names})
+
+
+def _build_leftovers(marker: str):
+    containers = sudo("docker", "ps", "-aq", "--filter", "name=release-gateway-desk-build").stdout.split()
+    procs = [line for line in subprocess.run(["ps", "-eo", "pid,user,args"], capture_output=True,
+                                             text=True).stdout.splitlines()
+             if INSTALLED.name in line or "--name release-gateway-desk-build" in line or marker in line]
+    return containers, procs
+
+
+@pytest.mark.parametrize("case", ["output_cap", "timeout"])
+def test_a_build_the_gateway_gives_up_on_is_stopped_with_its_root_wrapper_and_container(host, case):
+    """Through the real sudo'd wrapper: a build that floods output past the cap, or hangs past the deadline, leaves
+    no root process and no container behind once _run_drained returns (it SIGTERMs the group; sudo forwards it to
+    the wrapper, whose trap removes the container)."""
+    seed = subprocess.run(["sudo", "-n", "env", "-u", "SUDO_UID", "-u", "SUDO_USER", "-u", "SUDO_GID",
+                           "-u", "SUDO_COMMAND", str(INSTALLED), "seed", str(host)], capture_output=True, text=True,
+                          timeout=900)
+    assert seed.returncode == 0, seed.stderr[-2000:]
+    drain, marker = _gateway_drain(), f"XGW{case.upper()}"
+    work = caller_dir(ROOT)
+    try:
+        pkg = json.loads((work / "desk/package.json").read_text())
+        pkg["scripts"]["build"] = (
+            f"node -e \"/*{marker}*/setInterval(()=>process.stderr.write('x'.repeat(65536)),1)\"" if case == "output_cap"
+            else f"node -e \"/*{marker}*/setInterval(()=>{{}},1000)\"")
+        (work / "desk/package.json").write_text(json.dumps(pkg))
+        verdict = drain._run_drained(["sudo", "-n", str(INSTALLED), str(work)],
+                                     timeout=600 if case == "output_cap" else 90, cap=1 << 20)
+        assert verdict == ("output" if case == "output_cap" else "timeout")
+        deadline = time.monotonic() + 60
+        while (left := _build_leftovers(marker)) != ([], []) and time.monotonic() < deadline:
+            time.sleep(2)
+        assert left == ([], []), f"the build outlived _run_drained by 60 s: {left}"
+    finally:
+        for container in sudo("docker", "ps", "-aq", "--filter", "name=release-gateway-desk-build",
+                              check=False).stdout.split():
+            sudo("docker", "rm", "-f", container, check=False)
         shutil.rmtree(work, ignore_errors=True)
