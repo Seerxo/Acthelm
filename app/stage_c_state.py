@@ -34,7 +34,8 @@ OUTCOMES = {"LEASE_BUSY", "CODER_FAILED", "REJECTED", "CHECKS_FAILED", "CHECKS_R
 # task.error prefix -> fixed failure code (order matters: first match wins).
 ERROR_PREFIXES = (
     (stage_c_worker.REPAIR_INTERRUPTED, "REPAIR_INTERRUPTED"), (stage_c_worker.JOB_UNFINISHED, "JOB_UNFINISHED"),
-    (stage_c_ci.MERGE_NOT_RECORDED, "MERGE_NOT_RECORDED"), (stage_c_worker.PR_CLOSED, "PR_CLOSED"),
+    (stage_c_ci.MERGE_NOT_RECORDED, "MERGE_NOT_RECORDED"),
+    (stage_c_ci.REFRESH_CONTEXT_NOT_REVIEWED, "REFRESH_CONTEXT_NOT_REVIEWED"), (stage_c_worker.PR_CLOSED, "PR_CLOSED"),
     ("CHECKS_REPEATED", "CHECKS_REPEATED"), ("LAUNCHER_REFUSED", "LAUNCHER_REFUSED"),
     ("upstream_role_not_read_only", "UPSTREAM_ROLE_NOT_READ_ONLY"),
     ("upstream_role_unverified", "UPSTREAM_ROLE_UNVERIFIED"), ("PR_FAILED", "PR_FAILED"),

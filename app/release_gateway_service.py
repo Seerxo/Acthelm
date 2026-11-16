@@ -13,11 +13,13 @@ reason. Attempts per commit are bounded (MAX_ATTEMPTS); a commit that was checke
 retried, so a model call is never repeated for the same content. The host verifier re-checks everything.
 """
 import fcntl
+import hashlib
 import http.client
 import json
 import socket
 import os
 import secrets
+import select
 import stat
 import subprocess
 import sys
@@ -31,6 +33,8 @@ IDENTITY_MAX_AGE = timedelta(minutes=15)
 MANIFEST_LIFETIME = timedelta(hours=2)
 REVIEW_TIMEOUT_S = 900
 MAX_BUILD_RECORD = 1 << 20           # a build record is a few KiB; the gateway reads nothing bigger
+DESK_BUILD_UNAVAILABLE = 75          # EX_TEMPFAIL from scripts/release-gateway-desk-build: retried, bounded
+DESK_BUILD_OUTPUT_CAP = 1 << 20      # bytes of build output the gateway drains (never stores); more fails the build
 
 
 class Config:
@@ -41,8 +45,10 @@ class Config:
                 "ledger", "state", "outbox", "founder_queue", "review_signer_socket", "checks_command",
                 "identity_report"}
         # `builds` is optional: by default it is the root-written build-record directory next to the ledger's.
-        if not isinstance(raw, dict) or not need <= set(raw) or set(raw) - need - {"builds"}:
-            raise rg.Refused(f"gateway config must have exactly {sorted(need)} and optionally 'builds'")
+        # `desk_build_command` is optional: without it no candidate that changes desk/ or app/static is prepared.
+        optional = {"builds", "desk_build_command"}
+        if not isinstance(raw, dict) or not need <= set(raw) or set(raw) - need - optional:
+            raise rg.Refused(f"gateway config must have exactly {sorted(need)} and optionally {sorted(optional)}")
         self.__dict__.update(raw)
         for key in ("clone", "policy", "policy_sig", "founder_key", "gateway_key", "ledger", "state", "outbox",
                     "founder_queue", "identity_report"):
@@ -50,6 +56,11 @@ class Config:
         self.builds = Path(raw["builds"]) if "builds" in raw else Path(raw["ledger"]).parent.parent / "builds"
         if not isinstance(self.checks_command, list) or not all(isinstance(a, str) and a for a in self.checks_command):
             raise rg.Refused("checks_command must be a non-empty argv list")
+        self.desk_build_command = raw.get("desk_build_command")
+        if self.desk_build_command is not None and not (
+                isinstance(self.desk_build_command, list) and self.desk_build_command
+                and all(isinstance(a, str) and a for a in self.desk_build_command)):
+            raise rg.Refused("desk_build_command must be a non-empty argv list")
 
 
 def _git(cfg: Config, *args: str) -> str:
@@ -156,6 +167,90 @@ def default_checks(cfg: Config, sha: str) -> dict:
         return {"passed": r.returncode == 0, "summary": f"exit {r.returncode}"}
 
 
+def default_desk_build(cfg: Config, sha: str) -> dict:
+    """Rebuild app/static from desk/ alone at `sha`, with the founder-installed offline build command (pinned node,
+    `npm ci --offline` from the lockfile, `npm run build`; docs/security/DESK_BUNDLE_RELEASE.md). The input holds
+    only desk/ read from git objects plus an empty app/static, so the build cannot copy the committed bundle. Returns
+    {"passed", "summary", "files": {path: sha256}}; the caller compares the files with the payload."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="gateway-desk-") as d:
+        root = Path(d)
+        for path, mode, data in rg.tree_blobs(cfg.clone, sha, rg.DESK_DIR):
+            target = root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            target.chmod(0o755 if mode == "100755" else 0o644)
+        (root / rg.GENERATED_DIR).mkdir(parents=True)
+        code = _run_drained([*cfg.desk_build_command, d], timeout=1800, cap=DESK_BUILD_OUTPUT_CAP)
+        if code == "timeout":
+            return {"passed": False, "summary": "desk build timed out"}
+        if code == "output":
+            return {"passed": False, "summary": f"desk build wrote more than {DESK_BUILD_OUTPUT_CAP} bytes of output"}
+        if code == DESK_BUILD_UNAVAILABLE:   # the wrapper's own prerequisites (image, cache): infrastructure
+            raise RuntimeError("desk build toolchain unavailable")
+        if code != 0:
+            return {"passed": False, "summary": f"desk build exit {code}"}
+        return {"passed": True, "summary": "exit 0", "files": built_files(root)}
+
+
+def _run_drained(argv: list, *, timeout: float, cap: int):
+    """Run the build with its stdout and stderr drained and discarded, never kept: memory stays bounded whatever the
+    candidate's build prints. Returns the exit code, "timeout", or "output" when more than `cap` bytes arrive. The
+    child runs in its own process group; on any failure (cap, deadline, or a child that closed its output but keeps
+    running) the pipe is closed and the whole group is killed and reaped. A sudo'd wrapper is root and cannot be
+    signalled from here: the closed pipe (SIGPIPE) and the wrapper's own timeout and trap end it."""
+    import signal
+    import time
+    p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                         start_new_session=True)
+    deadline, seen, verdict = time.monotonic() + timeout, 0, None
+    try:
+        while verdict is None:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                verdict = "timeout"
+            elif select.select([p.stdout], [], [], min(left, 1.0))[0]:
+                chunk = os.read(p.stdout.fileno(), 65536)
+                if not chunk:
+                    break                 # output closed: the child may still be running, waited on below
+                seen += len(chunk)
+                if seen > cap:
+                    verdict = "output"
+        if verdict is None:
+            try:
+                return p.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                verdict = "timeout"
+        return verdict
+    finally:
+        p.stdout.close()
+        if p.poll() is None:
+            for kill in (lambda: os.killpg(p.pid, signal.SIGKILL), p.kill):
+                try:
+                    kill()
+                except (PermissionError, ProcessLookupError):
+                    pass
+            try:
+                p.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+def built_files(root: Path) -> dict:
+    """{path: sha256} of what the build wrote under app/static; anything but a regular file is refused."""
+    files = {}
+    for dirpath, dirnames, names in os.walk(root / rg.GENERATED_DIR):
+        for name in dirnames + names:
+            path = Path(dirpath) / name
+            info = path.lstat()
+            if stat.S_ISDIR(info.st_mode):
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise rg.Refused(f"the desk build wrote a non-regular file: {path.relative_to(root)}")
+            files[path.relative_to(root).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return files
+
+
 class ReviewNotAsked(RuntimeError):
     """The signer certainly did not ask the reviewer model (no socket, refused connection, or it declined the request
     before review: 400/403/409/503). Only this is retried as infrastructure; any other failure is an unknown outcome."""
@@ -200,23 +295,25 @@ def default_review(cfg: Config, packet: dict) -> dict:
     return json.loads(data)
 
 
-def tick(cfg: Config, *, now: datetime | None = None, clock=None, checks=None, review=None, fetch=True) -> dict:
+def tick(cfg: Config, *, now: datetime | None = None, clock=None, checks=None, review=None, fetch=True,
+         desk_build=None) -> dict:
     """One gateway step under an exclusive lock (two overlapping ticks would lose each other's decisions).
     Returns {"outcome": ..., ...}; every outcome is also kept in the gateway state file."""
     cfg.state.parent.mkdir(parents=True, exist_ok=True)
     with open(cfg.state.with_name(cfg.state.name + ".lock"), "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            return _tick(cfg, now=now, clock=clock, checks=checks, review=review, fetch=fetch)
+            return _tick(cfg, now=now, clock=clock, checks=checks, review=review, fetch=fetch, desk_build=desk_build)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def _tick(cfg: Config, *, now, clock, checks, review, fetch) -> dict:
+def _tick(cfg: Config, *, now, clock, checks, review, fetch, desk_build) -> dict:
     clock = clock or (lambda: datetime.now(timezone.utc))
     now = now or clock()
     checks = checks or (lambda sha: default_checks(cfg, sha))
     review = review or (lambda packet: default_review(cfg, packet))
+    desk_build = desk_build or (lambda sha: default_desk_build(cfg, sha))
     founder_key = cfg.founder_key.read_text().strip()
     ledger = rg.read_ledger(cfg.ledger)
     policy = rg.load_policy(cfg.policy.read_bytes(), cfg.policy_sig.read_text(), founder_key,
@@ -256,11 +353,17 @@ def _tick(cfg: Config, *, now, clock, checks, review, fetch) -> dict:
     scope = rg.diff_scope(ledger)               # the host computes the same: from what runs, payload-only after a rebase
     try:
         paths = rg.git_changed_paths(cfg.clone, running, sha, scope)
-        diff = rg.git_release_diff(cfg.clone, running, sha, scope)
+        generated = rg.generated_facts(cfg.clone, running, sha)
+        diff = rg.review_diff(cfg.clone, running, sha, ledger, generated)
         digest = rg.payload_digest(rg.payload_listing(cfg.clone, sha))
         nonregular = rg.git_nonregular_paths(cfg.clone, running, sha, scope)
     except subprocess.CalledProcessError:      # e.g. a submodule entry: counted, bounded, never silent
         return _infra(cfg, state, sha, attempts, "could not compute the release content", now)
+    except rg.Refused as refused:              # a symlink or odd path under desk/ or app/static
+        return _decide(cfg, state, sha, "REFUSED", str(refused), now)
+    if generated["required"] and not cfg.desk_build_command:
+        return record("WAITING", sha=sha, reason="desk/ or app/static changed and no desk_build_command is "
+                                                 "configured: the founder must install the offline desk build")
     try:
         tar = rg.release_archive(cfg.clone, sha)  # never sign bytes that would ship differently from those reviewed
     except rg.Refused as refused:
@@ -304,6 +407,22 @@ def _tick(cfg: Config, *, now, clock, checks, review, fetch) -> dict:
     passed = isinstance(result, dict) and result.get("passed") is True
     if not passed:
         return _decide(cfg, state, sha, "CHECKS_FAILED", str((result or {}).get("summary", ""))[:200], now)
+    desk_proof = None
+    if generated["required"]:                   # before the reviewer: never spend a review on a bundle that differs
+        try:
+            built = desk_build(sha)
+        except rg.Refused as refused:
+            return _decide(cfg, state, sha, "DESK_BUILD_MISMATCH", str(refused), now)
+        except Exception as error:   # a missing tool or runner: infrastructure, bounded, never a pass
+            return _infra(cfg, state, sha, attempts, f"desk build runner failed: {type(error).__name__}", now)
+        if not isinstance(built, dict) or built.get("passed") is not True:
+            return _decide(cfg, state, sha, "CHECKS_FAILED", str((built or {}).get("summary", ""))[:200], now)
+        if built.get("files") != generated["files"]:
+            return _decide(cfg, state, sha, "DESK_BUILD_MISMATCH",
+                           "app/static differs from the rebuild of desk/ at this commit", now)
+        desk_proof = {"runner": "gateway", "sha": sha, "desk_tree": generated["desk_tree"],
+                      "files": built["files"], "passed": True}
+        desk_proof["signature"] = rg.sign(rg.desk_proof_bytes(desk_proof), cfg.gateway_key, rg.NS_DESK_BUILD)
     nonce = secrets.token_hex(16)
     packet = rg.review_packet(cfg.repository, running, sha, diff, nonce)   # the diff's own base: what runs
     try:
@@ -321,6 +440,8 @@ def _tick(cfg: Config, *, now, clock, checks, review, fetch) -> dict:
     now = clock()   # the review may take many minutes: freshness and the manifest's lifetime start now
     evidence = {"trusted_checks": {"runner": "gateway", "sha": sha, "payload_digest": digest, "passed": True},
                 "review": {"nonce": nonce, "attestation": answer["attestation"], "signature": answer.get("signature")}}
+    if desk_proof:
+        evidence["desk_build"] = desk_proof
     try:
         rg.verify_review(evidence["review"], packet, policy, now)
     except rg.Refused as refused:
@@ -342,7 +463,7 @@ def _tick(cfg: Config, *, now, clock, checks, review, fetch) -> dict:
         return _decide(cfg, state, sha, "FOUNDER_REQUIRED", why, now, queued=True)
     manifest = {**base, "approver": "gateway", "evidence": evidence}
     try:
-        rg.gateway_approve(manifest, policy, now=now, diff=diff)
+        rg.gateway_approve(manifest, policy, now=now, diff=diff, generated=generated)
     except rg.Refused as refused:
         return _decide(cfg, state, sha, "REFUSED", str(refused), now)
     raw = rg.canonical(manifest)

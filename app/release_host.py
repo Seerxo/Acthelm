@@ -386,10 +386,11 @@ def host_facts(cfg: Config, manifest: dict, ledger: dict, docker=subprocess.run)
         record, _ = read_build_record(digest)
         wanted = record.get("images") if isinstance(record, dict) else None
     record, record_problem = read_build_record(digest)
+    generated = rg.generated_facts(cfg.clone, running, sha)   # the rebuild proof must match these, for every signer
     facts = {"repository": cfg.repository if on_branch else None, "branch": cfg.branch if on_branch else None,
              "sha": sha, "payload_digest": rg.payload_digest(rg.payload_listing(cfg.clone, sha)),
              "changed_paths": rg.git_changed_paths(cfg.clone, running, sha, scope), "ancestor_of_parent": descends,
-             "diff": rg.git_release_diff(cfg.clone, running, sha, scope),
+             "diff": rg.review_diff(cfg.clone, running, sha, ledger, generated), "generated": generated,
              "compose": {"host": host_compose, "parent": rg.git_blob_sha256(cfg.clone, running, "docker-compose.yml"),
                          "release": rg.git_blob_sha256(cfg.clone, sha, "docker-compose.yml")},
              "migration_heads": sorted(rg.alembic_heads(cfg.clone, sha)),

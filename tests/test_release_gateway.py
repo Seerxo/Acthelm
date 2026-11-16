@@ -22,6 +22,7 @@ DIFF = "diff --git a/docs/HANDOFF.md b/docs/HANDOFF.md\n--- a/docs/HANDOFF.md\n+
 NONCE = "ab" * 16
 INPUTS = "cd" * 32                      # what this release's image build consumes (rg.inputs_digest)
 DRIVER = "ef" * 32                      # sha256 of the deploy driver the host holds for the release
+UNCHANGED = {"required": False, "desk_tree": "4" * 40, "files": {}, "parent_files": {}}   # desk/, app/static same
 KEYS = {}
 
 
@@ -82,7 +83,8 @@ def facts(**over):
     return {"repository": "seerxo/os", "branch": "main", "sha": SHA, "payload_digest": DIGEST, "changed_paths": LOW,
             "ancestor_of_parent": True, "diff": DIFF, "inputs_digest": INPUTS, "driver_bound": True,
             "driver_sha256": DRIVER, "images_present": True, "anchored_images": True,
-            "migration_heads": {"abc123def456"}, "parent_migration_heads": {"abc123def456"}} | over
+            "migration_heads": {"abc123def456"}, "parent_migration_heads": {"abc123def456"},
+            "generated": UNCHANGED} | over
 
 
 def image(component: str, sha: str) -> str:
@@ -180,7 +182,7 @@ def refused(match, fn, *args, **kwargs):
 
 def test_a_low_risk_release_signed_by_the_gateway_is_accepted_and_recorded(keys, policy, tmp_path):
     m = manifest()
-    rg.gateway_approve(m, policy, now=NOW, diff=DIFF)
+    rg.gateway_approve(m, policy, now=NOW, diff=DIFF, generated=UNCHANGED)
     assert release(keys, policy, m)["sha"] == SHA
     ledger, applied = tmp_path / "ledger.json", []
     seed(ledger, STATE)
@@ -257,13 +259,13 @@ def test_understating_the_changed_paths_cannot_hide_a_high_risk_change(keys, pol
 def test_the_gateway_cannot_release_a_high_risk_path(keys, policy, path):
     paths = [*LOW, path]
     m = manifest(changed_paths=paths)
-    refused("founder", rg.gateway_approve, m, policy, now=NOW, diff=DIFF)
+    refused("founder", rg.gateway_approve, m, policy, now=NOW, diff=DIFF, generated=UNCHANGED)
     refused("high-risk", release, keys, policy, m, host=facts(changed_paths=paths))   # even with a stolen gateway key
 
 
 def test_the_gateway_cannot_authorize_a_migration(keys, policy):
     m = manifest(migration_to="abcdef012345")
-    refused("founder", rg.gateway_approve, m, policy, now=NOW, diff=DIFF)
+    refused("founder", rg.gateway_approve, m, policy, now=NOW, diff=DIFF, generated=UNCHANGED)
     refused("migration", release, keys, policy, m)
 
 
@@ -280,7 +282,7 @@ def test_a_signature_from_another_namespace_is_refused(keys, policy):
 def test_turning_off_automatic_release_leaves_only_founder_releases(keys):
     raw, sig = signed_policy(keys, auto_release=False)
     policy = rg.load_policy(raw, sig, keys["founder"][1])
-    refused("switched off", rg.gateway_approve, manifest(), policy, now=NOW, diff=DIFF)
+    refused("switched off", rg.gateway_approve, manifest(), policy, now=NOW, diff=DIFF, generated=UNCHANGED)
     refused("switched off", release, keys, policy, manifest())
     assert release(keys, policy, manifest(approver="founder"), "founder")
 
@@ -297,7 +299,7 @@ def test_turning_off_automatic_release_leaves_only_founder_releases(keys):
 def test_without_passing_trusted_checks_for_this_exact_payload_nothing_ships(keys, policy, checks):
     m = manifest()
     m["evidence"] = m["evidence"] | {"trusted_checks": checks}
-    refused("trusted checks", rg.gateway_approve, m, policy, now=NOW, diff=DIFF)
+    refused("trusted checks", rg.gateway_approve, m, policy, now=NOW, diff=DIFF, generated=UNCHANGED)
     refused("trusted checks", release, keys, policy, m)
 
 
@@ -324,7 +326,7 @@ def test_without_passing_trusted_checks_for_this_exact_payload_nothing_ships(key
 def test_a_signed_independent_review_of_this_exact_diff_is_required(keys, policy, review, why):
     m = manifest()
     m["evidence"] = m["evidence"] | {"review": review()}
-    refused(why, rg.gateway_approve, m, policy, now=NOW, diff=DIFF)
+    refused(why, rg.gateway_approve, m, policy, now=NOW, diff=DIFF, generated=UNCHANGED)
     refused(why, release, keys, policy, m)
 
 
@@ -1168,7 +1170,7 @@ def test_configuration_identity_differs_for_every_release(keys, policy):
 def test_a_rollback_needs_the_founder_and_the_reviewer(keys, policy):
     refused("rollback needs the founder", rollback, keys, policy, lambda: [applied_event()], signer="gateway")
     refused("rollback needs the founder", rg.gateway_approve, manifest(rollback_to=OTHER), policy, now=NOW,
-            diff=DIFF)
+            diff=DIFF, generated=UNCHANGED)
     evidence = manifest()["evidence"] | {"review": signed_review(output={"verdict": "REJECT", "fingerprint": rg.review_packet(
         "seerxo/os", PARENT, SHA, DIFF, NONCE)["fingerprint"], "findings": ["no"]})}
     refused("does not approve", rollback, keys, policy, lambda: [applied_event()], evidence=evidence)

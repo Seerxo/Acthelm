@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -29,6 +30,20 @@ def bound(sha: str) -> dict:
     return {c: "sha256:" + hashlib.sha256(f"{sha}:{c}".encode()).hexdigest() for c in rg.BOUND}
 
 
+# The founder's offline desk build, in miniature: it sees only desk/ (and an empty app/static) and writes the bundle.
+DESK_BUILD = """import pathlib, sys
+root = pathlib.Path(sys.argv[1])
+assert not any((root / "app/static").iterdir()) and sorted(p.name for p in root.iterdir()) == ["app", "desk"]
+src = (root / "desk/src.txt").read_text()
+if src.startswith("broken"):
+    sys.exit(1)
+if src.startswith("link"):
+    (root / "app/static/desk.html").symlink_to("/etc/hostname")
+    sys.exit(0)
+(root / "app/static/desk.html").write_text("bundle:" + src)
+"""
+
+
 def keypair(d: Path, name: str):
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(d / name)], check=True)
     return d / name, (d / f"{name}.pub").read_text().strip()
@@ -46,6 +61,11 @@ class World:
         (self.work / "app").mkdir()
         (self.work / "docs/HANDOFF.md").write_text("old\n")
         (self.work / "app/main.py").write_text("x = 1\n")
+        (self.work / "app/static").mkdir()
+        (self.work / "desk").mkdir()
+        (self.work / "desk/src.txt").write_text("v1\n")
+        (self.work / "app/static/desk.html").write_text("bundle:v1\n")
+        (tmp / "desk_build.py").write_text(DESK_BUILD)
         self.builds = tmp / "builds"
         self.builds.mkdir()
         self.base = self.commit("base")
@@ -74,7 +94,8 @@ class World:
             "ledger": str(tmp / "ledger.json"), "state": str(tmp / "state.json"), "outbox": str(tmp / "outbox"),
             "founder_queue": str(tmp / "queue"), "review_signer_socket": str(tmp / "signer.sock"),
             "builds": str(self.builds),
-            "checks_command": ["true"], "identity_report": str(tmp / "identity.json")})
+            "checks_command": ["true"], "identity_report": str(tmp / "identity.json"),
+            "desk_build_command": [sys.executable, str(tmp / "desk_build.py")]})
         self.check_calls, self.review_calls = [], []
         self.checks_pass, self.verdict, self.review_key, self.review_error = True, "APPROVE", "reviewer", None
 
@@ -138,10 +159,12 @@ class World:
         policy = rg.load_policy(self.cfg.policy.read_bytes(), self.cfg.policy_sig.read_text(), self.keys["founder"][1])
         digest = self.inputs_of(m["sha"])
         record, _ = svc.read_build_record(self.builds, digest)
-        facts = {"repository": "seerxo/os", "branch": "main", "sha": m["sha"],
+        generated = rg.generated_facts(self.work, ledger["last_sha"], m["sha"])
+        facts = {"repository": "seerxo/os", "branch": "main", "sha": m["sha"], "generated": generated,
                  "payload_digest": rg.payload_digest(rg.payload_listing(self.work, m["sha"])),
                  "changed_paths": rg.git_changed_paths(self.work, ledger["last_sha"], m["sha"]),
-                 "ancestor_of_parent": True, "diff": rg.git_release_diff(self.work, ledger["last_sha"], m["sha"]),
+                 "ancestor_of_parent": True,
+                 "diff": rg.review_diff(self.work, ledger["last_sha"], m["sha"], ledger, generated),
                  "inputs_digest": digest, "build_record": record, "driver_bound": True, "driver_sha256": DRIVER,
                  "images_present": True, "anchored_images": True}
         return rg.verify_release(raw, sig, policy=policy, founder_key=self.keys["founder"][1], host_facts=facts,
