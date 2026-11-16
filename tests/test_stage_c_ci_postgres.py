@@ -112,9 +112,9 @@ def test_postgres_refreshed_merge_is_append_only(db, scene):
     old = list(task.context["improvement"]["history"])
     assert stage_c_ci.reconcile_refreshed(db, task, request, facts, chain, mirror,
         repository="seerxo/acthelm", head_repository="seerxo/acthelm",
-        required_statuses=(), apply=True)["outcome"] == "MERGED"
+        required_statuses=(), apply=True) == {"outcome": "BLOCKED", "reasons": ["REFRESH_CONTEXT_NOT_REVIEWED"]}
     db.commit()
     db.expire_all()
-    assert task.status == enums.TaskStatus.REVIEW and task.context["improvement"]["history"][:-1] == old
+    assert task.status == enums.TaskStatus.BLOCKED and task.context["improvement"]["history"] == old
     row = db.scalar(select(models.AuditLog).where(models.AuditLog.action == "improvement.refresh_reconciled"))
     assert row.before["blocked_audit_id"] == block.id and row.after["request_audit_id"] == request.id
