@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import approval_identity, audit, models
+from app import approval_identity, audit, enums, models
 
 log = logging.getLogger("company.control")
 
@@ -164,23 +164,35 @@ def pilot_authorization_denial(db: Session, task_key: str, sha: str, now: dateti
 
 
 def authorize_pilot(db: Session, task_key: str, sha: str, *, founder: str, ttl: timedelta = timedelta(minutes=30),
-                    now: datetime | None = None) -> dict:
+                    now: datetime | None = None, handoff_id: str | None = None,
+                    payload_sha256: str | None = None) -> dict:
     """Record the authorization for the verified founder `founder` (a Principal.id from require_founder).
     It enables nothing by itself: the flag, acceptance and readiness still apply. Anything but a founder
-    principal id raises PermissionError and writes nothing."""
+    principal id raises PermissionError and writes nothing. A task imported by the production handoff
+    (app/stage_c_handoff.py) also needs its handoff id and payload digest, which the grant then carries."""
+    from app import stage_c_handoff  # late: stage_c_handoff imports this module
     if not approval_identity.is_founder_id(founder):
         raise PermissionError("only a verified founder identity may issue a Stage C authorization")
     now = now or datetime.now(timezone.utc)
     if not _TASK_KEY.match(task_key) or not _SHA.match(sha) or not (timedelta(0) < ttl <= AUTH_MAX_TTL):
         raise ValueError("authorization needs a task key, a 40-hex source SHA and a ttl up to one hour")
-    if db.scalar(select(models.Task.id).where(models.Task.key == task_key)) is None:
+    task = db.scalar(select(models.Task).where(models.Task.key == task_key))
+    if task is None:
         raise ValueError(f"{task_key} does not exist")
     row = db.scalar(select(models.ControlState).where(models.ControlState.key == PILOT_AUTHORIZATION)
                     .with_for_update().execution_options(populate_existing=True))
     before = dict(row.value) if row and isinstance(row.value, dict) else None
+    binding = stage_c_handoff.authorization_binding(db, task, handoff_id, payload_sha256, now)
+    if binding is not None and before is not None and before.get("task_key") != task_key:
+        # One outstanding authorized handoff at a time: never replace another task's live or in-flight grant.
+        live = before.get("consumed_at") is None and (_utc(before.get("expires_at")) or now) > now
+        run_id = before.get("consumed_by_run_id")
+        run = db.get(models.AgentRun, run_id) if type(run_id) is int else None
+        if live or (run is not None and run.status == enums.AgentRunStatus.STARTED):
+            raise ValueError("another task's Stage C authorization is still live; revoke it or let it finish first")
     value = {"task_key": task_key, "repository": AUTH_REPOSITORY, "source_sha": sha, "action": PILOT_ACTION,
              "issued_at": now.isoformat(), "expires_at": (now + ttl).isoformat(), "issued_by": founder,
-             "consumed_at": None, "consumed_by_run_id": None}
+             "consumed_at": None, "consumed_by_run_id": None, **(binding or {})}
     if row is None:
         row = models.ControlState(key=PILOT_AUTHORIZATION, value=value, updated_by=founder)
         db.add(row)
@@ -275,8 +287,13 @@ def _standing_denial(db: Session, row, wanted, sha: str, now: datetime) -> str |
 
 def write_authorization_denial(db: Session, task, sha: str, now: datetime | None = None) -> str | None:
     """None when this task may claim a code write: its own one-task authorization, else the standing one."""
+    from app import stage_c_handoff  # late: stage_c_handoff imports this module
     now = now or datetime.now(timezone.utc)
     pilot = pilot_authorization_denial(db, task.key, sha, now)
+    if stage_c_handoff.imported(task) is not None:
+        # A handed-off task: only its own handoff-bound one-task grant, never the standing fallback.
+        row = db.get(models.ControlState, PILOT_AUTHORIZATION)
+        return pilot or stage_c_handoff.grant_denial(db, task, row.value if row is not None else {})
     if pilot is None:
         return None
     row = db.get(models.ControlState, STANDING_AUTHORIZATION)
@@ -344,7 +361,14 @@ def revoke_standing(db: Session, *, actor: str, reason: str = "revoked") -> bool
 
 def consume_write_authorization(db: Session, task, sha: str, run_id: int, now: datetime | None = None) -> str | None:
     """Spend the one-task authorization if it is valid, else one run of the standing one. Caller commits."""
+    from app import stage_c_handoff  # late: stage_c_handoff imports this module
     now = now or datetime.now(timezone.utc)
+    if stage_c_handoff.imported(task) is not None:
+        row = db.scalar(select(models.ControlState).where(models.ControlState.key == PILOT_AUTHORIZATION)
+                        .with_for_update().execution_options(populate_existing=True))
+        denial = _authorization_denial(db, row, task.key, sha, now) or stage_c_handoff.grant_denial(
+            db, task, row.value if row is not None else {})
+        return denial or consume_pilot_authorization(db, task.key, sha, run_id, now)   # no standing fallback
     if consume_pilot_authorization(db, task.key, sha, run_id, now) is None:
         return None
     row = db.scalar(select(models.ControlState).where(models.ControlState.key == STANDING_AUTHORIZATION)

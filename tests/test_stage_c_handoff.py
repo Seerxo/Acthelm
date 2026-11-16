@@ -1,0 +1,461 @@
+"""B5 Desk -> Stage C handoff (app/stage_c_handoff.py) across two isolated databases: a production app and a Stage C
+app (the same FastAPI code, each call routed to its own SQLite engine and environment). Breaks caught: the handoff
+works while its flag is off, a non-service or non-founder caller reaches it, a replayed delivery creates a second task,
+grant or run, the founder's release is not re-verified at delivery, an unauthenticated, tampered or stale Stage C
+report is stored or moves state backwards, an imported task falls back to a standing grant, and the result never
+reaches the production Desk. The coder, launcher and reviewer are not exercised: stage_c.advance drives the pipeline.
+Short test ids on purpose (root conftest byte budget)."""
+import json
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
+from app import cloudflare_access, control, enums, main, models, stage_c, stage_c_handoff as h
+
+PROD_HOST, SC_HOST = "desk.example.invalid", "stagec.example.invalid"
+FOUNDER, FID = "founder@example.invalid", "founder:access:founder@example.invalid"
+ASSERT = {"Cf-Access-Jwt-Assertion": "founder-assertion"}
+TOKEN, ADMIN, DESK = "h" * 40, "a" * 40, "d" * 40
+SHA, HEAD, MERGE = "c" * 40, "e" * 40, "f" * 40
+BODY = {"title": "Fix goal rounding", "objective": "Round progress once", "success_criteria": "Tests pass",
+        "paths": ["app/goals.py", "tests/test_goals.py"], "context": ["app/models.py"]}
+SIDES = {
+    "prod": {"CF_ACCESS_DESK_HOST": PROD_HOST, h.SENDER_FLAG: "true", h.URL_ENV: f"https://{SC_HOST}",
+             h.RECEIVER_FLAG: None},
+    "sc": {"CF_ACCESS_DESK_HOST": SC_HOST, h.RECEIVER_FLAG: "true", h.SENDER_FLAG: None, h.URL_ENV: None},
+}
+
+
+def _engine():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    models.Base.metadata.create_all(engine)
+    return engine
+
+
+class World:
+    def __init__(self, monkeypatch):
+        self.mp, self.prod, self.sc, self.calls = monkeypatch, _engine(), _engine(), []
+        with Session(self.sc) as s:
+            s.add_all([models.Project(key="company-os", name="Company OS", status=enums.ProjectStatus.ACTIVE),
+                       models.Agent(key="developer", role="dev")])
+            s.commit()
+        with Session(self.prod) as s:
+            s.add(models.Task(key="TASK-0001", title="Goal rounding", objective="o", success_criteria="tests pass",
+                              status=enums.TaskStatus.BACKLOG))
+            s.commit()
+        self.side = None
+
+    @contextmanager
+    def on(self, side, **extra):
+        previous = self.side
+        self.use(side, **extra)
+        try:
+            yield
+        finally:
+            if previous:
+                self.use(previous)
+
+    def use(self, side, **extra):
+        self.side = side
+        for k, v in {**SIDES[side], **extra}.items():
+            self.mp.delenv(k, raising=False) if v is None else self.mp.setenv(k, v)
+        engine = self.prod if side == "prod" else self.sc
+
+        def get_db():
+            with Session(engine) as s:
+                yield s
+        main.app.dependency_overrides[main.get_db] = get_db
+
+    def client(self, host=None, peer="172.18.0.5"):
+        host = host or (PROD_HOST if self.side == "prod" else SC_HOST)
+        return TestClient(main.app, base_url=f"https://{host}", client=(peer, 50000))
+
+    def transport(self, method, path, body):
+        """Production's HTTP call, served by the Stage C app with the bearer and a Cloudflare service assertion."""
+        self.calls.append((method, path))
+        with self.on("sc"):
+            r = self.client().request(method, path, content=body, headers={
+                "authorization": f"Bearer {TOKEN}", "cf-access-jwt-assertion": "service-assertion",
+                "content-type": "application/json"})
+        self.last = (r.status_code, r.content, r.headers.get(h.MAC_HEADER))
+        return self.last
+
+    def sync(self, transport=None, **kw):
+        with self.on("prod"), Session(self.prod) as s:
+            return h.sync(s, transport or self.transport, **kw)
+
+    def prod_task(self):
+        with Session(self.prod) as s:
+            return s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+
+    def sc_tasks(self):
+        with Session(self.sc) as s:
+            return list(s.scalars(select(models.Task)))
+
+    def release(self, body=BODY):
+        with self.on("prod"):
+            return self.client().post("/tasks/TASK-0001/handoff", json=body, headers=ASSERT)
+
+
+@pytest.fixture
+def w(monkeypatch):
+    for k, v in {"COMPANY_API_TOKEN_ADMIN": ADMIN, "COMPANY_API_TOKEN_DESK": DESK, h.TOKEN_ENV: TOKEN,
+                 "API_AUTH_MODE": "enforce", "COMPANY_OS_GIT_SHA": SHA, "API_HOST_IPS": "10.0.6.1"}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("ENABLE_AUTONOMOUS_CODE_WRITE", raising=False)
+
+    async def identity(token, **kw):   # a Cloudflare service-token assertion is never a founder
+        return {"founder-assertion": FOUNDER}.get(token)
+    monkeypatch.setattr(cloudflare_access, "verify_founder_identity", identity)
+    monkeypatch.setattr(main.worker, "worker_state",
+                        lambda db: {"runtime": {"git_sha": SHA}, "autonomy": {"code_write_flag": False}})
+    world = World(monkeypatch)
+    world.use("prod")
+    yield world
+    main.app.dependency_overrides.clear()
+
+
+def _authorize(w, task_key, **binding):
+    with w.on("sc"):
+        return w.client().post("/stage-c/authorization", json={"task_key": task_key, **binding}, headers=ASSERT)
+
+
+def _claim(w, key):
+    """The worker's claim step: a STARTED run and the real consume (stage_c_worker.execute)."""
+    with Session(w.sc) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == key))
+        run = models.AgentRun(task_id=task.id, status=enums.AgentRunStatus.STARTED, tool_calls={"stage_c": True})
+        s.add(run)
+        s.flush()
+        denial = control.consume_write_authorization(s, task, SHA, run.id)
+        s.commit() if denial is None else s.rollback()
+        return denial
+
+
+def _pipeline(w, key, upto="MERGED"):
+    """Fake coder/reviewer/CI/founder merge: the recorded lifecycle the real pipeline writes."""
+    evidence = {"TESTING": {"checks_passed": True}, "PR_OPEN": {"pr": "https://github.com/seerxo/acthelm/pull/7",
+                                                                "commit": HEAD},
+                "CI": {"ci_state": "passed", "commit": HEAD},
+                "MERGED": {"merged_by": "founder-login", "merge_commit": MERGE}}
+    with Session(w.sc) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == key))
+        for stage in stage_c.STAGES[:stage_c.STAGES.index(upto) + 1]:
+            actor = "founder (github:founder-login)" if stage == "MERGED" else "company-worker"
+            stage_c.advance(s, task, stage, actor, evidence.get(stage))
+        s.commit()
+
+
+# ------------------------------------------------------------------------------------------------ off by default
+def test_off(w, monkeypatch):
+    for k in (h.SENDER_FLAG, h.RECEIVER_FLAG):
+        monkeypatch.delenv(k, raising=False)
+    w.side = "prod"
+    with w.on("prod", **{h.SENDER_FLAG: None}):
+        assert w.client().post("/tasks/TASK-0001/handoff", json=BODY, headers=ASSERT).status_code == 403
+        assert w.client().get("/desk/handoffs", headers=ASSERT).json()["enabled"] is False
+    with w.on("prod", **{h.SENDER_FLAG: None}), Session(w.prod) as s:
+        assert h.sync(s, w.transport) == {"handoff": "disabled"} and w.calls == []
+    with w.on("sc", **{h.RECEIVER_FLAG: None}):
+        r = w.client().put(f"{h.API_PREFIX}{'0' * 8}-0000-4000-8000-{'0' * 12}", content=b"{}",
+                           headers={"authorization": f"Bearer {TOKEN}"})
+        assert r.status_code == 403 and w.sc_tasks() == []
+    # Fail closed: both roles in one process, a short token, a non-https origin, or code write on.
+    for extra in ({h.RECEIVER_FLAG: "true"}, {h.TOKEN_ENV: "short"}, {h.URL_ENV: f"http://{SC_HOST}"},
+                  {"ENABLE_AUTONOMOUS_CODE_WRITE": "true"}):
+        with w.on("prod", **extra):
+            assert not h.sender_enabled(), extra
+    with w.on("sc", **{h.SENDER_FLAG: "true"}):
+        assert not h.receiver_enabled()
+    assert w.prod_task().status == enums.TaskStatus.BACKLOG
+
+
+# ------------------------------------------------------------------------------------------------ authentication
+def test_auth(w):
+    assert w.release().status_code == 201
+    w.sync()
+    path = w.calls[0][1]
+    with w.on("sc"):
+        callers = [({}, "172.18.0.5", SC_HOST, 401), ({"authorization": f"Bearer {ADMIN}"}, "172.18.0.5", "api", 403),
+                   ({}, "127.0.0.1", "api", 403), ({"authorization": f"Bearer {DESK}"}, "172.18.0.5", "api", 403),
+                   (ASSERT, "172.18.0.5", SC_HOST, 403), ({"authorization": f"Bearer {DESK}"}, "172.18.0.5", SC_HOST, 401)]
+        for headers, peer, host, code in callers:
+            for method in ("GET", "PUT"):
+                r = w.client(host=None if host == SC_HOST else "api.example.invalid", peer=peer).request(
+                    method, path, content=b"{}", headers=headers)
+                assert r.status_code == code, (headers, peer, host, method, r.text)
+        # The handoff bearer outside its namespace stays founder-only on the Desk host, scoped elsewhere.
+        bearer = {"authorization": f"Bearer {TOKEN}"}
+        assert w.client().get("/stage-c/state", headers=bearer).status_code == 401
+        assert w.client(host="api.example.invalid").get("/stage-c/state", headers=bearer).status_code == 403
+        assert w.client(host="api.example.invalid").post("/stage-c/tasks", json=BODY,
+                                                        headers=bearer).status_code == 403
+        w.mp.setenv("API_AUTH_MODE", "log")    # rollout mode never opens the machine routes
+        assert w.client(host="api.example.invalid").get(path).status_code == 401
+    # Release and the Desk read are the verified founder's only.
+    with w.on("prod"):
+        for headers in ({}, {"authorization": f"Bearer {ADMIN}"}, {"authorization": f"Bearer {TOKEN}"}):
+            assert w.client(host="api.example.invalid").post("/tasks/TASK-0001/handoff", json=BODY,
+                                                              headers=headers).status_code in (401, 403)
+            assert w.client(host="api.example.invalid").get("/desk/handoffs", headers=headers).status_code in (401, 403)
+    assert len(w.sc_tasks()) == 1
+
+
+# ------------------------------------------------------------------------------------------------ end to end
+def test_e2e(w):
+    r = w.release()
+    assert r.status_code == 201 and r.json()["delivery"] == "PENDING", r.text
+    hid, sha = r.json()["id"], r.json()["payload_sha256"]
+    assert w.release().json()["id"] == hid                                  # repeat click: same release
+    assert w.release({**BODY, "objective": "Something else"}).status_code == 409
+    assert w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL
+
+    assert w.sync()["requests"][0]["outcome"] == "DELIVERED"
+    [imp] = w.sc_tasks()
+    assert imp.status == enums.TaskStatus.BACKLOG and imp.created_by == h.SERVICE
+    assert imp.context["remote_stage_c"] == {"id": hid, "origin": "production", "origin_task_key": "TASK-0001",
+                                             "payload_sha256": sha}
+    packet = w.prod_task().context["remote_stage_c"]["packet"]
+
+    # Founder authorization on Stage C must name this handoff; then one claim spends it.
+    assert _authorize(w, imp.key).status_code == 422
+    assert _authorize(w, imp.key, handoff_id=hid, payload_sha256="0" * 64).status_code == 422
+    assert _authorize(w, imp.key, handoff_id=hid, payload_sha256=sha, expected_source_sha="b" * 40).status_code == 409
+    assert _authorize(w, imp.key, handoff_id=hid, payload_sha256=sha, expected_source_sha=SHA).status_code == 201
+    assert _claim(w, imp.key) is None
+    assert _claim(w, imp.key) == "stage_c_authorization_consumed"
+
+    # A resubmitted packet (lost reply, retry, replay) after the run started: same receipt, nothing new.
+    status, body, _ = w.transport("PUT", h.API_PREFIX + hid, h.canonical(packet))
+    assert status == 200 and json.loads(body)["task_key"] == imp.key
+    with Session(w.sc) as s:
+        assert s.scalar(select(func.count()).select_from(models.Task)) == 1
+        assert s.scalar(select(func.count()).select_from(models.AgentRun)) == 1
+        assert s.get(models.ControlState, control.PILOT_AUTHORIZATION).value["consumed_at"] is not None
+        assert s.scalar(select(func.count()).select_from(models.AuditLog)
+                        .where(models.AuditLog.action == "handoff.import")) == 1
+
+    _pipeline(w, imp.key)
+    out = w.sync()["requests"][0]
+    assert out["outcome"] == "OBSERVED", out
+    with w.on("prod"):
+        [row] = w.client().get("/desk/handoffs", headers=ASSERT).json()["handoffs"]
+        detail = w.client().get("/tasks/TASK-0001", headers=ASSERT).json()["remote_stage_c"]
+    snap = row["handoff"]["snapshot"]
+    assert row["handoff"]["freshness"] == "FRESH" and detail["snapshot"] == snap
+    assert snap["merge"] == {"state": "VERIFIED", "commit": MERGE, "at": snap["merge"]["at"]}
+    assert snap["task"]["pr"] == {"number": 7, "head_sha": HEAD} and snap["task"]["ci"]["state"] == "SUCCESS"
+    assert snap["authorization"]["status"] == "CONSUMED" and snap["task_key"] == imp.key
+    assert w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL       # a report never closes production work
+    with Session(w.prod) as s:
+        actions = [a for (a,) in s.execute(select(models.AuditLog.action).order_by(models.AuditLog.id))]
+        assert actions == ["handoff.release", "handoff.delivery", "handoff.observed"]
+
+    with w.on("prod"):
+        assert w.client().post("/tasks/TASK-0001/status", json={"status": "READY", "actor": "x"},
+                               headers=ASSERT).status_code == 409
+        r = w.client().post("/tasks/TASK-0001/status", headers=ASSERT, json={
+            "status": "DONE", "actor": "founder", "evidence": f"merged {MERGE}"})
+        assert r.status_code == 200, r.text
+    before = len(w.calls)
+    assert w.sync()["requests"] == [] and len(w.calls) == before            # closed: nothing more is read or sent
+
+
+def test_done_guard(w):
+    w.release()
+    w.sync()
+    with w.on("prod"):
+        r = w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
+                            json={"status": "DONE", "actor": "founder", "evidence": "trust me"})
+    assert r.status_code == 409 and w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL
+
+
+# ------------------------------------------------------------------------------------------------ re-verification
+@pytest.mark.parametrize("change", ["edited", "forged", "expired", "retitled_audit"])
+def test_reverify(w, change):
+    """Founder authorization is re-checked at handoff time: nothing reaches Stage C after any of these."""
+    if change == "forged":   # a hand-written release with no founder audit row
+        with Session(w.prod) as s:
+            task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+            pkt = {"version": 1, "id": "11111111-1111-4111-8111-111111111111", "origin": "production",
+                   "origin_task_key": "TASK-0001", "repository": "seerxo/acthelm",
+                   "issued_at": datetime.now(timezone.utc).isoformat(),
+                   "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+                   "task": {k: BODY[k] for k in ("title", "objective", "success_criteria", "paths", "context")}}
+            pkt["payload_sha256"] = h.digest(pkt)
+            task.context = {"remote_stage_c": {"id": pkt["id"], "payload_sha256": pkt["payload_sha256"], "packet": pkt,
+                                               "released_by": FID, "delivery": "PENDING", "source_sha256": h.source_digest(task),
+                                               "expires_at": pkt["expires_at"]}}
+            task.status = enums.TaskStatus.WAITING_EXTERNAL
+            s.commit()
+        code = "RELEASE_NOT_AUTHORIZED"
+    else:
+        assert w.release().status_code == 201
+        with Session(w.prod) as s:
+            task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+            if change == "edited":
+                task.objective = "something the founder never saw"
+            if change == "retitled_audit":
+                row = s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.release"))
+                row.actor = "operator:host"
+            s.commit()
+        code = {"edited": "TASK_CHANGED", "expired": "RELEASE_EXPIRED", "retitled_audit": "RELEASE_NOT_AUTHORIZED"}[change]
+    now = datetime.now(timezone.utc) + (timedelta(hours=25) if change == "expired" else timedelta(0))
+    out = w.sync(now=now)["requests"]
+    assert out[0]["outcome"] == code and w.calls == [] and w.sc_tasks() == []
+    assert w.prod_task().context["remote_stage_c"]["delivery"] == "REFUSED"
+    assert w.sync(now=now)["requests"] == []                                 # a refusal is not retried
+
+
+def test_cancel_first(w):
+    """Founder cancels before delivery: Stage C gets a tombstone, and a delayed PUT can never import it."""
+    hid = w.release().json()["id"]
+    packet = w.prod_task().context["remote_stage_c"]["packet"]
+    with w.on("prod"):
+        assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
+                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 200
+    assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED" and w.calls[0][0] == "POST"
+    status, _, _ = w.transport("PUT", h.API_PREFIX + hid, h.canonical(packet))
+    assert status == 410 and w.sc_tasks() == []
+    assert w.sync()["requests"] == []
+
+
+def test_cancel_running(w):
+    hid = w.release().json()["id"]
+    w.sync()
+    [imp] = w.sc_tasks()
+    sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
+    assert _authorize(w, imp.key, handoff_id=hid, payload_sha256=sha).status_code == 201
+    with w.on("prod"):
+        w.client().post("/tasks/TASK-0001/status", headers=ASSERT, json={"status": "CANCELLED", "actor": "founder"})
+    w.sync()
+    [imp] = w.sc_tasks()
+    assert imp.status == enums.TaskStatus.CANCELLED
+    with Session(w.sc) as s:
+        assert s.get(models.ControlState, control.PILOT_AUTHORIZATION) is None   # only the bound grant is revoked
+    assert _claim(w, imp.key) is not None
+    assert _authorize(w, imp.key, handoff_id=hid, payload_sha256=sha).status_code == 422
+
+
+# ------------------------------------------------------------------------------------------------ receiver contract
+def test_receiver(w):
+    hid = w.release().json()["id"]
+    packet = w.prod_task().context["remote_stage_c"]["packet"]
+    path = h.API_PREFIX + hid
+    for bad in ({**packet, "extra": 1}, {**packet, "id": "22222222-2222-4222-8222-222222222222"},
+                {**packet, "task": {**packet["task"], "paths": ["app/main.py"]}}):
+        assert w.transport("PUT", path, h.canonical(bad))[0] == 422
+    assert w.transport("PUT", path, h.canonical({**packet, "task": {**packet["task"], "paths": ["app/main.py"]},
+                                                  "payload_sha256": h.digest({**packet, "task": {
+                                                      **packet["task"], "paths": ["app/main.py"]}})}))[0] == 422
+    assert w.transport("PUT", path, h.canonical(packet))[0] == 201
+    changed = {**packet, "task": {**packet["task"], "objective": "changed"}}
+    changed["payload_sha256"] = h.digest(changed)
+    assert w.transport("PUT", path, h.canonical(changed))[0] == 409          # same id, other text
+    old = {**packet, "id": "33333333-3333-4333-8333-333333333333",
+           "issued_at": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
+           "expires_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()}
+    old["payload_sha256"] = h.digest(old)
+    assert w.transport("PUT", h.API_PREFIX + old["id"], h.canonical(old))[0] == 410
+    assert len(w.sc_tasks()) == 1
+
+
+def test_no_standing(w):
+    """An imported task never rides a standing grant, even one that covers its files."""
+    hid = w.release().json()["id"]
+    w.sync()
+    [imp] = w.sc_tasks()
+    with Session(w.sc) as s:
+        control.issue_standing(s, BODY["paths"], SHA, founder=FID)
+        task = s.get(models.Task, imp.id)
+        assert control.write_authorization_denial(s, task, SHA) == "stage_c_authorization_missing"
+    assert _claim(w, imp.key) == "stage_c_authorization_missing"
+    with Session(w.sc) as s:   # a plain (unbound) grant for it does not count either
+        task = s.get(models.Task, imp.id)
+        s.add(models.Task(key="TASK-0099", title="other", success_criteria="s"))
+        s.commit()
+        control.authorize_pilot(s, "TASK-0099", SHA, founder=FID)
+        row = s.get(models.ControlState, control.PILOT_AUTHORIZATION)
+        row.value = {**row.value, "task_key": imp.key}
+        s.commit()
+        assert control.write_authorization_denial(s, task, SHA) == "stage_c_authorization_invalid"
+    assert hid
+
+
+# ------------------------------------------------------------------------------------------------ reports back
+def test_reports(w):
+    """Stage C reports are authenticated and monotonic: tampered, unsigned, stale or replayed ones change nothing."""
+    hid = w.release().json()["id"]
+    t0 = datetime.now(timezone.utc)
+    w.sync(now=t0)
+    [imp] = w.sc_tasks()
+    assert w.sync(now=t0)["requests"][0]["outcome"] == "OBSERVED"      # first poll: BACKLOG snapshot
+    old = w.last
+    _pipeline(w, imp.key)
+    assert w.sync(now=t0 + timedelta(minutes=1))["requests"][0]["outcome"] == "OBSERVED"
+    stored = w.prod_task().artifacts["remote_stage_c"]
+    assert stored["snapshot"]["merge"]["state"] == "VERIFIED"
+
+    def fixed(resp):
+        return lambda method, path, body: resp
+    later = datetime.now(timezone.utc) + timedelta(minutes=2)
+    status, body, sig = w.last
+    tampered = body.replace(b'"VERIFIED"', b'"NOT_OBSERVED"')
+    for resp, code in (((status, tampered, sig), "BAD_MAC"), ((status, body, None), "BAD_MAC"),
+                       ((status, body, h.mac("GET", h.API_PREFIX + "x", body)), "BAD_MAC"),
+                       (old, "STALE"), ((500, b"", None), "HTTP_500"), ((0, b"", None), "UNREACHABLE")):
+        out = w.sync(fixed(resp), now=later)["requests"][0]
+        later += timedelta(hours=1)
+        assert out["outcome"] == code, (code, out)
+        assert w.prod_task().artifacts["remote_stage_c"] == stored
+    # A correctly signed report that is not about this handoff is refused too.
+    other = json.loads(body)
+    other["payload_sha256"] = "0" * 64
+    raw = h.canonical(other)
+    out = w.sync(fixed((200, raw, h.mac("GET", h.API_PREFIX + hid, raw))), now=later)["requests"][0]
+    assert out["outcome"] == "BINDING_MISMATCH" and w.prod_task().artifacts["remote_stage_c"] == stored
+    # The same report again is a duplicate: freshness only, no audit row.
+    out = w.sync(fixed((status, body, sig)), now=later + timedelta(hours=1))["requests"][0]
+    assert out["outcome"] == "UNCHANGED"
+    with Session(w.prod) as s:
+        assert s.scalar(select(func.count()).select_from(models.AuditLog)
+                        .where(models.AuditLog.action == "handoff.observed")) == 2
+
+
+def test_backoff(w):
+    """Transient failures back off and suspend after MAX_DELIVERY_FAILURES; a founder re-release resumes the same
+    packet; an auth failure is a hard stop."""
+    w.release()
+    t0 = datetime.now(timezone.utc)
+    for i in range(h.MAX_DELIVERY_FAILURES):
+        out = w.sync(lambda m, p, b: (0, b"", None), now=t0 + timedelta(hours=i))["requests"]
+        assert out[0]["outcome"] == "UNREACHABLE"
+    assert w.prod_task().context["remote_stage_c"]["delivery"] == "SUSPENDED"
+    assert w.sync(now=t0 + timedelta(hours=9))["requests"] == []
+    assert w.release().json()["delivery"] == "PENDING"
+    assert w.sync(lambda m, p, b: (401, b"", None))["requests"][0]["outcome"] == "HTTP_401"
+    assert w.prod_task().context["remote_stage_c"]["delivery"] == "REFUSED"
+    assert w.release().json()["delivery"] == "PENDING"                      # founder retry after a hard stop
+
+
+def test_latch(w):
+    """A finished remote task is never reopened by a later report, even a correctly signed one with a higher seq."""
+    hid = w.release().json()["id"]
+    sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
+    t0 = datetime.now(timezone.utc)
+    w.sync(now=t0)
+    w.transport("POST", f"{h.API_PREFIX}{hid}/cancel", h.canonical({"payload_sha256": sha,
+                                                                     "reason": "PRODUCTION_CANCELLED"}))
+    assert w.sync(now=t0)["requests"][0]["outcome"] == "OBSERVED"
+    stored = w.prod_task().artifacts["remote_stage_c"]
+    assert stored["snapshot"]["task"]["status"] == "CANCELLED"
+    reopened = {**stored["snapshot"], "seq": stored["seq"] + 10,
+                "task": {**stored["snapshot"]["task"], "status": "READY"}}
+    raw = h.canonical(reopened)
+    out = w.sync(lambda m, p, b: (200, raw, h.mac("GET", h.API_PREFIX + hid, raw)), now=t0 + timedelta(hours=1))
+    assert out["requests"][0]["outcome"] == "STALE" and w.prod_task().artifacts["remote_stage_c"] == stored

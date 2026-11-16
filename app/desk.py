@@ -15,7 +15,7 @@ from alembic.script import ScriptDirectory
 from pathlib import Path
 
 from app import (business_reconciler, control, enums, goals, metrics_store, models, reconciler_heartbeat, stage_c_ci,
-                 stage_c_worker, watchdog, worker)
+                 stage_c_handoff, stage_c_worker, watchdog, worker)
 from app.notify import NotificationService
 from app.redact import MAX_SCAN_CHARS, redact
 
@@ -866,6 +866,8 @@ def task_detail(db: Session, task: models.Task) -> dict:
         "dependencies": [{"key": d.key, "status": d.status.value} for d in dependencies],
         "runs": [_run(r, task.key) for r in run_rows],
         "pull_request": _pull_request(task),
+        # B5: this task's handoff to Stage C and the last authenticated Stage C report (null when not handed off).
+        "remote_stage_c": stage_c_handoff.desk_view(task),
         "artifacts": _artifacts_view(task.artifacts), "result": _clean(task.result), "error": _clean(task.error),
         "supervisor": ({"verdict": verdict.supervisor_verdict.value,
                         "notes": _clean(verdict.supervisor_notes)} if verdict else None),
