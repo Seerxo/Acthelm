@@ -873,6 +873,9 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
     # outcome, and for any change to REVIEW or a founder-closed task. Check under the row lock before writing;
     # `body.reported_by` is untrusted metadata, never the audit actor.
     db.refresh(task, with_for_update=True)
+    if stage_c_handoff.released(task):   # B5: a task handed to Stage C has no local runs on production
+        db.rollback()
+        raise HTTPException(409, f"{task.key} was handed to Stage C; production records no local run for it")
     st = body.herdr_state
     outcome = runreport.interpret(st)
     outcome.summary = redact(outcome.summary)

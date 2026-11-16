@@ -18,6 +18,11 @@ def snapshot(obj: Any) -> dict:
         if k in _SKIP:
             continue
         out[k] = v.isoformat() if hasattr(v, "isoformat") else (v.value if hasattr(v, "value") else v)
+    ctx = out.get("context")
+    remote = ctx.get("remote_stage_c") if isinstance(ctx, dict) else None
+    if isinstance(remote, dict) and "packet" in remote:
+        # B5: the released transfer text is bound by its digest; audit rows never copy it (app/stage_c_handoff.py).
+        out["context"] = {**ctx, "remote_stage_c": {k: v for k, v in remote.items() if k != "packet"}}
     return out
 
 

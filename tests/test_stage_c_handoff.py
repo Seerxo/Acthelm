@@ -419,9 +419,20 @@ def test_reports(w):
     raw = h.canonical(other)
     out = w.sync(fixed((200, raw, h.mac("GET", h.API_PREFIX + hid, raw))), now=later)["requests"][0]
     assert out["outcome"] == "BINDING_MISMATCH" and w.prod_task().artifacts["remote_stage_c"] == stored
-    # The same report again is a duplicate: freshness only, no audit row.
-    out = w.sync(fixed((status, body, sig)), now=later + timedelta(hours=1))["requests"][0]
+    # A newer report at the same seq only refreshes freshness (no audit row); an exact replay is stale, so an old
+    # verified-merge report can never renew the freshness that DONE needs.
+    later += timedelta(hours=1)
+    same = {**json.loads(body), "generated_at": later.isoformat()}
+    raw = h.canonical(same)
+    out = w.sync(fixed((200, raw, h.mac("GET", h.API_PREFIX + hid, raw))), now=later)["requests"][0]
     assert out["outcome"] == "UNCHANGED"
+    assert w.prod_task().artifacts["remote_stage_c"]["generated_at"] == later.isoformat()
+    out = w.sync(fixed((200, raw, h.mac("GET", h.API_PREFIX + hid, raw))), now=later + timedelta(hours=1))
+    assert out["requests"][0]["outcome"] == "STALE"
+    with Session(w.prod) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        assert h.desk_view(task, later + timedelta(hours=1))["freshness"] == "UNKNOWN"
+        assert h.status_refusal(task, enums.TaskStatus.DONE, later + timedelta(hours=1))
     with Session(w.prod) as s:
         assert s.scalar(select(func.count()).select_from(models.AuditLog)
                         .where(models.AuditLog.action == "handoff.observed")) == 2
@@ -443,6 +454,46 @@ def test_backoff(w):
     assert w.release().json()["delivery"] == "PENDING"                      # founder retry after a hard stop
 
 
+def test_review_fixes(w):
+    """Codex review of 081632a: other local writers cannot run a released task, failed cancellations cannot starve
+    the rest, the backoff never overflows, and ordinary audit rows never copy the packet text."""
+    from app import worker
+    w.release()
+    with Session(w.prod) as s:
+        dep = models.Task(key="TASK-0002", title="dep", success_criteria="s", status=enums.TaskStatus.DONE)
+        s.add(dep)
+        s.flush()
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        task.context = {**task.context, "release_on_dependencies": True, "autonomous": True}
+        s.add(models.TaskDependency(task_id=task.id, depends_on_id=dep.id))
+        s.commit()
+        assert worker.release_dependency_waits(s) == []
+        assert worker._admission_gate(s, task, {})[0] == "handed_off_to_stage_c"
+    with w.on("prod"):
+        r = w.client(host="api.example.invalid", peer="127.0.0.1").post("/tasks/TASK-0001/run-report", json={
+            "herdr_state": {"created_at": "2026-11-10T10:00:00+00:00", "status": "running"}})
+        assert r.status_code == 409, r.text
+        assert w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL
+        assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
+                               json={"status": "BLOCKED", "actor": "founder"}).status_code == 200
+    assert h._backoff(10_000) == h.MAX_BACKOFF
+    with Session(w.prod) as s:
+        rows = s.scalars(select(models.AuditLog.after)).all() + s.scalars(select(models.AuditLog.before)).all()
+        assert BODY["objective"] not in json.dumps(rows)
+    # Four cancellations, a Stage C that refuses the first three: the fourth is still sent within a few ticks.
+    with Session(w.prod) as s:
+        for n in range(2, 6):
+            s.add(models.Task(key=f"TASK-01{n:02d}", title="t", success_criteria="s",
+                              status=enums.TaskStatus.CANCELLED, context={"remote_stage_c": {
+                                  "id": f"{n}" * 8 + "-0000-4000-8000-" + "0" * 12, "payload_sha256": "0" * 64,
+                                  "cancel_requested_at": "2026-11-10T10:00:00+00:00", "cancellation": "NONE"}}))
+        s.commit()
+    seen, t0 = set(), datetime.now(timezone.utc)
+    for tick in range(4):
+        w.sync(lambda method, path, body: seen.add(path) or (0, b"", None), now=t0 + timedelta(seconds=tick))
+    assert any(p.startswith(h.API_PREFIX + "5") for p in seen), seen
+
+
 def test_latch(w):
     """A finished remote task is never reopened by a later report, even a correctly signed one with a higher seq."""
     hid = w.release().json()["id"]
@@ -454,7 +505,7 @@ def test_latch(w):
     assert w.sync(now=t0)["requests"][0]["outcome"] == "OBSERVED"
     stored = w.prod_task().artifacts["remote_stage_c"]
     assert stored["snapshot"]["task"]["status"] == "CANCELLED"
-    reopened = {**stored["snapshot"], "seq": stored["seq"] + 10,
+    reopened = {**stored["snapshot"], "seq": stored["seq"] + 10, "generated_at": (t0 + timedelta(hours=1)).isoformat(),
                 "task": {**stored["snapshot"]["task"], "status": "READY"}}
     raw = h.canonical(reopened)
     out = w.sync(lambda m, p, b: (200, raw, h.mac("GET", h.API_PREFIX + hid, raw)), now=t0 + timedelta(hours=1))

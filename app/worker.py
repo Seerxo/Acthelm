@@ -234,6 +234,8 @@ def _admission_gate(db: Session, task: models.Task, specs: dict, *,
                     ) -> tuple[str | None, registry.AgentSpec | None]:
     """Shared safety/dependency gate, independent of execution capacity."""
     ctx = task.context if isinstance(task.context, dict) else {}
+    if stage_c_handoff.released(task):   # B5: Stage C runs it; production never claims or releases it
+        return "handed_off_to_stage_c", None
     if ctx.get("autonomous") is not True:
         return "not_opted_in", None
     if task.risk_level != enums.RiskLevel.LOW or task.approval_required:
@@ -435,7 +437,7 @@ def release_dependency_waits(db: Session) -> list[str]:
             .execution_options(populate_existing=True)).all()
         for task in parked:
             ctx = task.context if isinstance(task.context, dict) else {}
-            if ctx.get("release_on_dependencies") is not True:
+            if ctx.get("release_on_dependencies") is not True or stage_c_handoff.released(task):
                 continue
             project = db.get(models.Project, task.project_id) if task.project_id else None
             if project and project.status != enums.ProjectStatus.ACTIVE:

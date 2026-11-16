@@ -241,6 +241,11 @@ def _remote(task: models.Task) -> dict | None:
     return remote if isinstance(remote, dict) and remote.get("origin") is None else None
 
 
+def released(task: models.Task) -> bool:
+    """A production task released to Stage C: production never runs, claims or auto-releases it."""
+    return _remote(task) is not None
+
+
 def _set_remote(task: models.Task, **changes) -> dict:
     remote = {**(_remote(task) or {}), **changes}
     task.context = {**(task.context or {}), "remote_stage_c": remote}
@@ -408,7 +413,7 @@ def _due(remote: dict, now: datetime) -> bool:
 
 
 def _backoff(failures: int) -> timedelta:
-    return min(timedelta(seconds=30 * 2 ** max(failures - 1, 0)), MAX_BACKOFF)
+    return min(timedelta(seconds=30 * 2 ** min(max(failures - 1, 0), 10)), MAX_BACKOFF)   # exponent capped
 
 
 def sync(db: Session, transport: Transport | None = None, *, paused: bool = False,
@@ -427,7 +432,8 @@ def sync(db: Session, transport: Transport | None = None, *, paused: bool = Fals
         if remote is None:
             continue
         if remote.get("cancel_requested_at") and remote.get("cancellation") != "ACKNOWLEDGED":
-            cancels.append(task.id)
+            if _due(remote, now):   # failed cancellations back off, so they cannot starve the others
+                cancels.append((remote.get("last_attempt_at") or "", task.id))
         elif task.status != enums.TaskStatus.WAITING_EXTERNAL:
             continue    # closed by the founder: nothing more is read or sent
         elif remote.get("delivery") == "PENDING" and not paused and _due(remote, now):
@@ -436,7 +442,7 @@ def sync(db: Session, transport: Transport | None = None, *, paused: bool = Fals
             polls.append((remote.get("last_attempt_at") or "", task.id))
     db.commit()  # end the read transaction before any network call
     done = []
-    work = [("cancel", i) for i in cancels] + [("deliver", i) for i in deliveries] + \
+    work = [("cancel", i) for _, i in sorted(cancels)] + [("deliver", i) for i in deliveries] + \
            [("poll", i) for _, i in sorted(polls)]
     for kind, task_id in work[:REQUESTS_PER_TICK]:
         try:
@@ -547,18 +553,25 @@ def _observe(db, task, remote, snap: Snapshot, data: dict, now: datetime) -> dic
     closed = (previous.get("task") or {}).get("status") in ("DONE", "CANCELLED")
     fresh = {"last_attempt_at": now.isoformat(), "poll_failures": 0, "last_error_code": None,
              "next_attempt_at": (now + POLL_EVERY).isoformat()}
+    # A replayed or delayed authenticated report is not fresh evidence: its generation time must be recent and
+    # newer than the last one accepted (freshness, and so DONE, derive from it, never from our receive time).
+    generated, last_generated = _utc(snap.generated_at), _utc(stored.get("generated_at") if stored else None)
+    replayed = (generated is None or generated > now + timedelta(seconds=60) or now - generated > STALE_AFTER
+                or (last_generated is not None and generated <= last_generated))
     # Latches: a verified merge or a closed remote task is never replaced by a report without it.
-    if (snap.seq < last_seq or (merged and snap.merge.state != "VERIFIED")
+    if (replayed or snap.seq < last_seq or (merged and snap.merge.state != "VERIFIED")
             or (closed and (snap.task is None or snap.task.status.value != previous["task"]["status"]))):
         _set_remote(task, **{**fresh, "last_error_code": "STALE_REPORT"})
         db.commit()
         return {"task": task.key, "kind": "poll", "outcome": "STALE"}
     _set_remote(task, **fresh, last_success_at=now.isoformat())
     if snap.seq == last_seq:
+        task.artifacts = {**task.artifacts, "remote_stage_c": {**stored, "generated_at": generated.isoformat()}}
         db.commit()
         return {"task": task.key, "kind": "poll", "outcome": "UNCHANGED"}
     task.artifacts = {**(task.artifacts or {}), "remote_stage_c": {
-        "seq": snap.seq, "observed_at": now.isoformat(), "snapshot": snap.model_dump(mode="json")}}
+        "seq": snap.seq, "observed_at": now.isoformat(), "generated_at": generated.isoformat(),
+        "snapshot": snap.model_dump(mode="json")}}
     audit.record(db, actor="company-worker", action="handoff.observed", entity_type="task", entity_key=task.key,
                  task_id=task.id, after={"id": snap.id, "seq": snap.seq, "remote_task_key": snap.task_key,
                                          "remote_status": snap.task.status.value if snap.task else None,
@@ -586,7 +599,9 @@ def _cancel(db: Session, task_id: int, transport: Transport, now: datetime) -> d
         ack = None
     if ack is None or ack.id != hid:
         code = _transport_code(status) if status != 200 else ("BAD_RESPONSE" if data is not None else "BAD_MAC")
-        _set_remote(task, last_error_code=code, last_attempt_at=now.isoformat())
+        failures = int(remote.get("cancel_failures") or 0) + 1
+        _set_remote(task, last_error_code=code, last_attempt_at=now.isoformat(), cancel_failures=failures,
+                    next_attempt_at=(now + _backoff(failures)).isoformat())
         db.commit()
         return {"task": task.key, "kind": "cancel", "outcome": code}   # "remote stop unconfirmed" until acknowledged
     _set_remote(task, cancellation="ACKNOWLEDGED", last_error_code=None, last_attempt_at=now.isoformat())
@@ -606,8 +621,9 @@ def desk_view(task: models.Task, now: datetime | None = None) -> dict | None:
     now = now or datetime.now(timezone.utc)
     stored = (task.artifacts or {}).get("remote_stage_c") if isinstance(task.artifacts, dict) else None
     stored = stored if isinstance(stored, dict) else {}
-    last = _utc(remote.get("last_success_at"))
-    fresh = stored.get("snapshot") is not None and last is not None and timedelta(0) <= now - last <= STALE_AFTER
+    generated = _utc(stored.get("generated_at"))   # when Stage C produced the newest accepted report
+    fresh = (stored.get("snapshot") is not None and generated is not None
+             and timedelta(seconds=-60) <= now - generated <= STALE_AFTER)
     cancel = ("ACKNOWLEDGED" if remote.get("cancellation") == "ACKNOWLEDGED"
               else "PENDING" if remote.get("cancel_requested_at") else "NONE")
     return {"id": remote.get("id"), "payload_sha256": remote.get("payload_sha256"),
@@ -720,6 +736,15 @@ def cancel_import(db: Session, hid: str, sha: str, now: datetime | None = None) 
     resurrect it. Cancels the local task if it is still open and revokes the pilot grant only if it is bound to this
     handoff. A run already in flight stops at its next owner check (acknowledgement is not proof of termination)."""
     now = now or datetime.now(timezone.utc)
+    # Lock order task -> pilot grant -> handoff row, the same order as a claim (task, then grant in
+    # control.consume_write_authorization) and authorization (grant, then handoff in authorize_pilot), so no two of
+    # them can deadlock. The task key is read unlocked first: it is written once, at import, and never changes.
+    peek = _row(db, hid)
+    task_key = peek.value.get("task_key") if peek is not None and isinstance(peek.value, dict) else None
+    task = db.scalar(select(models.Task).where(models.Task.key == task_key).with_for_update()
+                     .execution_options(populate_existing=True)) if task_key else None
+    grant = db.scalar(select(models.ControlState).where(models.ControlState.key == control.PILOT_AUTHORIZATION)
+                      .with_for_update().execution_options(populate_existing=True)) if peek is not None else None
     row = _row(db, hid, lock=True)
     if row is None:
         try:
@@ -740,17 +765,16 @@ def cancel_import(db: Session, hid: str, sha: str, now: datetime | None = None) 
     if value.get("cancelled_at"):
         db.commit()
         return {"id": hid, "cancellation": "ACKNOWLEDGED", "task_key": value.get("task_key")}
+    if value.get("task_key") != task_key:   # the import committed between the peek and the locks: start over
+        db.rollback()
+        return cancel_import(db, hid, sha, now)
     row.value = {**value, "cancelled_at": now.isoformat()}
-    task = db.scalar(select(models.Task).where(models.Task.key == value.get("task_key")).with_for_update()
-                     .execution_options(populate_existing=True)) if value.get("task_key") else None
     if task is not None and task.status not in (enums.TaskStatus.DONE, enums.TaskStatus.CANCELLED):
         before = task.status.value
         task.status, task.completed_at = enums.TaskStatus.CANCELLED, now
         audit.record(db, actor=SERVICE, action="task.status", entity_type="task", entity_key=task.key,
                      task_id=task.id, reason="PRODUCTION_CANCELLED", before={"status": before},
                      after={"status": "CANCELLED"})
-    grant = db.scalar(select(models.ControlState).where(models.ControlState.key == control.PILOT_AUTHORIZATION)
-                      .with_for_update().execution_options(populate_existing=True))
     gv = grant.value if grant is not None and isinstance(grant.value, dict) else {}
     if grant is not None and gv.get("handoff_id") == hid and gv.get("task_key") == value.get("task_key"):
         db.delete(grant)
@@ -798,6 +822,14 @@ def snapshot(db: Session, hid: str, now: datetime | None = None) -> dict:
     value = row.value if isinstance(row.value, dict) else {}
     task = db.scalar(select(models.Task).where(models.Task.key == value.get("task_key"))) \
         if value.get("task_key") else None
+    # The sequence is read BEFORE the state it labels and the state is then re-read: under READ COMMITTED a change
+    # committing in between makes the content newer than its seq (re-reported at the next seq), never older.
+    seq = _seq(db, hid, task)
+    db.expire_all()
+    row = _row(db, hid)
+    value = row.value if isinstance(row.value, dict) else {}
+    task = db.scalar(select(models.Task).where(models.Task.key == value.get("task_key"))) \
+        if value.get("task_key") else None
     projection = None
     if task is not None:
         runs = list(db.scalars(select(models.AgentRun).where(models.AgentRun.task_id == task.id)
@@ -821,7 +853,7 @@ def snapshot(db: Session, hid: str, now: datetime | None = None) -> dict:
     runtime = state.get("runtime") or {}
     flag = (state.get("autonomy") or {}).get("code_write_flag")
     return {"version": VERSION, "id": hid, "payload_sha256": value.get("payload_sha256"),
-            "task_key": value.get("task_key"), "seq": _seq(db, hid, task), "generated_at": now.isoformat(),
+            "task_key": value.get("task_key"), "seq": seq, "generated_at": now.isoformat(),
             "runtime": {"api_sha": stage_c_state._sha(os.environ.get("COMPANY_OS_GIT_SHA")),
                         "worker_sha": stage_c_state._sha(runtime.get("git_sha")),
                         "write_enabled": flag if isinstance(flag, bool) else None},
