@@ -912,6 +912,13 @@ def _privacy_unchanged(worktree: Path, branch: str, sha: str, base: str, tree: s
             and not _git(worktree, "status", "--porcelain", "--untracked-files=all"))
 
 
+def publication_enabled() -> bool:
+    """Fail closed: only STAGE_C_PUBLISH_ENABLED=true lets an approved result push to the public fork and open a PR.
+    Anything else holds it for the founder before any GitHub call. A held result is not resumed: publishing it later
+    is a new grant and a new run (the founder's separate publication authorization)."""
+    return os.environ.get("STAGE_C_PUBLISH_ENABLED", "false").lower() == "true"
+
+
 def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Path, remote: str,
             open_pr: PrOpener, ttl: timedelta = timedelta(minutes=10),
             before_publish: Callable[[], None] | None = None,
@@ -926,6 +933,8 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
     The refspec is built here from the validated task key:
     task/<KEY> is only created, or after a repair replaced at exactly the commit this task last
     published, so no one else's work, main or any other ref can be written."""
+    if not publication_enabled():  # the worker holds first; this is the last stop before any push or PR
+        return {"outcome": "HELD_BEFORE_PUBLISH"}
     imp = dict((task.context or {}).get("improvement") or {})
     if imp.get("stage") != "INDEPENDENT_REVIEW" or task.key != job.task_key:
         raise ValueError(f"{task.key}: publish needs INDEPENDENT_REVIEW for its own job")
