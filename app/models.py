@@ -4,9 +4,9 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON, BigInteger, Boolean, CheckConstraint, DateTime, Enum, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint,
-    func,
+    event, func,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship
 
 from app import enums
 
@@ -186,6 +186,30 @@ class Task(Base, TimestampMixin):  # §31
     error: Mapped[str | None] = mapped_column(Text)
     # §150 — duplicate protection. Two open tasks must not share a dedupe key.
     dedupe_key: Mapped[str | None] = mapped_column(String(200), index=True)
+    # Strictly increasing per row, bumped by the UPDATE itself (`revision = revision + 1`) in the same transaction
+    # as every change, so a committed version never shares a revision with an older one (B5 handoff reports label
+    # their projection with it). Maintained by the session events below, never set by hand.
+    revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+
+
+def bump_revision(task: "Task") -> None:
+    """Mark a change that lives outside the task row (its grant, its handoff) as a new task revision."""
+    task.revision = Task.revision + 1
+
+
+@event.listens_for(Session, "before_flush")
+def _task_revision_on_flush(session, flush_context, instances):
+    for obj in session.dirty:
+        if isinstance(obj, Task) and session.is_modified(obj, include_collections=False):
+            obj.revision = Task.revision + 1   # evaluated by the database under the row's write lock
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _task_revision_on_bulk_update(state):
+    stmt = state.statement
+    if state.is_update and getattr(getattr(stmt, "table", None), "name", None) == Task.__tablename__ \
+            and "revision" not in {getattr(c, "key", c) for c in (stmt._values or {})}:
+        state.statement = stmt.values(revision=Task.revision + 1)
 
 
 class TaskDependency(Base):

@@ -306,6 +306,11 @@ class StageCAuthorize(BaseModel):
     expected_source_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
 
 
+class HandoffActivate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class HandoffCancel(BaseModel):
     model_config = ConfigDict(extra="forbid")
     payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")

@@ -176,7 +176,8 @@ def authorize_pilot(db: Session, task_key: str, sha: str, *, founder: str, ttl: 
     now = now or datetime.now(timezone.utc)
     if not _TASK_KEY.match(task_key) or not _SHA.match(sha) or not (timedelta(0) < ttl <= AUTH_MAX_TTL):
         raise ValueError("authorization needs a task key, a 40-hex source SHA and a ttl up to one hour")
-    task = db.scalar(select(models.Task).where(models.Task.key == task_key))
+    # Lock order task -> grant -> handoff row, the same as a claim and the handoff cancel/activation.
+    task = db.scalar(select(models.Task).where(models.Task.key == task_key).with_for_update())
     if task is None:
         raise ValueError(f"{task_key} does not exist")
     row = db.scalar(select(models.ControlState).where(models.ControlState.key == PILOT_AUTHORIZATION)
@@ -213,9 +214,14 @@ def revoke_pilot_authorization(db: Session, *, actor: str, reason: str = "revoke
     if row is None:
         return False
     before = dict(row.value) if isinstance(row.value, dict) else None
+    # Lock order task -> grant (as a claim, authorize_pilot and the handoff cancel): the task row first.
+    task = db.scalar(select(models.Task).where(models.Task.key == (before or {}).get("task_key")).with_for_update()) \
+        if isinstance((before or {}).get("task_key"), str) else None
     db.delete(row)
     audit.record(db, actor=actor, action="stage-c.authorization.revoke", entity_type="control_state",
                  entity_key=PILOT_AUTHORIZATION, reason=reason, before=before, after=None)
+    if task is not None:
+        models.bump_revision(task)   # a handed-off task reports its grant: the revocation is a new revision
     db.commit()
     return True
 
@@ -366,9 +372,12 @@ def consume_write_authorization(db: Session, task, sha: str, run_id: int, now: d
     if stage_c_handoff.imported(task) is not None:
         row = db.scalar(select(models.ControlState).where(models.ControlState.key == PILOT_AUTHORIZATION)
                         .with_for_update().execution_options(populate_existing=True))
-        denial = _authorization_denial(db, row, task.key, sha, now) or stage_c_handoff.grant_denial(
+        denial = (_authorization_denial(db, row, task.key, sha, now) or stage_c_handoff.grant_denial(
             db, task, row.value if row is not None else {})
-        return denial or consume_pilot_authorization(db, task.key, sha, run_id, now)   # no standing fallback
+            or consume_pilot_authorization(db, task.key, sha, run_id, now))   # no standing fallback
+        if denial is None:
+            models.bump_revision(task)   # the consumed grant is part of the handoff's reported state
+        return denial
     if consume_pilot_authorization(db, task.key, sha, run_id, now) is None:
         return None
     row = db.scalar(select(models.ControlState).where(models.ControlState.key == STANDING_AUTHORIZATION)

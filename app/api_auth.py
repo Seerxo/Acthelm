@@ -66,7 +66,8 @@ FOUNDER_SCOPE = [("POST", r"/control/agents"), ("POST", r"/tasks/[A-Za-z0-9_-]+/
 # service:handoff, so admin/local/host callers (allowed everywhere above) and founder assertions are refused there.
 _HANDOFF_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 HANDOFF = [("PUT", rf"/stage-c/handoff-api/{_HANDOFF_ID}"), ("GET", rf"/stage-c/handoff-api/{_HANDOFF_ID}"),
-           ("POST", rf"/stage-c/handoff-api/{_HANDOFF_ID}/cancel")]
+           ("POST", rf"/stage-c/handoff-api/{_HANDOFF_ID}/cancel"),
+           ("POST", rf"/stage-c/handoff-api/{_HANDOFF_ID}/activate")]
 FOUNDER_SCOPE += [("POST", r"/tasks/[A-Za-z0-9_-]+/handoff"), ("GET", r"/desk/handoffs")]
 SCOPES = {"desk": DESK, "youtube": YOUTUBE, "handoff": HANDOFF}
 TOKENS = {"admin": "COMPANY_API_TOKEN_ADMIN", "desk": "COMPANY_API_TOKEN_DESK",

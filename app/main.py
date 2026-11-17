@@ -1281,6 +1281,18 @@ def handoff_snapshot(hid: str, request: Request, db: Session = Depends(get_db)) 
     return _handoff_call("GET", get_route_path(request.scope), lambda: (200, stage_c_handoff.snapshot(db, hid)), db)
 
 
+@app.post("/stage-c/handoff-api/{hid}/activate")
+async def handoff_activate(hid: str, request: Request, db: Session = Depends(get_db)) -> Response:
+    """Phase 2: production re-verified the founder release; only now may the import be authorized and run."""
+    _handoff_service(request, hid)
+    try:
+        body = schemas.HandoffActivate.model_validate(await _handoff_json(request))
+    except ValueError:
+        raise HTTPException(422, "MALFORMED")
+    return _handoff_call("POST", get_route_path(request.scope),
+                         lambda: (200, stage_c_handoff.activate_import(db, hid, body.payload_sha256)), db)
+
+
 @app.post("/stage-c/handoff-api/{hid}/cancel")
 async def handoff_cancel(hid: str, request: Request, db: Session = Depends(get_db)) -> Response:
     _handoff_service(request, hid)

@@ -215,8 +215,12 @@ def test_e2e(w):
     assert w.release({**BODY, "objective": "Something else"}).status_code == 409
     assert w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL
 
-    assert w.sync()["requests"][0]["outcome"] == "DELIVERED"
+    assert w.sync()["requests"][0]["outcome"] == "IMPORTED"
     [imp] = w.sc_tasks()
+    # Phase 1 only: the import cannot be authorized or run before production's authenticated activation.
+    assert _authorize(w, imp.key, handoff_id=hid, payload_sha256=sha).status_code == 422
+    assert _claim(w, imp.key) is not None
+    assert w.sync()["requests"][0]["outcome"] == "ACTIVATED"
     assert imp.status == enums.TaskStatus.BACKLOG and imp.created_by == h.SERVICE
     from app import worker
     with Session(w.sc) as s:   # the production-side "never run it here" guard does not touch Stage C imports
@@ -236,12 +240,16 @@ def test_e2e(w):
     # A resubmitted packet (lost reply, retry, replay) after the run started: same receipt, nothing new.
     status, body, _ = w.transport("PUT", h.API_PREFIX + hid, h.canonical(packet))
     assert status == 200 and json.loads(body)["task_key"] == imp.key
+    # ...and a repeated activation is idempotent: no new task, grant, run or activation.
+    for _ in range(2):
+        assert w.transport("POST", f"{h.API_PREFIX}{hid}/activate", h.canonical({"payload_sha256": sha}))[0] == 200
     with Session(w.sc) as s:
         assert s.scalar(select(func.count()).select_from(models.Task)) == 1
         assert s.scalar(select(func.count()).select_from(models.AgentRun)) == 1
         assert s.get(models.ControlState, control.PILOT_AUTHORIZATION).value["consumed_at"] is not None
-        assert s.scalar(select(func.count()).select_from(models.AuditLog)
-                        .where(models.AuditLog.action == "handoff.import")) == 1
+        for action in ("handoff.import", "handoff.activate"):
+            assert s.scalar(select(func.count()).select_from(models.AuditLog)
+                            .where(models.AuditLog.action == action)) == 1
 
     _pipeline(w, imp.key)
     out = w.sync()["requests"][0]
@@ -257,7 +265,7 @@ def test_e2e(w):
     assert w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL       # a report never closes production work
     with Session(w.prod) as s:
         actions = [a for (a,) in s.execute(select(models.AuditLog.action).order_by(models.AuditLog.id))]
-        assert actions == ["handoff.release", "handoff.delivery", "handoff.observed"]
+        assert actions == ["handoff.release", "handoff.delivery", "handoff.activation", "handoff.observed"]
 
     with w.on("prod"):
         assert w.client().post("/tasks/TASK-0001/status", json={"status": "READY", "actor": "x"},
@@ -331,6 +339,7 @@ def test_cancel_first(w):
 def test_cancel_running(w):
     hid = w.release().json()["id"]
     w.sync()
+    w.sync()   # import, then activation
     [imp] = w.sc_tasks()
     sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
     assert _authorize(w, imp.key, handoff_id=hid, payload_sha256=sha).status_code == 201
@@ -395,6 +404,7 @@ def test_reports(w):
     """Stage C reports are authenticated and monotonic: tampered, unsigned, stale or replayed ones change nothing."""
     hid = w.release().json()["id"]
     t0 = datetime.now(timezone.utc)
+    w.sync(now=t0)
     w.sync(now=t0)
     [imp] = w.sc_tasks()
     assert w.sync(now=t0)["requests"][0]["outcome"] == "OBSERVED"      # first poll: BACKLOG snapshot
@@ -506,6 +516,7 @@ def test_latch(w):
     sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
     t0 = datetime.now(timezone.utc)
     w.sync(now=t0)
+    w.sync(now=t0)
     w.transport("POST", f"{h.API_PREFIX}{hid}/cancel", h.canonical({"payload_sha256": sha,
                                                                      "reason": "PRODUCTION_CANCELLED"}))
     assert w.sync(now=t0)["requests"][0]["outcome"] == "OBSERVED"
@@ -516,3 +527,65 @@ def test_latch(w):
     raw = h.canonical(reopened)
     out = w.sync(lambda m, p, b: (200, raw, h.mac("GET", h.API_PREFIX + hid, raw)), now=t0 + timedelta(hours=1))
     assert out["requests"][0]["outcome"] == "STALE" and w.prod_task().artifacts["remote_stage_c"] == stored
+
+
+# ------------------------------------------------------------------------------------------------ two-phase acceptance
+def _activated(w, hid):
+    with Session(w.sc) as s:
+        return s.scalar(select(func.count()).select_from(models.AuditLog).where(
+            models.AuditLog.action == "handoff.activate", models.AuditLog.entity_key == h.KEY_PREFIX + hid))
+
+
+@pytest.mark.parametrize("when", ["in_put", "after_put", "sc_first", "expired"])
+def test_race(w, when):
+    """Cancel vs delivery: a founder cancel at any point, or expiry, means the import is never activated, so it can
+    never be authorized or run; the cancel reaches Stage C and wins."""
+    hid = w.release().json()["id"]
+    sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
+    cancel = lambda: w.client(host=PROD_HOST).post("/tasks/TASK-0001/status", headers=ASSERT,  # noqa: E731
+                                                   json={"status": "CANCELLED", "actor": "founder"})
+
+    def put_then_cancel(method, path, body):   # the founder cancels while the PUT is on the wire
+        out = w.transport(method, path, body)
+        with w.on("prod"):
+            assert cancel().status_code == 200
+        return out
+    t0 = datetime.now(timezone.utc)
+    assert w.sync(put_then_cancel if when == "in_put" else None, now=t0)["requests"][0]["outcome"] == "IMPORTED"
+    if when == "after_put":
+        with w.on("prod"):
+            assert cancel().status_code == 200
+    if when == "sc_first":   # Stage C records the cancel before production tries to activate
+        w.transport("POST", f"{h.API_PREFIX}{hid}/cancel", h.canonical({"payload_sha256": sha,
+                                                                         "reason": "PRODUCTION_CANCELLED"}))
+    later = t0 + (timedelta(hours=25) if when == "expired" else timedelta(minutes=1))
+    for _ in range(2):
+        w.sync(now=later)
+    [imp] = w.sc_tasks()
+    assert _activated(w, hid) == 0
+    if when != "expired":
+        assert imp.status == enums.TaskStatus.CANCELLED
+    if when == "expired":   # Stage C refuses a late activation on its own clock too
+        with Session(w.sc) as s, pytest.raises(h.HandoffError):
+            h.activate_import(s, hid, sha, now=later)
+    else:
+        assert w.transport("POST", f"{h.API_PREFIX}{hid}/activate", h.canonical({"payload_sha256": sha}))[0] == 410
+    assert _authorize(w, imp.key, handoff_id=hid, payload_sha256=sha).status_code == 422
+    assert _claim(w, imp.key) is not None and _activated(w, hid) == 0
+
+
+def test_activate_auth(w):
+    """Only the handoff service may activate; wrong digests and unknown ids are refused."""
+    hid = w.release().json()["id"]
+    sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
+    w.sync()
+    path, body = f"{h.API_PREFIX}{hid}/activate", h.canonical({"payload_sha256": sha})
+    with w.on("sc"):
+        for headers, peer, host, code in (({}, "172.18.0.5", SC_HOST, 401), (ASSERT, "172.18.0.5", SC_HOST, 403),
+                                          ({"authorization": f"Bearer {ADMIN}"}, "172.18.0.5", "api.example.invalid", 403),
+                                          ({}, "127.0.0.1", "api.example.invalid", 403)):
+            r = w.client(host=host, peer=peer).post(path, content=body, headers=headers)
+            assert r.status_code == code, (headers, peer, r.text)
+    assert w.transport("POST", path, h.canonical({"payload_sha256": "0" * 64}))[0] == 409
+    assert w.transport("POST", f"{h.API_PREFIX}{'9' * 8}-0000-4000-8000-{'0' * 12}/activate", body)[0] == 404
+    assert _activated(w, hid) == 0
