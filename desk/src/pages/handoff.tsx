@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState, type ComponentProps } from "react"
 import { toast } from "sonner"
 import { api, type TaskDetail } from "@/lib/api"
 import { codeTaskBody } from "@/lib/founder-forms"
-import { approvalState, releaseBlock, releaseBody, type HandoffList, type HandoffView } from "@/lib/handoff"
+import { approvalState, releaseBlock, type HandoffList, type HandoffView } from "@/lib/handoff"
 import { parseStageC } from "@/lib/stage-c"
 import { when } from "@/lib/format"
 import { useDesk } from "@/state"
@@ -41,7 +41,7 @@ export function HandoffPage() {
 
   const built = codeTaskBody(f, allowed ?? [])
   const handoff = task?.remote_stage_c ?? null
-  const block = releaseBlock({ founder, enabled: list?.enabled === true, status: task?.status ?? null, risk: task?.risk, handoff, bodyError: built.error })
+  const block = releaseBlock({ founder, enabled: list?.enabled === true, status: task?.status ?? null, risk: task?.risk, handoff, bodyError: null })   // the API builds the packet from the stored task
   const state = approvalState(handoff)
   const retryable = handoff?.delivery === "SUSPENDED" || handoff?.delivery === "REFUSED"
   const set = (k: "title" | "objective" | "success" | "context") => (v: string) => setF(x => ({ ...x, [k]: v }))
@@ -72,9 +72,9 @@ export function HandoffPage() {
     setBusy(false)
   }
   const release = async () => {
-    if (!key || !built.body || block || busy) return
+    if (!key || block || busy) return
     setBusy(true)
-    await act(`/tasks/${encodeURIComponent(key)}/handoff`, releaseBody(built.body), r => `${key} released to Stage C · ${(r as { id?: string }).id ?? ""}`)
+    await act(`/tasks/${encodeURIComponent(key)}/handoff`, {}, r => `${key} released to Stage C · ${(r as { id?: string }).id ?? ""}`)
     await Promise.all([readTask(key).catch(() => undefined), readList()])
     setBusy(false)
   }
@@ -127,7 +127,7 @@ export function HandoffPage() {
         <div className="grid gap-2">
           <Button onClick={() => void release()} disabled={busy || block !== null} className="h-10">{busy ? "Working…" : handoff ? "Retry release" : "Release to Stage C"}</Button>
           {block && <p role="status" className="text-xs text-muted-foreground">{block}</p>}
-          {!block && built.body && <p className="text-xs text-muted-foreground">Sends exactly the text and files above. Founder only; the API checks it again.</p>}
+          {!block && <p className="text-xs text-muted-foreground">Releases the task exactly as recorded; the server builds the packet from the stored task. Founder only; the API checks it again.</p>}
         </div>
       </section>
     </div>

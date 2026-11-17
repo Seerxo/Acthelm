@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { approvalState, releaseBlock, releaseBody, type HandoffView } from "./handoff.ts"
+import { approvalState, releaseBlock, type HandoffView } from "./handoff.ts"
 
 const H: HandoffView = { id: "00000000-0000-4000-8000-000000000001", payload_sha256: "a".repeat(64), delivery: "PENDING",
   remote_task_key: null, released_at: "2026-11-17T10:00:00+00:00", expires_at: "2026-11-18T10:00:00+00:00",
@@ -35,10 +35,4 @@ test("coding approval is what a fresh Stage C report says, otherwise unknown", (
   assert.equal(approvalState({ ...H, freshness: "FRESH", snapshot: snap("NONE") }).coding[1], "warning")
   assert.equal(approvalState({ ...H, freshness: "FRESH", snapshot: snap("EXPIRED") }).coding[1], "danger")
   assert.equal(approvalState({ ...H, freshness: "FRESH", snapshot: null }).coding[1], "warning")
-})
-
-test("the release text does not depend on the order files were ticked in", () => {
-  const a = { title: "t", objective: "o", success_criteria: "s", paths: ["tests/b.py", "app/a.py"], context: ["app/z.py", "app/y.py"] }
-  assert.deepEqual(releaseBody(a), releaseBody({ ...a, paths: ["app/a.py", "tests/b.py"], context: ["app/y.py", "app/z.py"] }))
-  assert.deepEqual(releaseBody(a).paths, ["app/a.py", "tests/b.py"])
 })

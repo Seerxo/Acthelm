@@ -53,9 +53,3 @@ export function approvalState(h: HandoffView | null): { release: [string, Tone];
     : [`${grant[0]}${grant.slice(1).toLowerCase()}: approve again on Stage C`, "danger"]
   return { release, coding }
 }
-
-/** The release text with its file lists sorted: the API compares a retry's text to the stored packet as ordered lists
- *  (RELEASE_CONFLICT otherwise), so the order the founder ticked files in must not matter. */
-export function releaseBody<T extends { paths: string[]; context: string[] }>(body: T): T {
-  return { ...body, paths: [...body.paths].sort(), context: [...body.context].sort() }
-}
