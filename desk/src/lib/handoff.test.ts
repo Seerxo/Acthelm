@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { approvalState, releaseBlock, type HandoffView } from "./handoff.ts"
+import { approvalState, liveView, releaseBlock, type HandoffView } from "./handoff.ts"
 
 const H: HandoffView = { id: "00000000-0000-4000-8000-000000000001", payload_sha256: "a".repeat(64), delivery: "PENDING",
   remote_task_key: null, released_at: "2026-11-17T10:00:00+00:00", expires_at: "2026-11-18T10:00:00+00:00",
@@ -35,4 +35,11 @@ test("coding approval is what a fresh Stage C report says, otherwise unknown", (
   assert.equal(approvalState({ ...H, freshness: "FRESH", snapshot: snap("NONE") }).coding[1], "warning")
   assert.equal(approvalState({ ...H, freshness: "FRESH", snapshot: snap("EXPIRED") }).coding[1], "danger")
   assert.equal(approvalState({ ...H, freshness: "FRESH", snapshot: null }).coding[1], "warning")
+})
+
+test("a stale report never shows as a current Stage C approval on any list row", () => {
+  const at = "2026-11-17T12:00:00Z", t0 = Date.parse(at)
+  const row = { ...H, freshness: "FRESH" as const, snapshot: { generated_at: at, authorization: { status: "ACTIVE" } } }
+  assert.notEqual(approvalState(liveView(row, t0 + 60_000)).coding[1], "warning")     // fresh: the real state
+  assert.equal(approvalState(liveView(row, t0 + 181_000)).coding[1], "warning")       // stale: Unknown
 })

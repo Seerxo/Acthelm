@@ -498,6 +498,9 @@ def test_reports(w):
     out = w.sync(fixed((200, raw, h.mac("GET", h.API_PREFIX + hid, raw))), now=later)["requests"][0]
     assert out["outcome"] == "UNCHANGED"
     assert w.prod_task().artifacts["remote_stage_c"]["generated_at"] == later.isoformat()
+    # One consistent report time: the nested snapshot (what the Desk derives freshness from) moves too.
+    nested = w.prod_task().artifacts["remote_stage_c"]["snapshot"]["generated_at"]
+    assert datetime.fromisoformat(nested.replace("Z", "+00:00")) == later
     out = w.sync(fixed((200, raw, h.mac("GET", h.API_PREFIX + hid, raw))), now=later + timedelta(hours=1))
     assert out["requests"][0]["outcome"] == "STALE"
     # Same seq, different content (a change no audit row labels, e.g. a grant expiring by time): the fresh report
@@ -656,3 +659,17 @@ def test_activate_auth(w):
     assert w.transport("POST", path, h.canonical({"payload_sha256": "0" * 64}))[0] == 409
     assert w.transport("POST", f"{h.API_PREFIX}{'9' * 8}-0000-4000-8000-{'0' * 12}/activate", body)[0] == 404
     assert _activated(w, hid) == 0
+
+
+def test_scope_view():
+    """GET /tasks/{key} shows a task's Stage C scope only when it passes the release's own server-side check;
+    free text, credentials, absolute or unknown paths in a stored context never reach the response."""
+    from app.desk import _context_view
+    ok = {"write": True, "stage_c": {"paths": ["app/packaging.py"], "context": ["app/models.py"]}}
+    assert _context_view(ok)["stage_c"] == {"paths": ["app/packaging.py"], "context": ["app/models.py"]}
+    secret = "sk-live-" + "x" * 32
+    for bad in ({"paths": ["app/packaging.py"], "context": [f"note: password={secret}"]},
+                {"paths": ["/etc/passwd"]}, {"paths": ["app/packaging.py"], "context": ["/root/.env"]},
+                {"paths": ["app/unknown.py"]}, {"paths": ["app/packaging.py"], "notes": secret}, {"paths": secret}):
+        view = _context_view({"write": True, "stage_c": bad}) or {}
+        assert "stage_c" not in view and secret not in repr(view), bad

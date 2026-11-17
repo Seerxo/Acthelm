@@ -2,6 +2,7 @@
 // The page records a code task (POST /stage-c/tasks), shows its approval state (GET /tasks/{key}) and lets only the
 // verified founder release it (POST /tasks/{key}/handoff). The API re-checks everything; this only refuses early.
 import type { Tone } from "./api.ts"
+import { liveFreshness } from "./handoffs.ts"
 
 /** app/stage_c_handoff.py desk_view: the handoff as production stored it, plus the last authenticated Stage C report. */
 export interface HandoffView {
@@ -53,3 +54,8 @@ export function approvalState(h: HandoffView | null): { release: [string, Tone];
     : [`${grant[0]}${grant.slice(1).toLowerCase()}: approve again on Stage C`, "danger"]
   return { release, coding }
 }
+
+/** A handoff view with its freshness re-derived in the browser from the report's own time (lib/handoffs.ts):
+ *  every screen calls approvalState on this, never on the server's cached value. */
+export const liveView = (h: HandoffView, now: number): HandoffView =>
+  ({ ...h, freshness: liveFreshness(h.freshness, h.snapshot?.generated_at, now) })

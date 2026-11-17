@@ -6,8 +6,7 @@ import { useCallback, useEffect, useState, type ComponentProps } from "react"
 import { toast } from "sonner"
 import { api, type TaskDetail } from "@/lib/api"
 import { codeTaskBody } from "@/lib/founder-forms"
-import { approvalState, releaseBlock, type HandoffList, type HandoffView } from "@/lib/handoff"
-import { liveFreshness } from "@/lib/handoffs"
+import { approvalState, liveView, releaseBlock, type HandoffList, type HandoffView } from "@/lib/handoff"
 import { useNow } from "@/lib/use-now"
 import { parseStageC } from "@/lib/stage-c"
 import { when } from "@/lib/format"
@@ -45,7 +44,7 @@ export function HandoffPage() {
   const now = useNow()
   const served = task?.remote_stage_c ?? null
   // Freshness re-derived in the browser from the report's own time: a stalled page never keeps "approved".
-  const handoff = served && { ...served, freshness: liveFreshness(served.freshness, served.snapshot?.generated_at, now) }
+  const handoff = served && liveView(served, now)
   const block = releaseBlock({ founder, enabled: list?.enabled === true, status: task?.status ?? null, risk: task?.risk, handoff, bodyError: null })   // the API builds the packet from the stored task
   const state = approvalState(handoff)
   const retryable = handoff?.delivery === "SUSPENDED" || handoff?.delivery === "REFUSED"
@@ -162,7 +161,7 @@ export function HandoffPage() {
       {list === null ? <PanelEmpty title={founder === false ? "Founder only" : "Not reported"} />
         : !list.handoffs.length ? <PanelEmpty title="Nothing released to Stage C yet" />
         : list.handoffs.map(h => {
-          const s = approvalState(h.handoff)
+          const s = approvalState(liveView(h.handoff, now))
           return <PanelRow key={h.key} onClick={() => open({ kind: "task", key: h.key })} title={h.title}
             meta={<><TaskKey k={h.key} /> · {s.release[0]}</>} trail={<Status value={s.coding[0]} tone={s.coding[1]} label={s.coding[0]} />} />
         })}

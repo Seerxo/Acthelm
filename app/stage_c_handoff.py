@@ -637,7 +637,8 @@ def _observe(db, task, remote, snap: Snapshot, data: dict, now: datetime) -> dic
     same = {k: v for k, v in dumped.items() if k != "generated_at"} == {
         k: v for k, v in previous.items() if k != "generated_at"}
     if snap.seq == last_seq and same:
-        task.artifacts = {**task.artifacts, "remote_stage_c": {**stored, "generated_at": generated.isoformat()}}
+        task.artifacts = {**task.artifacts, "remote_stage_c": {**stored, "generated_at": generated.isoformat(),
+                                                                "snapshot": dumped}}   # one consistent report time
         db.commit()
         return {"task": task.key, "kind": "poll", "outcome": "UNCHANGED"}
     # An equal seq with different content is a change no audit row labels (a grant expiring by time, a runtime
