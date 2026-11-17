@@ -83,13 +83,13 @@ def _context_view(context) -> dict | None:
         return None
     view = {k: _scalar(context[k]) for k in ("write", "autonomous", "source") if k in context}
     scope = context.get("stage_c")
-    # The stored Stage C scope, shown only when it passes the same server-side check a release applies
-    # (stage_c_worker.scope_refused: allowlisted write paths, safe app/ or tests/ .py context files). Anything
-    # else (free text, absolute or unknown paths, a scope a generic POST /tasks stored) is never returned.
+    # Only the write paths of a stored Stage C scope that passes the release's own check, and only as members of
+    # the server's fixed allowlist (stage_c_worker.SAFE_FILES). Read-only context entries are user-supplied strings
+    # whose shape check cannot prove they are real files, so they are never returned.
     if isinstance(scope, dict):
         from app import stage_c_worker   # late: stage_c_worker imports modules that import this one
         if not stage_c_worker.scope_refused(scope, set(stage_c_worker.SAFE_FILES)):
-            view["stage_c"] = {"paths": list(scope["paths"]), "context": list(scope.get("context", []))}
+            view["stage_c"] = {"paths": [p for p in scope["paths"] if p in stage_c_worker.SAFE_FILES]}
     imp = context.get("improvement")
     if isinstance(imp, dict):
         history = imp.get("history") if isinstance(imp.get("history"), list) else []

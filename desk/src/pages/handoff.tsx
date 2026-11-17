@@ -53,6 +53,7 @@ export function HandoffPage() {
   // Once a task exists (recorded here or opened by key) the screen shows it read-only: the release sends the STORED
   // task, so nothing edited here could ever reach Stage C.
   const textLocked = key !== null
+  const [opened, setOpened] = useState(false)   // opened by key: its read-only context files are not shown
   useEffect(() => {   // keep the approval state current while a task is open (same 30s pattern as the Handoffs page)
     if (!key) return
     const t = setInterval(() => { if (!document.hidden) void readTask(key).catch(() => undefined) }, 30_000)
@@ -74,9 +75,10 @@ export function HandoffPage() {
     setBusy(true)
     try {
       const t = await api<Task>(`/tasks/${encodeURIComponent(k)}`)
-      const scope = (t as { context?: { stage_c?: { paths?: string[]; context?: string[] } } }).context?.stage_c
+      const scope = (t as { context?: { stage_c?: { paths?: string[] } } }).context?.stage_c
       setF({ ...BLANK, title: t.title, objective: t.objective ?? "", success: t.success_criteria ?? "",
-             paths: scope?.paths ?? [], context: (scope?.context ?? []).join("\n") })
+             paths: scope?.paths ?? [], context: "" })
+      setOpened(true)
       setKey(t.key); setTask(t)
     } catch (err) { setTask(null); setKey(null); setLookup(""); toast.error((err as Error).message) }
     setBusy(false)
@@ -88,7 +90,7 @@ export function HandoffPage() {
     await Promise.all([readTask(key).catch(() => undefined), readList()])
     setBusy(false)
   }
-  const reset = () => { setF(BLANK); setKey(null); setTask(null); setLookup("") }
+  const reset = () => { setF(BLANK); setKey(null); setTask(null); setLookup(""); setOpened(false) }
 
   return <>
     <PageHeader title="Send to Stage C" description="Record a code task, check its approvals, then release it to the isolated Stage C host. Nothing runs here." />
@@ -118,7 +120,8 @@ export function HandoffPage() {
                 : <span className="text-warning">No allowed Stage C files are reported, so no code task can be sent.</span>}
             </fieldset>
             <label className="grid gap-1.5 text-[13px] font-medium">Read-only context files (optional, one per line)
-              <Textarea value={f.context} onChange={e => set("context")(e.target.value)} readOnly={textLocked} rows={2} placeholder="app/models.py" className="font-mono text-xs" /></label>
+              {opened ? <Muted>Not shown for security reasons; the release uses the files stored with the task.</Muted>
+                : <Textarea value={f.context} onChange={e => set("context")(e.target.value)} readOnly={textLocked} rows={2} placeholder="app/models.py" className="font-mono text-xs" />}</label>
           </fieldset>
           {built.error && (f.title || f.paths.length) ? <p role="status" className="text-xs text-muted-foreground">{built.error}</p> : null}
           {!key && <div><Button type="submit" disabled={busy || !built.body || founder === false} className="h-10 px-4">{busy ? "Recording…" : "Record task"}</Button></div>}

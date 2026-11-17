@@ -666,8 +666,11 @@ def test_scope_view():
     free text, credentials, absolute or unknown paths in a stored context never reach the response."""
     from app.desk import _context_view
     ok = {"write": True, "stage_c": {"paths": ["app/packaging.py"], "context": ["app/models.py"]}}
-    assert _context_view(ok)["stage_c"] == {"paths": ["app/packaging.py"], "context": ["app/models.py"]}
+    assert _context_view(ok)["stage_c"] == {"paths": ["app/packaging.py"]}   # read-only context is never returned
     secret = "sk-live-" + "x" * 32
+    # A credential disguised as a repository path passes the shape check, but context is never part of the view.
+    disguised = {"write": True, "stage_c": {"paths": ["app/packaging.py"], "context": [f"app/password={secret}.py"]}}
+    assert secret not in repr(_context_view(disguised))
     for bad in ({"paths": ["app/packaging.py"], "context": [f"note: password={secret}"]},
                 {"paths": ["/etc/passwd"]}, {"paths": ["app/packaging.py"], "context": ["/root/.env"]},
                 {"paths": ["app/unknown.py"]}, {"paths": ["app/packaging.py"], "notes": secret}, {"paths": secret}):
