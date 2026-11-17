@@ -856,13 +856,13 @@ def test_pausing_during_review_prevents_publishing(monkeypatch, tmp_path):
     assert subprocess.run(["git", "--git-dir", str(remote), "show-ref"], capture_output=True).returncode != 0
 
 
-@pytest.mark.parametrize("value", [None, "", "1", "yes", "TRUE ", "false"])
+@pytest.mark.parametrize("value", [None, "", "1", "yes", "True", "TRUE", "true ", "false", "true"])
 def test_publish_flag(monkeypatch, value):
     if value is None:
         monkeypatch.delenv("STAGE_C_PUBLISH_ENABLED", raising=False)
     else:
         monkeypatch.setenv("STAGE_C_PUBLISH_ENABLED", value)
-    assert stage_c_runner.publication_enabled() is False
+    assert stage_c_runner.publication_enabled() is (value == "true")   # only exactly "true" publishes
 
 
 def test_held_no_push(monkeypatch, tmp_path):

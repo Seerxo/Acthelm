@@ -916,7 +916,7 @@ def publication_enabled() -> bool:
     """Fail closed: only STAGE_C_PUBLISH_ENABLED=true lets an approved result push to the public fork and open a PR.
     Anything else holds it for the founder before any GitHub call. A held result is not resumed: publishing it later
     is a new grant and a new run (the founder's separate publication authorization)."""
-    return os.environ.get("STAGE_C_PUBLISH_ENABLED", "false").lower() == "true"
+    return os.environ.get("STAGE_C_PUBLISH_ENABLED", "false") == "true"   # exactly "true": no case or space folding
 
 
 def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Path, remote: str,
