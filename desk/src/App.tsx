@@ -42,6 +42,7 @@ import { IncidentsPage } from "@/pages/control"
 import { ActivityPage, HealthPage } from "@/pages/system"
 import { MemoryPage } from "@/pages/memory"
 import { ReleasesPage } from "@/pages/releases"
+import { HandoffsPage } from "@/pages/handoffs"
 
 const SECTION_ICON: Record<SectionKey, typeof Gauge> = {
   dashboard: House, goals: Target, tasks: KanbanSquare, agents: Bot, approvals: CheckSquare, releases: Rocket, metrics: TrendingUp, system: Gauge,
@@ -49,6 +50,7 @@ const SECTION_ICON: Record<SectionKey, typeof Gauge> = {
 const PAGE_ICON: Record<Page, typeof Gauge> = {
   overview: House, approvals: CheckSquare, projects: Briefcase, project: Briefcase, growth: TrendingUp, finance: Wallet,
   tasks: KanbanSquare, agents: Bot, automation: Repeat, "stage-c": GitPullRequest, incidents: AlertOctagon, activity: Activity, health: HeartPulse, memory: Brain, releases: Rocket,
+  handoffs: Send,
 }
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform)
 const MOD = isMac ? "⌘" : "Ctrl"
@@ -456,6 +458,7 @@ function Main() {
     case "health": return <HealthPage />
     case "memory": return <MemoryPage />
     case "releases": return <ReleasesPage />
+    case "handoffs": return <HandoffsPage taskKey={route.key} />
     default: return <Overview />
   }
 }
