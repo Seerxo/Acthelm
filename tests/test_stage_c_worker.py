@@ -857,7 +857,7 @@ def test_pausing_during_review_prevents_publishing(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize("value", [None, "", "1", "yes", "TRUE ", "false"])
-def test_publication_is_off_unless_exactly_enabled(monkeypatch, value):
+def test_publish_flag(monkeypatch, value):
     if value is None:
         monkeypatch.delenv("STAGE_C_PUBLISH_ENABLED", raising=False)
     else:
@@ -865,7 +865,7 @@ def test_publication_is_off_unless_exactly_enabled(monkeypatch, value):
     assert stage_c_runner.publication_enabled() is False
 
 
-def test_approved_result_is_held_without_any_push_when_publication_is_off(monkeypatch, tmp_path):
+def test_held_no_push(monkeypatch, tmp_path):
     remote = pipeline(monkeypatch, tmp_path)
     monkeypatch.delenv("STAGE_C_PUBLISH_ENABLED")
     calls = []
@@ -886,7 +886,7 @@ def test_approved_result_is_held_without_any_push_when_publication_is_off(monkey
     assert task.status == enums.TaskStatus.WAITING_APPROVAL and calls == []
 
 
-def test_publish_itself_refuses_when_publication_is_off(monkeypatch):
+def test_publish_refuses(monkeypatch):
     monkeypatch.delenv("STAGE_C_PUBLISH_ENABLED")
     # Defense in depth: even a caller that skipped the worker's hold gets no push, lease or GitHub call.
     out = stage_c_runner.publish(None, None, None, b"", Path("/nonexistent"), "ext::x", None)
