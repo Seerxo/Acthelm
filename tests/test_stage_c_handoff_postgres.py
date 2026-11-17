@@ -48,7 +48,8 @@ def _imported(engine, activate=True):
     now = datetime.now(timezone.utc)
     packet = {"version": 1, "id": str(uuid.uuid4()), "origin": "production", "origin_task_key": "TASK-0001",
               "repository": "seerxo/acthelm", "issued_at": now.isoformat(),
-              "expires_at": (now + timedelta(hours=1)).isoformat(), "task": BODY}
+              "expires_at": (now + timedelta(hours=1)).isoformat(), "risk": "LOW", "kind": "code_change",
+              "task": BODY}
     packet["payload_sha256"] = h.digest(packet)
     with Session(engine) as s:
         _, receipt = h.import_packet(s, packet["id"], packet)

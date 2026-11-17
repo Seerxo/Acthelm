@@ -306,6 +306,12 @@ class StageCAuthorize(BaseModel):
     expected_source_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
 
 
+class HandoffRelease(BaseModel):
+    """POST /tasks/{key}/handoff: names the task only. Any content field is refused (the packet is built server-side
+    from the stored task)."""
+    model_config = ConfigDict(extra="forbid")
+
+
 class HandoffActivate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")

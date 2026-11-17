@@ -6,6 +6,7 @@ report is stored or moves state backwards, an imported task falls back to a stan
 reaches the production Desk. The coder, launcher and reviewer are not exercised: stage_c.advance drives the pipeline.
 Short test ids on purpose (root conftest byte budget)."""
 import json
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -44,9 +45,14 @@ class World:
             s.add_all([models.Project(key="company-os", name="Company OS", status=enums.ProjectStatus.ACTIVE),
                        models.Agent(key="developer", role="dev")])
             s.commit()
-        with Session(self.prod) as s:
-            s.add(models.Task(key="TASK-0001", title="Goal rounding", objective="o", success_criteria="tests pass",
-                              status=enums.TaskStatus.BACKLOG))
+        with Session(self.prod) as s:   # a production developer code task, as the materializer or Desk stores it
+            dev = models.Agent(key="developer", role="dev")
+            s.add(dev)
+            s.flush()
+            s.add(models.Task(key="TASK-0001", title=BODY["title"], objective=BODY["objective"],
+                              success_criteria=BODY["success_criteria"], status=enums.TaskStatus.BACKLOG,
+                              assigned_agent_id=dev.id, context={"write": True, "stage_c": {
+                                  "paths": BODY["paths"], "context": BODY["context"]}}))
             s.commit()
         self.side = None
 
@@ -97,9 +103,9 @@ class World:
         with Session(self.sc) as s:
             return list(s.scalars(select(models.Task)))
 
-    def release(self, body=BODY):
+    def release(self, body=None, key="TASK-0001"):   # the request names the task only
         with self.on("prod"):
-            return self.client().post("/tasks/TASK-0001/handoff", json=body, headers=ASSERT)
+            return self.client().post(f"/tasks/{key}/handoff", json=body, headers=ASSERT)
 
 
 @pytest.fixture
@@ -157,7 +163,7 @@ def test_off(w, monkeypatch):
         monkeypatch.delenv(k, raising=False)
     w.side = "prod"
     with w.on("prod", **{h.SENDER_FLAG: None}):
-        assert w.client().post("/tasks/TASK-0001/handoff", json=BODY, headers=ASSERT).status_code == 403
+        assert w.client().post("/tasks/TASK-0001/handoff", headers=ASSERT).status_code == 403
         assert w.client().get("/desk/handoffs", headers=ASSERT).json()["enabled"] is False
     with w.on("prod", **{h.SENDER_FLAG: None}), Session(w.prod) as s:
         assert h.sync(s, w.transport) == {"handoff": "disabled"} and w.calls == []
@@ -200,7 +206,7 @@ def test_auth(w):
     # Release and the Desk read are the verified founder's only.
     with w.on("prod"):
         for headers in ({}, {"authorization": f"Bearer {ADMIN}"}, {"authorization": f"Bearer {TOKEN}"}):
-            assert w.client(host="api.example.invalid").post("/tasks/TASK-0001/handoff", json=BODY,
+            assert w.client(host="api.example.invalid").post("/tasks/TASK-0001/handoff",
                                                               headers=headers).status_code in (401, 403)
             assert w.client(host="api.example.invalid").get("/desk/handoffs", headers=headers).status_code in (401, 403)
     assert len(w.sc_tasks()) == 1
@@ -212,7 +218,8 @@ def test_e2e(w):
     assert r.status_code == 201 and r.json()["delivery"] == "PENDING", r.text
     hid, sha = r.json()["id"], r.json()["payload_sha256"]
     assert w.release().json()["id"] == hid                                  # repeat click: same release
-    assert w.release({**BODY, "objective": "Something else"}).status_code == 409
+    assert w.release({"objective": "Something else"}).status_code == 422    # content is never client-supplied
+    assert w.prod_task().context["remote_stage_c"]["packet"]["task"] == BODY   # built from the stored task
     assert w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL
 
     assert w.sync()["requests"][0]["outcome"] == "IMPORTED"
@@ -374,7 +381,58 @@ def test_receiver(w):
            "expires_at": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()}
     old["payload_sha256"] = h.digest(old)
     assert w.transport("PUT", h.API_PREFIX + old["id"], h.canonical(old))[0] == 410
+    # A correctly digested packet that declares anything but LOW-risk code work is refused, never down-graded.
+    for change in ({"risk": "HIGH"}, {"kind": "operations"}):
+        bad = {**packet, "id": str(uuid.uuid4()), **change}
+        bad["payload_sha256"] = h.digest(bad)
+        assert w.transport("PUT", h.API_PREFIX + bad["id"], h.canonical(bad))[0] == 422, change
     assert len(w.sc_tasks()) == 1
+
+
+@pytest.mark.parametrize("change", ["high", "gated", "agent", "noscope", "closed"])
+def test_eligible(w, change):
+    """Production releases only a LOW-risk, ungated developer code task with a valid scope in an open status."""
+    with Session(w.prod) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        if change == "high":
+            task.risk_level = enums.RiskLevel.HIGH
+        elif change == "gated":
+            task.approval_required = True
+        elif change == "agent":
+            other = models.Agent(key="research", role="r")
+            s.add(other)
+            s.flush()
+            task.assigned_agent_id = other.id
+        elif change == "noscope":
+            task.context = {"write": True}
+        else:
+            task.status = enums.TaskStatus.CANCELLED
+        s.commit()
+    assert w.release().status_code == 409
+    assert "remote_stage_c" not in (w.prod_task().context or {}) and w.sync()["requests"] == []
+
+
+def test_approval_binding(w):
+    """Stage C's own Desk shows an imported task's binding; only the founder may approve, naming it exactly."""
+    hid = w.release().json()["id"]
+    sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
+    w.sync()
+    [imp] = w.sc_tasks()
+    with w.on("sc"):
+        view = w.client().get(f"/tasks/{imp.key}", headers=ASSERT).json()["stage_c_handoff"]
+        assert view == {"id": hid, "payload_sha256": sha, "origin_task_key": "TASK-0001",
+                        "activation": "IMPORTED", "cancelled": False}
+    w.sync()   # activation
+    body = {"task_key": imp.key, "handoff_id": hid, "payload_sha256": sha}
+    with w.on("sc"):
+        for headers, host in (({}, SC_HOST), ({"authorization": f"Bearer {ADMIN}"}, "api.example.invalid"),
+                              ({"authorization": f"Bearer {TOKEN}"}, "api.example.invalid")):
+            assert w.client(host=host).post("/stage-c/authorization", json=body,
+                                            headers=headers).status_code in (401, 403), headers
+        assert w.client().get(f"/tasks/{imp.key}", headers=ASSERT).json()["stage_c_handoff"]["activation"] == "ACTIVATED"
+    assert _authorize(w, imp.key, handoff_id=hid).status_code == 422
+    assert _authorize(w, imp.key, handoff_id=str(uuid.uuid4()), payload_sha256=sha).status_code == 422
+    assert _authorize(w, imp.key, **{k: v for k, v in body.items() if k != "task_key"}).status_code == 201
 
 
 def test_no_standing(w):
@@ -495,7 +553,7 @@ def test_review_fixes(w):
     assert h._backoff(10_000) == h.MAX_BACKOFF
     with Session(w.prod) as s:
         rows = s.scalars(select(models.AuditLog.after)).all() + s.scalars(select(models.AuditLog.before)).all()
-        assert BODY["objective"] not in json.dumps(rows)
+        assert '"packet"' not in json.dumps(rows)
     # Four cancellations, a Stage C that refuses the first three: the fourth is still sent within a few ticks.
     with Session(w.prod) as s:
         for n in range(2, 6):

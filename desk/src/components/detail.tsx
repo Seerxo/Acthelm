@@ -162,7 +162,7 @@ function StandsNow({ t }: { t: TaskDetail }) {
           <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center max-sm:[&_button]:w-full">
             {accept && <AcceptDone taskKey={t.key} evidence={accept.evidence} merged={accept.merged} primary={first === "accept"} />}
             {s.founder.includes("approve") && <Button size="sm" variant={v("approve")} className="h-9 max-sm:h-11" onClick={() => { open(null); go("approvals") }}>Decide in Approvals</Button>}
-            {authorize && <AuthorizeStageC taskKey={t.key} primary={first === "authorize"} />}
+            {authorize && <AuthorizeStageC taskKey={t.key} primary={first === "authorize"} handoff={t.stage_c_handoff} />}
             {ready && <MarkReady taskKey={t.key} status={t.status} codeWrite={isCodeWrite(t)} note={readyNote(t)} blocked={!!block} primary={first === "ready"} />}
             {s.founder.includes("assign") && <>
               <Select value={agent} onValueChange={setAgent}>

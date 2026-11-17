@@ -119,9 +119,13 @@ def digest(packet: dict) -> str:
 
 def source_digest(task: models.Task) -> str:
     """The production task's own text at release: an edit afterwards voids the release (a new one is needed)."""
+    ctx = task.context if isinstance(task.context, dict) else {}
+    risk = task.risk_level.value if hasattr(task.risk_level, "value") else task.risk_level
     return hashlib.sha256(canonical({"title": task.title, "description": task.description,
-                                     "objective": task.objective,
-                                     "success_criteria": task.success_criteria})).hexdigest()
+                                     "objective": task.objective, "success_criteria": task.success_criteria,
+                                     "stage_c": ctx.get("stage_c"), "write": ctx.get("write"), "risk": risk,
+                                     "approval_required": task.approval_required,
+                                     "agent": task.assigned_agent_id})).hexdigest()
 
 
 def mac(method: str, path: str, body: bytes, token: str | None = None) -> str:
@@ -154,6 +158,9 @@ class Packet(_Strict):
     repository: Literal["seerxo/acthelm"]
     issued_at: datetime
     expires_at: datetime
+    # Declared by production; Stage C imports only "LOW" / "code_change" and refuses anything else (import_packet).
+    risk: str = Field(max_length=16)
+    kind: str = Field(max_length=32)
     task: PacketTask
     payload_sha256: str = Field(pattern=_SHA64)
 
@@ -259,25 +266,39 @@ def _set_remote(task: models.Task, **changes) -> dict:
     return remote
 
 
-def release(db: Session, task: models.Task, body: schemas.StageCTask, *, founder: str,
-            now: datetime | None = None) -> dict:
-    """The founder releases exactly this transfer text for `task`. Idempotent: the same text returns the same release
-    (and restarts a suspended delivery of that exact packet); different text is a conflict. Caller handles commit
-    failures; this commits on success."""
+def _eligible_text(db: Session, task: models.Task) -> dict:
+    """The transfer text, built only from what is STORED on the task, after the server-side eligibility checks: a
+    LOW-risk developer code task with no approval gate, a valid Stage C write scope and complete text."""
     from app import stage_c_worker   # late: stage_c_worker imports control, which imports this lazily
+    agent = db.get(models.Agent, task.assigned_agent_id) if task.assigned_agent_id else None
+    ctx = task.context if isinstance(task.context, dict) else {}
+    scope = ctx.get("stage_c") if isinstance(ctx.get("stage_c"), dict) else None
+    if (agent is None or agent.key != "developer" or ctx.get("write") is not True or scope is None
+            or task.risk_level != enums.RiskLevel.LOW or task.approval_required):
+        raise HandoffError(409, "NOT_ELIGIBLE")
+    if stage_c_worker.scope_refused(scope, set(stage_c_worker.SAFE_FILES)):
+        raise HandoffError(422, "SCOPE_REFUSED")
+    try:
+        text = PacketTask(title=" ".join((task.title or "").split()), objective=task.objective or "",
+                          success_criteria=task.success_criteria or "", paths=list(scope["paths"]),
+                          context=list(scope.get("context", [])))
+    except ValidationError:
+        raise HandoffError(422, "TASK_INCOMPLETE")
+    return text.model_dump()
+
+
+def release(db: Session, task: models.Task, *, founder: str, now: datetime | None = None) -> dict:
+    """The founder releases `task` as it is stored; the request names the task only, never its content. Idempotent:
+    a released task returns its one release (and an explicit repeat restarts a stopped delivery of that exact packet).
+    Caller handles commit failures; this commits on success."""
     if not approval_identity.is_founder_id(founder):
         raise PermissionError("only the verified founder may release a task to Stage C")
     if not sender_enabled():
         raise HandoffError(403, "HANDOFF_DISABLED")
     now = now or datetime.now(timezone.utc)
     db.refresh(task, with_for_update=True)
-    text = {"title": " ".join(body.title.split()), "objective": body.objective,
-            "success_criteria": body.success_criteria, "paths": list(body.paths), "context": list(body.context)}
     remote = _remote(task)
     if remote is not None:
-        packet = remote.get("packet") if isinstance(remote.get("packet"), dict) else {}
-        if packet.get("task") != text:
-            raise HandoffError(409, "RELEASE_CONFLICT")
         if remote.get("delivery") in ("SUSPENDED", "REFUSED"):   # explicit founder retry; delivery re-verifies
             _set_remote(task, delivery="PENDING", attempts=0, next_attempt_at=None, last_error_code=None)
             audit.record(db, actor=founder, action="handoff.retry", entity_type="task", entity_key=task.key,
@@ -287,12 +308,10 @@ def release(db: Session, task: models.Task, body: schemas.StageCTask, *, founder
         return {"id": remote["id"], "payload_sha256": remote["payload_sha256"], "delivery": remote["delivery"]}
     if task.status not in RELEASABLE:
         raise HandoffError(409, "TASK_NOT_RELEASABLE")
-    if stage_c_worker.scope_refused({"paths": text["paths"], "context": text["context"]},
-                                    set(stage_c_worker.SAFE_FILES)):
-        raise HandoffError(422, "SCOPE_REFUSED")
+    text = _eligible_text(db, task)
     packet = {"version": VERSION, "id": str(uuid.uuid4()), "origin": "production", "origin_task_key": task.key,
               "repository": control.AUTH_REPOSITORY, "issued_at": now.isoformat(),
-              "expires_at": (now + MAX_TTL).isoformat(), "task": text}
+              "expires_at": (now + MAX_TTL).isoformat(), "risk": "LOW", "kind": "code_change", "task": text}
     packet["payload_sha256"] = digest(packet)
     previous = task.status
     remote = _set_remote(task, id=packet["id"], payload_sha256=packet["payload_sha256"],
@@ -728,6 +747,10 @@ def import_packet(db: Session, hid: str, raw, now: datetime | None = None) -> tu
     if (packet.id != hid or digest(raw) != packet.payload_sha256 or issued is None or expires is None
             or issued > now + timedelta(seconds=60) or not timedelta(0) < expires - issued <= MAX_TTL):
         raise HandoffError(422, "MALFORMED")
+    # The imported task is created LOW-risk developer code work only because the packet itself declares exactly that
+    # (and the digest binds the declaration); anything else is refused, never down-graded.
+    if packet.risk != "LOW" or packet.kind != "code_change":
+        raise HandoffError(422, "NOT_ELIGIBLE")
     row = _row(db, hid, lock=True)
     if row is not None:
         return _existing(db, hid, row, packet.payload_sha256)
@@ -948,6 +971,20 @@ def imported(task) -> dict | None:
     ctx = task.context if isinstance(task.context, dict) else {}
     ref = ctx.get("remote_stage_c")
     return ref if isinstance(ref, dict) and ref.get("origin") == "production" else None
+
+
+def import_view(db: Session, task) -> dict | None:
+    """Stage C's own Desk: the binding the founder's coding approval must name for an imported task (id, digest) and
+    whether production activated it. None for a native task."""
+    ref = imported(task)
+    if ref is None:
+        return None
+    row = _row(db, str(ref.get("id")))
+    hv = row.value if row is not None and isinstance(row.value, dict) else {}
+    return {"id": ref.get("id"), "payload_sha256": ref.get("payload_sha256"),
+            "origin_task_key": ref.get("origin_task_key"),
+            "activation": hv.get("state") if hv.get("state") in ("IMPORTED", "ACTIVATED") else None,
+            "cancelled": bool(hv.get("cancelled_at"))}
 
 
 def grant_denial(db: Session, task, value: dict) -> str | None:

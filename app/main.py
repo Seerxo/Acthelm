@@ -1209,14 +1209,16 @@ def stage_c_revoke(body: schemas.StageCRevoke, request: Request, db: Session = D
 # --------------------------------------------------------------------------- B5 Desk -> Stage C handoff
 # app/stage_c_handoff.py; artifacts/handoff-design-2026-11-09/HANDOFF_DESIGN.md. Off by default on both sides.
 @app.post("/tasks/{key}/handoff", status_code=201)
-def release_task_to_stage_c(key: str, body: schemas.StageCTask, request: Request, db: Session = Depends(get_db)) -> dict:
-    """Production: the verified founder releases exactly this transfer text to Stage C. Idempotent per task."""
+def release_task_to_stage_c(key: str, request: Request, body: schemas.HandoffRelease | None = None,
+                            db: Session = Depends(get_db)) -> dict:
+    """Production: the verified founder releases the STORED task to Stage C. The request names the task only (an
+    empty body); the packet is built server-side from the task after its eligibility checks. Idempotent per task."""
     who = approval_identity.require_founder(request)
     if ((worker.worker_state(db).get("autonomy") or {}).get("code_write_flag")) is True:
         raise HTTPException(409, "this worker writes code itself; the handoff sender runs only where code write is off")
     task = _by_key(db, models.Task, key)
     try:
-        return stage_c_handoff.release(db, task, body, founder=who.id)
+        return stage_c_handoff.release(db, task, founder=who.id)
     except stage_c_handoff.HandoffError as e:
         db.rollback()
         raise HTTPException(e.status, e.code)

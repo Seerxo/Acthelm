@@ -868,6 +868,8 @@ def task_detail(db: Session, task: models.Task) -> dict:
         "pull_request": _pull_request(task),
         # B5: this task's handoff to Stage C and the last authenticated Stage C report (null when not handed off).
         "remote_stage_c": stage_c_handoff.desk_view(task),
+        # B5 on Stage C: an imported task's handoff binding, which Authorize Stage C must send (null when native).
+        "stage_c_handoff": stage_c_handoff.import_view(db, task),
         "artifacts": _artifacts_view(task.artifacts), "result": _clean(task.result), "error": _clean(task.error),
         "supervisor": ({"verdict": verdict.supervisor_verdict.value,
                         "notes": _clean(verdict.supervisor_notes)} if verdict else None),

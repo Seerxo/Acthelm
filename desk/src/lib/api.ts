@@ -144,6 +144,10 @@ export interface Run {
   id: number; task: string | null; status: string; provider: string | null; started_at: string
   ended_at: string | null; error: string | null; supervisor_verdict: string | null; supervisor_notes: string | null
 }
+export interface StageCHandoff {
+  id: string; payload_sha256: string; origin_task_key: string | null
+  activation: "IMPORTED" | "ACTIVATED" | null; cancelled: boolean
+}
 export interface TaskDetail {
   key: string; title: string; description: string | null; objective: string | null; status: string
   priority: string; risk: string; assigned_agent: string | null; project: string | null
@@ -154,6 +158,9 @@ export interface TaskDetail {
   retry_count?: number; max_attempts?: number
   /** Code tasks only: null when a Stage C authorization covers it, else the API's fixed denial code. */
   stage_c_authorization?: string | null
+  /** Stage C only: a task imported by the production handoff (app/stage_c_handoff.py import_view). Authorize Stage C
+   *  must send its id and digest; null for a native task, absent on older APIs. */
+  stage_c_handoff?: StageCHandoff | null
   /** The backend-verified PR (app/desk.py _pull_request); url and number only when verified. Absent on older APIs. */
   pull_request?: { verified: boolean; merged: boolean; commit: string | null; merge_commit: string | null
     number?: number; url?: string } | null
