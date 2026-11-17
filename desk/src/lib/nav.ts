@@ -3,7 +3,8 @@
 // Every #/page route stays a deep link; retired and IA names resolve through ALIASES (nav.test.ts).
 
 export const PAGES = ["overview", "approvals", "tasks", "agents", "projects", "project", "finance", "growth",
-  "health", "incidents", "automation", "stage-c", "activity", "memory", "releases", "handoff"] as const
+  "health", "incidents", "automation", "stage-c", "activity", "memory", "releases", "handoff",
+  "handoffs"] as const
 export type Page = (typeof PAGES)[number]
 
 /** Routes from earlier Desk versions (bookmarks, notification links) and where they live now. */
@@ -28,7 +29,7 @@ export const LEGACY_SHORTCUTS: Record<string, Page> = { h: "overview", w: "tasks
 export const SECTIONS: NavSection[] = [
   { key: "dashboard", label: "Dashboard", home: "overview", tabs: ["overview"], shortcut: "d" },
   { key: "goals", label: "Goals", home: "projects", tabs: ["projects"], shortcut: "g" },
-  { key: "tasks", label: "Tasks", home: "tasks", tabs: ["tasks", "handoff", "stage-c", "activity"], shortcut: "t" },
+  { key: "tasks", label: "Tasks", home: "tasks", tabs: ["tasks", "handoff", "handoffs", "stage-c", "activity"], shortcut: "t" },
   { key: "agents", label: "Agents", home: "agents", tabs: ["agents", "automation"], shortcut: "a" },
   { key: "approvals", label: "Approvals", home: "approvals", tabs: ["approvals"], shortcut: "p" },
   { key: "releases", label: "Releases", home: "releases", tabs: ["releases"], shortcut: "r" },
@@ -47,6 +48,7 @@ export const PAGE_LABEL: Record<Page, string> = {
   overview: "Overview", approvals: "Approvals", tasks: "Tasks", agents: "Agents", projects: "Portfolio", project: "Project",
   finance: "Finance", growth: "Growth", health: "Status", incidents: "Incidents", automation: "Automation", "stage-c": "Stage C",
   activity: "Activity", memory: "Memory", releases: "Releases", handoff: "Send to Stage C",
+  handoffs: "Handoffs",
 }
 
 /** A page's name where its section is not around it (palette, page header). It matches the sidebar label, so the
