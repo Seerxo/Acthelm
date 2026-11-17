@@ -401,6 +401,8 @@ def execute(db, task, spec, usable):
                             or task_context_files(task) != job.context
                             or task.objective != original_objective or task.success_criteria != job.success_criteria):
                         out = {"outcome": "WAITING_BEFORE_PUBLISH"}
+                    elif not stage_c_runner.publication_enabled():
+                        out = {"outcome": "HELD_BEFORE_PUBLISH"}
                     else:
                         # Authoritative PR state is re-read before any push or PR update: a merge or
                         # takeover during the review must stop the publication, never extend the PR.
@@ -506,6 +508,16 @@ def execute(db, task, spec, usable):
             task.artifacts = {**(task.artifacts or {}), "pr": out["pr"], "commit": out["commit"], "run_id": run.id}
         run.status = enums.AgentRunStatus.SUCCEEDED
         run.supervisor_verdict = enums.SupervisorVerdict.APPROVED
+    elif outcome == "HELD_BEFORE_PUBLISH":
+        # Reviewed and approved, nothing pushed: the founder decides on publication separately.
+        if owns_attempt:
+            approval = task.context["improvement"]["approval"]
+            task.status = enums.TaskStatus.WAITING_APPROVAL
+            task.result = "Stage C review approved; publication is disabled on this host, nothing was pushed"
+            task.artifacts = {**(task.artifacts or {}), "run_id": run.id, "held": {
+                "fingerprint": approval["fingerprint"], "review_audit_id": approval["audit_id"]}}
+        run.status = enums.AgentRunStatus.SUCCEEDED
+        run.supervisor_verdict = enums.SupervisorVerdict.APPROVED
     elif outcome == "PUBLISHED_PR_REFUSED":
         # Blocked by an owner change, merge/close, or unclear GitHub state; no retry is spent.
         # Return only the exact claim we started with; a same-status founder takeover is kept too.
@@ -551,6 +563,13 @@ def execute(db, task, spec, usable):
                     "fingerprint": approval["fingerprint"], "review_audit_id": approval["audit_id"]}}
         elif owns_attempt:
             failure_event = worker._set_failure(db, task, outcome)
+    if (owns_attempt and task.status == enums.TaskStatus.READY and worker._capacity_only(run)
+            and worker._trailing_no_progress(db, task.id, exclude=run.id) >= worker.MAX_NO_PROGRESS_RUNS - 1):
+        # E5: every no-progress wait is bounded; the founder decides when it is worth trying again.
+        run.tool_calls = {**(run.tool_calls or {}), "stalled": True}
+        task.status = enums.TaskStatus.BLOCKED
+        task.error = (f"STALLED: {worker.MAX_NO_PROGRESS_RUNS} attempts in a row made no progress (provider capacity, "
+                      "no independent reviewer, publication or lease wait); check providers and the task, then set READY")
     orphan_pr = None
     if not owns_attempt:
         # Never a delivery or a successful run for this task. A PR pushed while the attempt still owned the task

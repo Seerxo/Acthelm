@@ -67,6 +67,51 @@ def readable(argv, **kwargs):
     return SimpleNamespace(returncode=0, stdout='{"workflow_runs": []}' if "/actions/" in argv[-1] else "[]")
 
 
+@pytest.mark.parametrize("actions", [True, False], ids=["a", "s"])
+@pytest.mark.parametrize("recovers", [True, False], ids=["ok", "bad"])
+@pytest.mark.parametrize("first", [
+    pf.subprocess.TimeoutExpired(["gh"], 10, stderr="secret"),
+    OSError("secret"), pf.subprocess.SubprocessError("secret"),
+    SimpleNamespace(returncode=1, stdout="", stderr="network secret"),
+    SimpleNamespace(returncode=1, stdout="", stderr="HTTP 502 secret"),
+    SimpleNamespace(returncode=0, stdout="not json: secret"),
+    SimpleNamespace(returncode=0, stdout='{"message": "secret"}'),
+], ids=["time", "os", "proc", "net", "502", "json", "body"])
+def test_retry(actions, recovers, first):
+    calls, delays = [], []
+    path = "repos/seerxo/acthelm/" + ("actions/runs?per_page=1" if actions else "commits/a/statuses?per_page=1")
+    env = {"GH_TOKEN": "read", "GH_PR_TOKEN": "other"}
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        result = readable(argv) if recovers and len(calls) == 2 else first
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    state, detail = pf._github_read(path, actions=actions, env=env, run=run, sleep=delays.append)
+    assert state == ("PASS" if recovers else "UNKNOWN")
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert calls[0] == (["gh", "api", "--method", "GET", path],
+                        {"env": env, "capture_output": True, "text": True, "timeout": 10})
+    assert calls[0][1]["env"] is env and delays == [2]
+    assert "secret" not in detail
+
+
+@pytest.mark.parametrize("code", [401, 403, 404])
+@pytest.mark.parametrize("prefix", ["", "HTTP 502\n"], ids=["one", "mix"])
+def test_denied(code, prefix):
+    calls, delays = [], []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=1, stdout="", stderr=f"{prefix}HTTP {code} secret")
+
+    state, detail = pf._github_read("actions", actions=True, env={}, run=run, sleep=delays.append)
+    assert state == "FAIL" and len(calls) == 1 and delays == []
+    assert "secret" not in detail
+
+
 def status(report, name):
     return next(c["status"] for c in report["checks"] if c["name"] == name)
 
@@ -156,7 +201,7 @@ def test_acceptance_for_another_source_sha_fails(tmp_path):
 
 
 @pytest.mark.parametrize("value,expected", [(False, "FAIL"), ("true", "FAIL"), (None, "FAIL"), ("absent", "UNKNOWN")])
-def test_each_security_acceptance_check_is_reported_individually(tmp_path, value, expected):
+def test_acceptance_checks_each(tmp_path, value, expected):
     args = world(tmp_path)
     row = args["db"].get(models.ControlState, "stage-c-host-acceptance")
     checks = dict(CHECKS)
@@ -186,7 +231,7 @@ def test_invalid_own_sha_fails(tmp_path):
     ("egress_running", "egress_proxy"), ("claude_env_ok", "coder_logins"),
     ("claude_auth_ok", "claude_auth"),
     ("codex_reviewer_volume_mounted", "codex_reviewer_volume")])
-def test_host_fact_false_fails_and_null_is_unknown(tmp_path, fact, check):
+def test_host_fact_tristate(tmp_path, fact, check):
     assert status(pf.evaluate(**world(tmp_path / "a", host={**HOST, fact: False})), check) == "FAIL"
     assert status(pf.evaluate(**world(tmp_path / "b", host={**HOST, fact: None})), check) == "UNKNOWN"
     assert status(pf.evaluate(**world(tmp_path / "c", host={k: v for k, v in HOST.items() if k != fact})), check) == "UNKNOWN"
@@ -201,7 +246,7 @@ def test_missing_checks_command_proof_is_unknown(tmp_path, proof):
 
 @pytest.mark.parametrize("fingerprint", [123, "not-a-hash", [], False, {},
     "A" * 64, "a" * 63, "a" * 65, "a" * 64 + "\n"])
-def test_malformed_checks_command_fingerprint_is_unknown(tmp_path, fingerprint):
+def test_bad_checks_fp(tmp_path, fingerprint):
     report = pf.evaluate(**world(tmp_path, host={**HOST, "checks_command_fingerprints": {
         "sez-company": fingerprint}}))
     assert status(report, "checks_command") == "UNKNOWN"
@@ -282,7 +327,7 @@ def test_ci_access_checks_the_deployed_commit_using_only_the_worker_environment(
     SimpleNamespace(returncode=0, stdout='[{"id": 1, "context": "ci", "state": [], "creator": {}}]'),
     pf.subprocess.TimeoutExpired(["gh"], 10, stderr="secret"),
 ])
-def test_unknown_ci_access_is_never_ready_and_does_not_echo_output(tmp_path, result):
+def test_ci_access_unknown(tmp_path, result):
     def run(*args, **kwargs):
         if isinstance(result, Exception):
             raise result
@@ -455,7 +500,7 @@ def test_host_checks_command_must_run_the_complete_supported_suite(tmp_path, com
 @pytest.mark.parametrize("commands", [None, [], {}, {"sez-company": []},
     {"sez-company": "python -m pytest -q"}, {"sez-company": ["python", None]},
     {"sez-company": ["python", ""]}, {"sez-company": ["python", "\0secret"]}])
-def test_unobservable_or_malformed_launcher_command_never_proves_readiness(tmp_path, commands):
+def test_bad_launcher_cmd(tmp_path, commands):
     cfg = tmp_path / "launcher.json"
     cfg.write_text(json.dumps({"coder_image": IMAGE, "checks_images": {"sez-company": IMAGE},
                                "checks_commands": commands}))
@@ -550,7 +595,7 @@ def test_an_agent_later_granted_upstream_write_is_never_ready(tmp_path, granted)
         {"full_name": "other/repo", "permissions": READ_ONLY})), "FAIL"),            # wrong repository
     (lambda a: role(pull=False), "FAIL"),
 ])
-def test_an_unproven_upstream_role_is_never_ready(tmp_path, response, expected):
+def test_upstream_unproven(tmp_path, response, expected):
     report = pf.evaluate(**world(tmp_path, run=answering_role_with(response)))
     assert status(report, "worker_identity") == expected and report["ready"] is False
     assert "secret" not in json.dumps(report)
@@ -600,7 +645,7 @@ def test_host_facts_refuse_a_config_the_launcher_would_refuse(tmp_path, over):
 @pytest.mark.parametrize("answer, expected", [
     ((0, '{"Internal": true}'), True), ((0, '{"Internal": false}'), False), ((1, ""), False),
     ((0, "garbage"), False), ((127, ""), None)])
-def test_host_facts_report_whether_the_coder_network_is_really_internal(tmp_path, answer, expected):
+def test_coder_net_internal(tmp_path, answer, expected):
     cfg = tmp_path / "launcher.json"
     cfg.write_text(json.dumps(LAUNCHER_CFG))
     facts = host_facts.collect(runner({"docker network inspect": answer}), config=cfg, claude_env=tmp_path / "x")
@@ -614,7 +659,7 @@ def test_host_facts_report_whether_the_coder_network_is_really_internal(tmp_path
     ("seerxo/acthelm", pf.enums.ProjectStatus.PAUSED, None, "FAIL"),
     ("seerxo/acthelm", pf.enums.ProjectStatus.ACTIVE, 101, "FAIL"),
 ])
-def test_preflight_checks_real_database_project_identity(tmp_path, repository, status, unit_id, expected):
+def test_db_project_identity(tmp_path, repository, status, unit_id, expected):
     args = world(tmp_path)
     project = args["db"].query(models.Project).filter_by(key="company-os").one()
     project.repository = repository

@@ -50,3 +50,4 @@ def _fake_tmpfs(monkeypatch):
     monkeypatch.setattr(providers, "_fs_type", fs_type)
     monkeypatch.setattr(providers, "swap_off", lambda: True)   # tests with swap on set it back explicitly
     return real
+
