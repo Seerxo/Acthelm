@@ -551,6 +551,13 @@ def execute(db, task, spec, usable):
                     "fingerprint": approval["fingerprint"], "review_audit_id": approval["audit_id"]}}
         elif owns_attempt:
             failure_event = worker._set_failure(db, task, outcome)
+    if (owns_attempt and task.status == enums.TaskStatus.READY and worker._capacity_only(run)
+            and worker._trailing_no_progress(db, task.id, exclude=run.id) >= worker.MAX_NO_PROGRESS_RUNS - 1):
+        # E5: every no-progress wait is bounded; the founder decides when it is worth trying again.
+        run.tool_calls = {**(run.tool_calls or {}), "stalled": True}
+        task.status = enums.TaskStatus.BLOCKED
+        task.error = (f"STALLED: {worker.MAX_NO_PROGRESS_RUNS} attempts in a row made no progress (provider capacity, "
+                      "no independent reviewer, publication or lease wait); check providers and the task, then set READY")
     orphan_pr = None
     if not owns_attempt:
         # Never a delivery or a successful run for this task. A PR pushed while the attempt still owned the task
