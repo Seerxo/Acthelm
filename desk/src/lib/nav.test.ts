@@ -42,8 +42,8 @@ test("every page that used to be a sidebar link is still a tab of exactly one pl
 
 test("Stage C is listed only where the environment is proven; its route still resolves everywhere", () => {
   const tasks = SECTIONS.find(s => s.key === "tasks")!
-  assert.deepEqual(visibleTabs(tasks, false), ["tasks", "activity"])
-  assert.deepEqual(visibleTabs(tasks, true), ["tasks", "stage-c", "activity"])
+  assert.deepEqual(visibleTabs(tasks, false), ["tasks", "handoff", "handoffs", "activity"])
+  assert.deepEqual(visibleTabs(tasks, true), ["tasks", "handoff", "handoffs", "stage-c", "activity"])
   assert.equal(resolvePage("stage-c"), "stage-c")
 })
 
