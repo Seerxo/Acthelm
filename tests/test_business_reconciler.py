@@ -381,7 +381,7 @@ def _kinds(db):
                                               ("target", "Infinity", "TARGET_INVALID"),
                                               ("target", "0", "TARGET_EQUALS_BASELINE")])
 @pytest.mark.parametrize("reading", ["verified", "missing", "stale"])
-def test_invalid_goal_configuration_opens_only_a_config_repair_task(field, value, code, reading):
+def test_bad_goal_config_repair(field, value, code, reading):
     db = _db()
     g = _goal(db, days_in=50)
     setattr(g, field, value)

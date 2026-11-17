@@ -3,8 +3,8 @@
 // (state.tsx kick) is the truth.
 import { useState } from "react"
 import { AlertTriangle, Check, Loader2, Pause, Play, RotateCw, ShieldCheck, ShieldOff, X } from "lucide-react"
-import type { Approval } from "@/lib/api"
-import { clampMinutes, pilotRevokeMessage, standingRevokeMessage } from "@/lib/stage-c"
+import type { Approval, StageCHandoff } from "@/lib/api"
+import { authorizeBody, clampMinutes, pilotRevokeMessage, standingRevokeMessage } from "@/lib/stage-c"
 import { acceptBody } from "@/lib/accept"
 import { cn } from "@/lib/utils"
 import { useData, useDesk } from "@/state"
@@ -133,12 +133,14 @@ export function ApproveLearning({ id, title, lesson, onDone }: { id: number; tit
 /** Authorize one Stage C attempt for one task (POST /stage-c/authorization): high risk, so the task key is typed. The
  *  server binds it to the deployed SHA, caps it at 60 minutes and refuses if API and worker disagree. It enables
  *  nothing by itself: the global flag, host acceptance and readiness still apply. The answer is shown as returned. */
-export function AuthorizeStageC({ taskKey, primary }: { taskKey: string; primary?: boolean }) {
+export function AuthorizeStageC({ taskKey, primary, handoff }: { taskKey: string; primary?: boolean; handoff?: StageCHandoff | null }) {
   const { act } = useDesk()
   const [typed, setTyped] = useState("")
   const [raw, setRaw] = useState("30")   // what was typed; clamped only when sent (lib/stage-c.ts clampMinutes)
   const minutes = clampMinutes(raw)
   const [busy, setBusy] = useState(false)
+  // B5: an imported task's approval is bound to its exact handoff id and payload digest (shown, then sent).
+  const body = minutes === null ? null : authorizeBody(taskKey, minutes, handoff)
   return (
     <AlertDialog onOpenChange={() => setTyped("")}>
       <AlertDialogTrigger asChild><Button variant={primary ? "default" : "outline"} disabled={busy} className="h-9 max-sm:h-11">{busy ? <Loader2 className="animate-spin" /> : <ShieldCheck />}Authorize Stage C</Button></AlertDialogTrigger>
@@ -148,6 +150,13 @@ export function AuthorizeStageC({ taskKey, primary }: { taskKey: string; primary
           <AlertDialogDescription asChild>
             <div className="grid gap-3 text-sm">
               <p>One attempt on <span className="font-mono text-foreground">{taskKey}</span>, bound to the deployed commit, for at most {minutes ?? "1–60"} minutes. It enables nothing on its own: the Stage C flag, host acceptance and readiness still decide.</p>
+              {handoff && <div className="grid gap-1 break-all text-xs">
+                <p>Handed off from production {handoff.origin_task_key ?? ""}. This approval is bound to exactly:</p>
+                <p>Handoff <span className="font-mono text-foreground">{handoff.id}</span></p>
+                <p>Digest <span className="font-mono text-foreground">{handoff.payload_sha256}</span></p>
+                {(handoff.cancelled || handoff.activation !== "ACTIVATED") &&
+                  <p className="text-warning">{handoff.cancelled ? "Production cancelled this handoff." : "Production has not activated this handoff yet."} It cannot be authorized.</p>}
+              </div>}
               <label className="grid gap-1.5 text-muted-foreground"><span>Minutes (1–60)</span>
                 <Input type="number" inputMode="numeric" min={1} max={60} value={raw} onChange={e => setRaw(e.target.value)} aria-label="Minutes" /></label>
               <label className="grid gap-1.5 text-muted-foreground"><span>Type <span className="font-mono text-foreground">{taskKey}</span> to authorize</span>
@@ -157,9 +166,9 @@ export function AuthorizeStageC({ taskKey, primary }: { taskKey: string; primary
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction className="max-sm:h-11" disabled={typed.trim() !== taskKey || minutes === null}
-            onClick={() => { if (minutes === null) return; setRaw(String(minutes)); setBusy(true)
-              void act("/stage-c/authorization", { task_key: taskKey, minutes }, `Stage C authorized for ${taskKey} (${minutes} min)`).finally(() => setBusy(false)) }}>
+          <AlertDialogAction className="max-sm:h-11" disabled={typed.trim() !== taskKey || body === null}
+            onClick={() => { if (minutes === null || body === null) return; setRaw(String(minutes)); setBusy(true)
+              void act("/stage-c/authorization", body, `Stage C authorized for ${taskKey} (${minutes} min)`).finally(() => setBusy(false)) }}>
             Authorize {taskKey}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

@@ -16,14 +16,14 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
 from sqlalchemy import func, select
 from starlette._utils import get_route_path
 from sqlalchemy.orm import Session
 
 from app import (api_auth, approval_identity, audit, keys, context_builder, control, desk as desk_read, desk_stream, dispatch, enums, goals,
                  event_router, metric_sources, metrics_store, models, notebook, packaging, polar_metrics, registry,
-                 runreport, schemas, stage_c_ci, stage_c_worker, worker)
+                 runreport, schemas, stage_c_ci, stage_c_handoff, stage_c_worker, worker)
 from app.config import settings
 from app.db import get_db
 from app.notify import NotificationService, fingerprint, notifier
@@ -778,6 +778,12 @@ def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = D
     if body.status == enums.TaskStatus.DONE:
         if not (body.evidence or body.result):
             raise HTTPException(422, "DONE requires evidence or a result (§35, §130)")
+    # B5: a task handed to Stage C never runs here, and DONE needs a fresh verified-merge report for its handoff.
+    if refusal := stage_c_handoff.status_refusal(task, body.status):
+        db.rollback()
+        raise HTTPException(409, f"{task.key}: {refusal}")
+    if body.status == enums.TaskStatus.CANCELLED:
+        stage_c_handoff.request_cancel(db, task, actor=who.id)
 
     before = redact_data(audit.snapshot(task))
     previous = task.status
@@ -867,6 +873,9 @@ def report_run(key: str, body: schemas.RunReport, db: Session = Depends(get_db),
     # outcome, and for any change to REVIEW or a founder-closed task. Check under the row lock before writing;
     # `body.reported_by` is untrusted metadata, never the audit actor.
     db.refresh(task, with_for_update=True)
+    if stage_c_handoff.released(task):   # B5: a task handed to Stage C has no local runs on production
+        db.rollback()
+        raise HTTPException(409, f"{task.key} was handed to Stage C; production records no local run for it")
     st = body.herdr_state
     outcome = runreport.interpret(st)
     outcome.summary = redact(outcome.summary)
@@ -1106,9 +1115,12 @@ def stage_c_authorize(body: schemas.StageCAuthorize, request: Request, db: Sessi
     worker_sha = ((worker.worker_state(db).get("runtime") or {}).get("git_sha")) or ""
     if not api_sha or api_sha != worker_sha:
         raise HTTPException(409, "the API and the worker do not report the same deployed source SHA")
+    if body.expected_source_sha is not None and body.expected_source_sha != api_sha:
+        raise HTTPException(409, "the deployed source SHA changed since it was shown; review it again")
     try:
         value = control.authorize_pilot(db, body.task_key, api_sha, founder=who.id,
-                                        ttl=timedelta(minutes=body.minutes))
+                                        ttl=timedelta(minutes=body.minutes), handoff_id=body.handoff_id,
+                                        payload_sha256=body.payload_sha256)
     except ValueError as e:
         db.rollback()
         raise HTTPException(422, str(e))
@@ -1192,6 +1204,106 @@ def stage_c_standing_revoke(body: schemas.StageCRevoke, request: Request, db: Se
 def stage_c_revoke(body: schemas.StageCRevoke, request: Request, db: Session = Depends(get_db)) -> dict:
     who = approval_identity.require_decider(request)  # withdrawing authority: founder or host operator
     return {"revoked": control.revoke_pilot_authorization(db, actor=who.id, reason=body.reason)}
+
+
+# --------------------------------------------------------------------------- B5 Desk -> Stage C handoff
+# app/stage_c_handoff.py; artifacts/handoff-design-2026-11-09/HANDOFF_DESIGN.md. Off by default on both sides.
+@app.post("/tasks/{key}/handoff", status_code=201)
+def release_task_to_stage_c(key: str, request: Request, body: schemas.HandoffRelease | None = None,
+                            db: Session = Depends(get_db)) -> dict:
+    """Production: the verified founder releases the STORED task to Stage C. The request names the task only (an
+    empty body); the packet is built server-side from the task after its eligibility checks. Idempotent per task."""
+    who = approval_identity.require_founder(request)
+    if ((worker.worker_state(db).get("autonomy") or {}).get("code_write_flag")) is True:
+        raise HTTPException(409, "this worker writes code itself; the handoff sender runs only where code write is off")
+    task = _by_key(db, models.Task, key)
+    try:
+        return stage_c_handoff.release(db, task, founder=who.id)
+    except stage_c_handoff.HandoffError as e:
+        db.rollback()
+        raise HTTPException(e.status, e.code)
+
+
+@app.get("/desk/handoffs")
+def desk_handoffs(request: Request, db: Session = Depends(get_db)) -> dict:
+    """Production: released tasks and the last authenticated Stage C report for each. Local read, no network call."""
+    approval_identity.require_founder(request)
+    return {"enabled": stage_c_handoff.sender_enabled(), "handoffs": stage_c_handoff.desk_list(db)}
+
+
+def _handoff_reply(method: str, path: str, status: int, data: dict) -> Response:
+    body = stage_c_handoff.canonical(data)
+    return Response(content=body, status_code=status, media_type="application/json",
+                    headers={stage_c_handoff.MAC_HEADER: stage_c_handoff.mac(method, path, body),
+                             "cache-control": "no-store"})
+
+
+def _handoff_service(request: Request, hid: str):
+    """Stage C machine routes: the receiver flag and exactly the handoff service principal, even in log mode."""
+    if not stage_c_handoff.receiver_enabled():
+        raise HTTPException(403, "the Stage C handoff receiver is disabled")
+    p = approval_identity.principal_of(request)
+    if p.id != stage_c_handoff.SERVICE or getattr(request.state, "caller", None) != "handoff":
+        raise HTTPException(401 if p.kind == "anonymous" else 403, "only the handoff service may call this route")
+    if not re.fullmatch(stage_c_handoff.UUID_RE, hid):
+        raise HTTPException(422, "MALFORMED")
+
+
+async def _handoff_json(request: Request):
+    body = b""
+    async for chunk in request.stream():   # bounded read: never buffer more than the cap
+        body += chunk
+        if len(body) > stage_c_handoff.MAX_REQUEST_BYTES:
+            raise HTTPException(413, "request too large")
+    try:
+        return json.loads(body)
+    except ValueError:
+        raise HTTPException(422, "MALFORMED")
+
+
+def _handoff_call(method: str, path: str, fn, db: Session) -> Response:
+    try:
+        status, data = fn()
+    except stage_c_handoff.HandoffError as e:
+        db.rollback()
+        status, data = e.status, {"error": e.code}
+    return _handoff_reply(method, path, status, data)
+
+
+@app.put("/stage-c/handoff-api/{hid}")
+async def handoff_import(hid: str, request: Request, db: Session = Depends(get_db)) -> Response:
+    _handoff_service(request, hid)
+    raw = await _handoff_json(request)
+    return _handoff_call("PUT", get_route_path(request.scope), lambda: stage_c_handoff.import_packet(db, hid, raw), db)
+
+
+@app.get("/stage-c/handoff-api/{hid}")
+def handoff_snapshot(hid: str, request: Request, db: Session = Depends(get_db)) -> Response:
+    _handoff_service(request, hid)
+    return _handoff_call("GET", get_route_path(request.scope), lambda: (200, stage_c_handoff.snapshot(db, hid)), db)
+
+
+@app.post("/stage-c/handoff-api/{hid}/activate")
+async def handoff_activate(hid: str, request: Request, db: Session = Depends(get_db)) -> Response:
+    """Phase 2: production re-verified the founder release; only now may the import be authorized and run."""
+    _handoff_service(request, hid)
+    try:
+        body = schemas.HandoffActivate.model_validate(await _handoff_json(request))
+    except ValueError:
+        raise HTTPException(422, "MALFORMED")
+    return _handoff_call("POST", get_route_path(request.scope),
+                         lambda: (200, stage_c_handoff.activate_import(db, hid, body.payload_sha256)), db)
+
+
+@app.post("/stage-c/handoff-api/{hid}/cancel")
+async def handoff_cancel(hid: str, request: Request, db: Session = Depends(get_db)) -> Response:
+    _handoff_service(request, hid)
+    try:
+        body = schemas.HandoffCancel.model_validate(await _handoff_json(request))
+    except ValueError:
+        raise HTTPException(422, "MALFORMED")
+    return _handoff_call("POST", get_route_path(request.scope),
+                         lambda: (200, stage_c_handoff.cancel_import(db, hid, body.payload_sha256)), db)
 
 
 @app.post("/control/agents")

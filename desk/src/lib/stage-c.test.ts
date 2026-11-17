@@ -415,3 +415,15 @@ test("revoke toasts follow the API's answer; minutes clamp only when sent", asyn
   for (const bad of [{}, { revoked: "yes" }, null]) assert.throws(() => pilotRevokeMessage(bad))
   assert.deepEqual(["", " ", "abc", "0", "5", "5.6", "90"].map(clampMinutes), [null, null, null, 1, 5, 6, 60])
 })
+
+test("authorize body binds an imported task to its exact handoff", async () => {
+  // B5. Break caught: an imported task's approval is sent without its handoff id/digest, or a cancelled or
+  // not-yet-activated import is offered for authorization.
+  const { authorizeBody } = await import("./stage-c.ts")
+  const h = { id: "11111111-1111-4111-8111-111111111111", payload_sha256: "a".repeat(64), activation: "ACTIVATED", cancelled: false }
+  assert.deepEqual(authorizeBody("TASK-0002", 30, null), { task_key: "TASK-0002", minutes: 30 })
+  assert.deepEqual(authorizeBody("TASK-0002", 30, h),
+    { task_key: "TASK-0002", minutes: 30, handoff_id: h.id, payload_sha256: h.payload_sha256 })
+  assert.equal(authorizeBody("TASK-0002", 30, { ...h, activation: "IMPORTED" }), null)
+  assert.equal(authorizeBody("TASK-0002", 30, { ...h, cancelled: true }), null)
+})

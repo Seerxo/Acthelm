@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -298,6 +299,28 @@ class StageCAuthorize(BaseModel):
     """The SHA is never client-supplied: the server binds the authorization to the deployed source."""
     task_key: str = Field(pattern=r"^[A-Z]+-\d{1,6}$")
     minutes: int = Field(default=30, ge=1, le=60)
+    # Required for a task imported by the production handoff (app/stage_c_handoff.py), refused for any other.
+    handoff_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+    payload_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    # The SHA the founder was shown; a mismatch with the deployed source is a 409, never a silent rebind.
+    expected_source_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
+
+
+class HandoffRelease(BaseModel):
+    """POST /tasks/{key}/handoff: names the task only. Any content field is refused (the packet is built server-side
+    from the stored task)."""
+    model_config = ConfigDict(extra="forbid")
+
+
+class HandoffActivate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class HandoffCancel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: Literal["PRODUCTION_CANCELLED"]
 
 
 class StageCRefreshReconcile(BaseModel):

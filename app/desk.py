@@ -15,7 +15,7 @@ from alembic.script import ScriptDirectory
 from pathlib import Path
 
 from app import (business_reconciler, control, enums, goals, metrics_store, models, reconciler_heartbeat, stage_c_ci,
-                 stage_c_worker, watchdog, worker)
+                 stage_c_handoff, stage_c_worker, watchdog, worker)
 from app.notify import NotificationService
 from app.redact import MAX_SCAN_CHARS, redact
 
@@ -82,6 +82,14 @@ def _context_view(context) -> dict | None:
     if not isinstance(context, dict):
         return None
     view = {k: _scalar(context[k]) for k in ("write", "autonomous", "source") if k in context}
+    scope = context.get("stage_c")
+    # Only the write paths of a stored Stage C scope that passes the release's own check, and only as members of
+    # the server's fixed allowlist (stage_c_worker.SAFE_FILES). Read-only context entries are user-supplied strings
+    # whose shape check cannot prove they are real files, so they are never returned.
+    if isinstance(scope, dict):
+        from app import stage_c_worker   # late: stage_c_worker imports modules that import this one
+        if not stage_c_worker.scope_refused(scope, set(stage_c_worker.SAFE_FILES)):
+            view["stage_c"] = {"paths": [p for p in scope["paths"] if p in stage_c_worker.SAFE_FILES]}
     imp = context.get("improvement")
     if isinstance(imp, dict):
         history = imp.get("history") if isinstance(imp.get("history"), list) else []
@@ -866,6 +874,10 @@ def task_detail(db: Session, task: models.Task) -> dict:
         "dependencies": [{"key": d.key, "status": d.status.value} for d in dependencies],
         "runs": [_run(r, task.key) for r in run_rows],
         "pull_request": _pull_request(task),
+        # B5: this task's handoff to Stage C and the last authenticated Stage C report (null when not handed off).
+        "remote_stage_c": stage_c_handoff.desk_view(task),
+        # B5 on Stage C: an imported task's handoff binding, which Authorize Stage C must send (null when native).
+        "stage_c_handoff": stage_c_handoff.import_view(db, task),
         "artifacts": _artifacts_view(task.artifacts), "result": _clean(task.result), "error": _clean(task.error),
         "supervisor": ({"verdict": verdict.supervisor_verdict.value,
                         "notes": _clean(verdict.supervisor_notes)} if verdict else None),

@@ -61,9 +61,17 @@ FOUNDER_SCOPE = [("POST", r"/control/agents"), ("POST", r"/tasks/[A-Za-z0-9_-]+/
                  ("POST", r"/notifications/[0-9]+/retry"),
                  # Goals steer the business reconciler; the handlers require the founder (no operator path).
                  ("POST", r"/goals"), ("PATCH", r"/goals/[0-9]+")]
-SCOPES = {"desk": DESK, "youtube": YOUTUBE}
+# B5 machine namespace on Stage C (app/stage_c_handoff.py): production's handoff sender, COMPANY_API_TOKEN_HANDOFF.
+# The only bearer the Desk hostname honours, and only on these exact paths; the handlers also require exactly
+# service:handoff, so admin/local/host callers (allowed everywhere above) and founder assertions are refused there.
+_HANDOFF_ID = r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
+HANDOFF = [("PUT", rf"/stage-c/handoff-api/{_HANDOFF_ID}"), ("GET", rf"/stage-c/handoff-api/{_HANDOFF_ID}"),
+           ("POST", rf"/stage-c/handoff-api/{_HANDOFF_ID}/cancel"),
+           ("POST", rf"/stage-c/handoff-api/{_HANDOFF_ID}/activate")]
+FOUNDER_SCOPE += [("POST", r"/tasks/[A-Za-z0-9_-]+/handoff"), ("GET", r"/desk/handoffs")]
+SCOPES = {"desk": DESK, "youtube": YOUTUBE, "handoff": HANDOFF}
 TOKENS = {"admin": "COMPANY_API_TOKEN_ADMIN", "desk": "COMPANY_API_TOKEN_DESK",
-          "youtube": "COMPANY_API_TOKEN_YOUTUBE"}
+          "youtube": "COMPANY_API_TOKEN_YOUTUBE", "handoff": "COMPANY_API_TOKEN_HANDOFF"}
 LOOPBACK = {"127.0.0.1", "::1"}
 # A Host header is a hostname or [IPv6] literal with an optional port, nothing else. Starlette builds
 # request.url from it, so "api:8000/health?x=" once made url.path differ from the routed path
@@ -123,7 +131,9 @@ ENFORCE_ALWAYS = [("POST", r"/approvals/[A-Za-z0-9_-]+"), ("POST", r"/learnings/
                   ("POST", r"/stage-c/reconcile-refresh"), ("POST", r"/stage-c/tasks"), ("POST", r"/experiments"),
                   ("POST", r"/stage-c/standing"), ("POST", r"/stage-c/standing/revoke"), ("POST", r"/stage-c/acceptance"),
                   ("POST", r"/experiments/[A-Za-z0-9_-]+/[a-z-]+"),
-                  ("POST", r"/notifications/[0-9]+/retry")]
+                  ("POST", r"/notifications/[0-9]+/retry"),
+                  # B5 handoff: production's release and Desk read, Stage C's machine routes.
+                  ("POST", r"/tasks/[A-Za-z0-9_-]+/handoff"), ("GET", r"/desk/handoffs"), *HANDOFF]
 
 
 def _match(routes, method: str, path: str) -> bool:
@@ -205,8 +215,11 @@ async def middleware(request, call_next):
     # callers. They keep their own scopes; none can bypass founder verification on
     # the Desk hostname.
     bearer = caller(None, authorization)
-    api_bearer = bearer != "anonymous" and not is_desk_host
-    access_request = (assertion is not None and not api_bearer) or is_desk_host
+    # The one Desk-hostname exception: the handoff bearer on its own machine paths. Any Access assertion that
+    # Cloudflare adds for the path's service token is ignored there; it never becomes a founder principal.
+    machine = bearer == "handoff" and _match(HANDOFF, method, path)
+    api_bearer = bearer != "anonymous" and (not is_desk_host or machine)
+    access_request = not machine and ((assertion is not None and not api_bearer) or is_desk_host)
     if access_request:
         # Access always fails closed, including rollout log mode and trusted TCP peers.
         # A browser/service assertion must never inherit the Tunnel peer's admin scope.

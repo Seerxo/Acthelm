@@ -241,6 +241,17 @@ export function clampMinutes(raw: string): number | null {
   return raw.trim() === "" || !Number.isFinite(n) ? null : Math.max(1, Math.min(60, Math.round(n)))
 }
 
+/** POST /stage-c/authorization body. An imported task (B5 handoff) names its exact handoff id and payload digest, as
+ *  the API requires; a native task sends neither. Nothing is sent for a cancelled or not yet activated import (null):
+ *  the API would refuse it anyway, and the Desk says why instead. */
+export function authorizeBody(taskKey: string, minutes: number,
+                              handoff?: { id: string; payload_sha256: string; activation: string | null; cancelled: boolean } | null):
+  { task_key: string; minutes: number; handoff_id?: string; payload_sha256?: string } | null {
+  if (!handoff) return { task_key: taskKey, minutes }
+  if (handoff.cancelled || handoff.activation !== "ACTIVATED") return null
+  return { task_key: taskKey, minutes, handoff_id: handoff.id, payload_sha256: handoff.payload_sha256 }
+}
+
 export type CiKind = "passed" | "failed" | "running" | "outdated" | "observed" | "none" | "unknown"
 /** CI is success only when it ran on the PR's published head. Any disagreement reads "CI on outdated SHA". */
 export function ciView(t: Pick<Task, "pr" | "ci">): { kind: CiKind; label: string; tone: Tone; sha: string | null } {
