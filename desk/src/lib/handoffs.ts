@@ -86,6 +86,16 @@ const STATUS_LANE: Record<string, Lane> = {
 
 /** The founder's lane. FAILED, BLOCKED, WAITING_*, CANCELLED and anything unrecognised are BLOCKED (lib/task-story.ts
  *  groupOf: never filed as healthy). A stale or missing report is UNKNOWN unless delivery itself explains it. */
+/** The API's freshness is a snapshot of the moment it answered; the browser re-derives it from the report's own
+ *  generation time, so a page whose refreshes stopped never keeps calling an old report fresh. */
+export const FRESH_MS = 180_000
+export function liveFreshness(server: string | null | undefined, generatedAt: string | null | undefined,
+                              now: number): "FRESH" | "UNKNOWN" {
+  const at = generatedAt ? Date.parse(generatedAt) : NaN
+  return server === "FRESH" && Number.isFinite(at) && now - at <= FRESH_MS ? "FRESH" : "UNKNOWN"
+}
+export const live = (h: Handoff, now: number): Handoff => ({ ...h, freshness: liveFreshness(h.freshness, h.generated_at, now) })
+
 export function laneOf(h: Handoff): Lane {
   if (h.cancellation === "ACKNOWLEDGED" || h.delivery === "SUSPENDED" || h.delivery === "REFUSED") return "BLOCKED"
   if (!h.task) return h.delivery === "PENDING" ? "BACKLOG" : "UNKNOWN"

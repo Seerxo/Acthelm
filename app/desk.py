@@ -82,6 +82,10 @@ def _context_view(context) -> dict | None:
     if not isinstance(context, dict):
         return None
     view = {k: _scalar(context[k]) for k in ("write", "autonomous", "source") if k in context}
+    scope = context.get("stage_c")
+    if isinstance(scope, dict):   # the stored Stage C scope (repository paths only): what a release would send
+        view["stage_c"] = {k: [p for p in scope[k] if isinstance(p, str)][:50]
+                           for k in ("paths", "context") if isinstance(scope.get(k), list)}
     imp = context.get("improvement")
     if isinstance(imp, dict):
         history = imp.get("history") if isinstance(imp.get("history"), list) else []

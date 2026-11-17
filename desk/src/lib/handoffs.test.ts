@@ -3,7 +3,7 @@
 // Synthetic data only. `npm test`.
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { board, laneOf, parseHandoff, parseHandoffs, waitingReason } from "./handoffs.ts"
+import { board, laneOf, liveFreshness, parseHandoff, parseHandoffs, waitingReason } from "./handoffs.ts"
 
 const NOW = "2026-11-17T10:00:00+00:00", HEAD = "1".repeat(40), OTHER = "2".repeat(40), FP = "a".repeat(64)
 const remote = (over: Record<string, unknown> = {}) => ({
@@ -87,4 +87,13 @@ test("the list parser keeps the production row and drops malformed entries", () 
   const b = board(out.handoffs)
   assert.equal(b.find(l => l.lane === "REVIEW")!.items.length, 1)
   assert.equal(b.length, 7)
+})
+
+test("freshness expires in the browser even when the server last said FRESH", () => {
+  const at = "2026-11-17T12:00:00Z", t0 = Date.parse(at)
+  assert.equal(liveFreshness("FRESH", at, t0 + 60_000), "FRESH")
+  assert.equal(liveFreshness("FRESH", at, t0 + 181_000), "UNKNOWN")      // stalled refresh: not fresh any more
+  assert.equal(liveFreshness("UNKNOWN", at, t0), "UNKNOWN")
+  assert.equal(liveFreshness("FRESH", null, t0), "UNKNOWN")
+  assert.equal(liveFreshness("FRESH", "not a date", t0), "UNKNOWN")
 })

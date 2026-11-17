@@ -500,13 +500,22 @@ def test_reports(w):
     assert w.prod_task().artifacts["remote_stage_c"]["generated_at"] == later.isoformat()
     out = w.sync(fixed((200, raw, h.mac("GET", h.API_PREFIX + hid, raw))), now=later + timedelta(hours=1))
     assert out["requests"][0]["outcome"] == "STALE"
+    # Same seq, different content (a change no audit row labels, e.g. a grant expiring by time): the fresh report
+    # replaces the stored projection instead of being kept as UNCHANGED forever.
+    later += timedelta(hours=2)
+    moved = {**same, "generated_at": later.isoformat(),
+             "authorization": {**same["authorization"], "status": "EXPIRED"}}
+    raw = h.canonical(moved)
+    out = w.sync(fixed((200, raw, h.mac("GET", h.API_PREFIX + hid, raw))), now=later)["requests"][0]
+    assert out["outcome"] == "OBSERVED", out
+    assert w.prod_task().artifacts["remote_stage_c"]["snapshot"]["authorization"]["status"] == "EXPIRED"
     with Session(w.prod) as s:
         task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
         assert h.desk_view(task, later + timedelta(hours=1))["freshness"] == "UNKNOWN"
         assert h.status_refusal(task, enums.TaskStatus.DONE, later + timedelta(hours=1))
     with Session(w.prod) as s:
         assert s.scalar(select(func.count()).select_from(models.AuditLog)
-                        .where(models.AuditLog.action == "handoff.observed")) == 2
+                        .where(models.AuditLog.action == "handoff.observed")) == 3
 
 
 def test_backoff(w):

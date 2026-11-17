@@ -8,7 +8,7 @@ export interface HandoffView {
   id: string; payload_sha256: string; delivery: string | null; remote_task_key: string | null
   released_at: string | null; expires_at: string | null; last_error_code: string | null
   cancellation: string; freshness: "FRESH" | "UNKNOWN"
-  snapshot: { authorization?: { status?: string; expires_at?: string | null } | null } | null
+  snapshot: { generated_at?: string | null; authorization?: { status?: string; expires_at?: string | null } | null } | null
 }
 /** GET /desk/handoffs (founder only): `enabled` is the sender's fail-closed configuration. */
 export interface HandoffList { enabled: boolean; handoffs: { key: string; title: string; status: string; handoff: HandoffView }[] }

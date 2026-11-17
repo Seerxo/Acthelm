@@ -7,6 +7,8 @@ import { toast } from "sonner"
 import { api, type TaskDetail } from "@/lib/api"
 import { codeTaskBody } from "@/lib/founder-forms"
 import { approvalState, releaseBlock, type HandoffList, type HandoffView } from "@/lib/handoff"
+import { liveFreshness } from "@/lib/handoffs"
+import { useNow } from "@/lib/use-now"
 import { parseStageC } from "@/lib/stage-c"
 import { when } from "@/lib/format"
 import { useDesk } from "@/state"
@@ -40,15 +42,23 @@ export function HandoffPage() {
   }, [readList])
 
   const built = codeTaskBody(f, allowed ?? [])
-  const handoff = task?.remote_stage_c ?? null
+  const now = useNow()
+  const served = task?.remote_stage_c ?? null
+  // Freshness re-derived in the browser from the report's own time: a stalled page never keeps "approved".
+  const handoff = served && { ...served, freshness: liveFreshness(served.freshness, served.snapshot?.generated_at, now) }
   const block = releaseBlock({ founder, enabled: list?.enabled === true, status: task?.status ?? null, risk: task?.risk, handoff, bodyError: null })   // the API builds the packet from the stored task
   const state = approvalState(handoff)
   const retryable = handoff?.delivery === "SUSPENDED" || handoff?.delivery === "REFUSED"
   const set = (k: "title" | "objective" | "success" | "context") => (v: string) => setF(x => ({ ...x, [k]: v }))
   const toggle = (p: string) => setF(x => ({ ...x, paths: x.paths.includes(p) ? x.paths.filter(y => y !== p) : [...x.paths, p] }))
-  // Recorded here, the text is exactly what the task holds, so it is frozen. Opened later, the Desk's copy may be
-  // redacted, so the founder may correct it to the text first released (a retry with other text is RELEASE_CONFLICT).
-  const [textLocked, setTextLocked] = useState(false)
+  // Once a task exists (recorded here or opened by key) the screen shows it read-only: the release sends the STORED
+  // task, so nothing edited here could ever reach Stage C.
+  const textLocked = key !== null
+  useEffect(() => {   // keep the approval state current while a task is open (same 30s pattern as the Handoffs page)
+    if (!key) return
+    const t = setInterval(() => { if (!document.hidden) void readTask(key).catch(() => undefined) }, 30_000)
+    return () => clearInterval(t)
+  }, [key, readTask])
 
   const record: ComponentProps<"form">["onSubmit"] = async e => {
     e.preventDefault()
@@ -56,7 +66,7 @@ export function HandoffPage() {
     setBusy(true)
     let made: string | null = null
     await act("/stage-c/tasks", built.body, r => { made = (r as { key?: string }).key ?? null; return `${made ?? "Task"} recorded as BACKLOG: not sent anywhere yet` })
-    if (made) { setKey(made); setTextLocked(true); await readTask(made).catch(() => setTask(null)) }
+    if (made) { setKey(made); await readTask(made).catch(() => setTask(null)) }
     setBusy(false)
   }
   const load = async () => {
@@ -65,8 +75,9 @@ export function HandoffPage() {
     setBusy(true)
     try {
       const t = await api<Task>(`/tasks/${encodeURIComponent(k)}`)
-      // ponytail: GET /tasks/{key} does not return a task's Stage C paths, so the founder picks them again below.
-      setF({ ...BLANK, title: t.title, objective: t.objective ?? "", success: t.success_criteria ?? "" })
+      const scope = (t as { context?: { stage_c?: { paths?: string[]; context?: string[] } } }).context?.stage_c
+      setF({ ...BLANK, title: t.title, objective: t.objective ?? "", success: t.success_criteria ?? "",
+             paths: scope?.paths ?? [], context: (scope?.context ?? []).join("\n") })
       setKey(t.key); setTask(t)
     } catch (err) { setTask(null); setKey(null); setLookup(""); toast.error((err as Error).message) }
     setBusy(false)
@@ -78,7 +89,7 @@ export function HandoffPage() {
     await Promise.all([readTask(key).catch(() => undefined), readList()])
     setBusy(false)
   }
-  const reset = () => { setF(BLANK); setKey(null); setTask(null); setLookup(""); setTextLocked(false) }
+  const reset = () => { setF(BLANK); setKey(null); setTask(null); setLookup("") }
 
   return <>
     <PageHeader title="Send to Stage C" description="Record a code task, check its approvals, then release it to the isolated Stage C host. Nothing runs here." />
@@ -104,11 +115,11 @@ export function HandoffPage() {
             <fieldset className="grid gap-1.5 text-[13px]"><legend className="mb-1.5 font-medium">Files it may change</legend>
               {allowed === null ? <Muted>Loading the allowed Stage C files…</Muted>
                 : allowed.length ? allowed.map(p => <label key={p} className="flex min-h-11 items-center gap-2 font-mono text-xs break-all">
-                    <input type="checkbox" checked={f.paths.includes(p)} onChange={() => toggle(p)} className="size-4" />{p}</label>)
+                    <input type="checkbox" checked={f.paths.includes(p)} onChange={() => toggle(p)} disabled={textLocked} className="size-4" />{p}</label>)
                 : <span className="text-warning">No allowed Stage C files are reported, so no code task can be sent.</span>}
             </fieldset>
             <label className="grid gap-1.5 text-[13px] font-medium">Read-only context files (optional, one per line)
-              <Textarea value={f.context} onChange={e => set("context")(e.target.value)} rows={2} placeholder="app/models.py" className="font-mono text-xs" /></label>
+              <Textarea value={f.context} onChange={e => set("context")(e.target.value)} readOnly={textLocked} rows={2} placeholder="app/models.py" className="font-mono text-xs" /></label>
           </fieldset>
           {built.error && (f.title || f.paths.length) ? <p role="status" className="text-xs text-muted-foreground">{built.error}</p> : null}
           {!key && <div><Button type="submit" disabled={busy || !built.body || founder === false} className="h-10 px-4">{busy ? "Recording…" : "Record task"}</Button></div>}

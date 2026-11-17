@@ -612,8 +612,8 @@ def _poll(db: Session, task_id: int, transport: Transport, now: datetime) -> dic
 
 
 def _observe(db, task, remote, snap: Snapshot, data: dict, now: datetime) -> dict:
-    """Monotonic per handoff: a lower seq is stale and dropped, an equal one only refreshes freshness. A verified
-    merge, once observed, is never replaced by a report without one."""
+    """Monotonic per handoff: a lower seq is stale and dropped; an equal one refreshes freshness and, if its content
+    changed, the projection. A verified merge, once observed, is never replaced by a report without one."""
     stored = (task.artifacts or {}).get("remote_stage_c") if isinstance(task.artifacts, dict) else None
     last_seq = stored.get("seq") if isinstance(stored, dict) and type(stored.get("seq")) is int else -1
     previous = (stored.get("snapshot") or {}) if isinstance(stored, dict) else {}
@@ -633,13 +633,18 @@ def _observe(db, task, remote, snap: Snapshot, data: dict, now: datetime) -> dic
         db.commit()
         return {"task": task.key, "kind": "poll", "outcome": "STALE"}
     _set_remote(task, **fresh, last_success_at=now.isoformat())
-    if snap.seq == last_seq:
+    dumped = snap.model_dump(mode="json")
+    same = {k: v for k, v in dumped.items() if k != "generated_at"} == {
+        k: v for k, v in previous.items() if k != "generated_at"}
+    if snap.seq == last_seq and same:
         task.artifacts = {**task.artifacts, "remote_stage_c": {**stored, "generated_at": generated.isoformat()}}
         db.commit()
         return {"task": task.key, "kind": "poll", "outcome": "UNCHANGED"}
+    # An equal seq with different content is a change no audit row labels (a grant expiring by time, a runtime
+    # flag): the fresh, authenticated report passed the latches above, so it replaces the stored projection.
     task.artifacts = {**(task.artifacts or {}), "remote_stage_c": {
         "seq": snap.seq, "observed_at": now.isoformat(), "generated_at": generated.isoformat(),
-        "snapshot": snap.model_dump(mode="json")}}
+        "snapshot": dumped}}
     audit.record(db, actor="company-worker", action="handoff.observed", entity_type="task", entity_key=task.key,
                  task_id=task.id, after={"id": snap.id, "seq": snap.seq, "remote_task_key": snap.task_key,
                                          "remote_status": snap.task.status.value if snap.task else None,

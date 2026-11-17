@@ -6,11 +6,12 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { ArrowLeft, ExternalLink, RefreshCw } from "lucide-react"
 import { api, type TaskDetail } from "@/lib/api"
 import { ago, humanize, when } from "@/lib/format"
-import { board, LANE_LABEL, LANE_TONE, laneOf, parseHandoff, parseHandoffs, waitingReason, type Handoff } from "@/lib/handoffs"
+import { board, LANE_LABEL, LANE_TONE, laneOf, live, parseHandoff, parseHandoffs, waitingReason, type Handoff } from "@/lib/handoffs"
 import { BADGE_TONE, ciView, loadError, prHref, reviewView, short, testView, type LoadError, type View } from "@/lib/stage-c"
 import { prLink } from "@/lib/accept"
 import { cn } from "@/lib/utils"
 import { useDesk } from "@/state"
+import { useNow } from "@/lib/use-now"
 import { Dot, EmptyState, Facts, Muted, PageHeader, Panel, PanelEmpty, PanelRow, Section, Status, TaskKey } from "@/components/desk"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -84,6 +85,7 @@ export function HandoffsPage({ taskKey }: { taskKey?: string }) {
 function HandoffBoard() {
   const { data, go } = useDesk()
   const { value, fetchedAt, failure, loading, read } = useRead("/desk/handoffs", parseHandoffs)
+  const now = useNow()
   const agentOf = (key: string | null) => data?.tasks.find(t => t.key === key)?.agent ?? null
   const header = <Header title="Handoffs" fetchedAt={fetchedAt} loading={loading} onRefresh={() => void read()}>
     {value?.enabled === false && <Status value="OFF" label="Sender off on this host" tone="warning" />}
@@ -94,7 +96,7 @@ function HandoffBoard() {
     {header}
     {failure && <p role="alert" className="text-[13px] text-warning">Refresh failed ({failure.message}); showing the last read.</p>}
     {!value.handoffs.length ? <EmptyState title="No task handed to Stage C">Released tasks appear here with what Stage C reports for them.</EmptyState>
-      : board(value.handoffs).filter(l => l.items.length || l.lane !== "UNKNOWN").map(({ lane, items }) => (
+      : board(value.handoffs.map(h => live(h, now))).filter(l => l.items.length || l.lane !== "UNKNOWN").map(({ lane, items }) => (
         <Panel key={lane} title={LANE_LABEL[lane]} count={items.length}>
           {!items.length ? <PanelEmpty title="None" /> : items.map(h => {
             const reason = waitingReason(h), agent = agentOf(h.key), s = stage(h)
@@ -120,12 +122,14 @@ const parseDetail = (raw: unknown) => raw as TaskDetail & { remote_stage_c?: unk
 function HandoffResult({ taskKey }: { taskKey: string }) {
   const { data, go } = useDesk()
   const { value: t, fetchedAt, failure, loading, read } = useRead(`/tasks/${encodeURIComponent(taskKey)}`, parseDetail)
+  const now = useNow()
   const back = <Button variant="ghost" className="h-11" onClick={() => go("handoffs")}><ArrowLeft />All handoffs</Button>
   const header = <Header title={<><TaskKey k={taskKey} className="mr-2 text-base" />{t?.title ?? "Result and evidence"}</>}
     fetchedAt={fetchedAt} loading={loading} onRefresh={() => void read()}>{back}</Header>
   if (!t) return <>{header}{failure ? <Failed failure={failure} what="Task" onRetry={() => void read()} />
     : <div className="grid gap-3" aria-busy="true" aria-label="Loading task"><Skeleton className="h-28" /><Skeleton className="h-48" /></div>}</>
-  const h = parseHandoff(t.remote_stage_c)
+  const parsed = parseHandoff(t.remote_stage_c)
+  const h = parsed && live(parsed, now)
   const rt = h?.task ?? null
   const pr = prLink(t)
   const remotePr = prHref(rt?.pr?.number)
