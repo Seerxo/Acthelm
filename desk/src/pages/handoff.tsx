@@ -6,7 +6,7 @@ import { useCallback, useEffect, useState, type ComponentProps } from "react"
 import { toast } from "sonner"
 import { api, type TaskDetail } from "@/lib/api"
 import { codeTaskBody } from "@/lib/founder-forms"
-import { approvalState, releaseBlock, type HandoffList, type HandoffView } from "@/lib/handoff"
+import { approvalState, releaseBlock, releaseBody, type HandoffList, type HandoffView } from "@/lib/handoff"
 import { parseStageC } from "@/lib/stage-c"
 import { when } from "@/lib/format"
 import { useDesk } from "@/state"
@@ -41,13 +41,14 @@ export function HandoffPage() {
 
   const built = codeTaskBody(f, allowed ?? [])
   const handoff = task?.remote_stage_c ?? null
-  const block = releaseBlock({ founder, enabled: list?.enabled === true, status: task?.status ?? null, handoff, bodyError: built.error })
+  const block = releaseBlock({ founder, enabled: list?.enabled === true, status: task?.status ?? null, risk: task?.risk, handoff, bodyError: built.error })
   const state = approvalState(handoff)
   const retryable = handoff?.delivery === "SUSPENDED" || handoff?.delivery === "REFUSED"
   const set = (k: "title" | "objective" | "success" | "context") => (v: string) => setF(x => ({ ...x, [k]: v }))
   const toggle = (p: string) => setF(x => ({ ...x, paths: x.paths.includes(p) ? x.paths.filter(y => y !== p) : [...x.paths, p] }))
-  // Once recorded here, the text is what the task holds; changing it would void the release (TASK_CHANGED).
-  const textLocked = key !== null
+  // Recorded here, the text is exactly what the task holds, so it is frozen. Opened later, the Desk's copy may be
+  // redacted, so the founder may correct it to the text first released (a retry with other text is RELEASE_CONFLICT).
+  const [textLocked, setTextLocked] = useState(false)
 
   const record: ComponentProps<"form">["onSubmit"] = async e => {
     e.preventDefault()
@@ -55,7 +56,7 @@ export function HandoffPage() {
     setBusy(true)
     let made: string | null = null
     await act("/stage-c/tasks", built.body, r => { made = (r as { key?: string }).key ?? null; return `${made ?? "Task"} recorded as BACKLOG: not sent anywhere yet` })
-    if (made) { setKey(made); await readTask(made).catch(() => setTask(null)) }
+    if (made) { setKey(made); setTextLocked(true); await readTask(made).catch(() => setTask(null)) }
     setBusy(false)
   }
   const load = async () => {
@@ -73,11 +74,11 @@ export function HandoffPage() {
   const release = async () => {
     if (!key || !built.body || block || busy) return
     setBusy(true)
-    await act(`/tasks/${encodeURIComponent(key)}/handoff`, built.body, r => `${key} released to Stage C · ${(r as { id?: string }).id ?? ""}`)
+    await act(`/tasks/${encodeURIComponent(key)}/handoff`, releaseBody(built.body), r => `${key} released to Stage C · ${(r as { id?: string }).id ?? ""}`)
     await Promise.all([readTask(key).catch(() => undefined), readList()])
     setBusy(false)
   }
-  const reset = () => { setF(BLANK); setKey(null); setTask(null); setLookup("") }
+  const reset = () => { setF(BLANK); setKey(null); setTask(null); setLookup(""); setTextLocked(false) }
 
   return <>
     <PageHeader title="Send to Stage C" description="Record a code task, check its approvals, then release it to the isolated Stage C host. Nothing runs here." />

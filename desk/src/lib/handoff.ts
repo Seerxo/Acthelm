@@ -20,7 +20,7 @@ export const RELEASABLE = ["BACKLOG", "READY", "BLOCKED"] as const
  *  `founder`: GET /desk/handoffs answered (it is founder only); null while unknown. A SUSPENDED or REFUSED delivery
  *  may be retried with the same text (the API restarts it; different text is RELEASE_CONFLICT). */
 export function releaseBlock(o: {
-  founder: boolean | null; enabled: boolean; status: string | null; handoff: HandoffView | null; bodyError: string | null
+  founder: boolean | null; enabled: boolean; status: string | null; risk?: string; handoff: HandoffView | null; bodyError: string | null
 }): string | null {
   if (o.founder === null) return "Checking who is signed in…"
   if (!o.founder) return "Only the verified founder may release a task to Stage C."
@@ -31,6 +31,8 @@ export function releaseBlock(o: {
     if (o.handoff.delivery === "SUSPENDED" || o.handoff.delivery === "REFUSED") return o.bodyError
     return "Already released."
   }
+  // Stage C imports every packet as LOW risk and the release route does not check it, so the screen does.
+  if (o.risk !== undefined && o.risk !== "LOW") return `A ${o.risk}-risk task cannot be sent to Stage C (LOW only).`
   if (!(RELEASABLE as readonly string[]).includes(o.status)) return `A ${o.status} task cannot be released (BACKLOG, READY or BLOCKED only).`
   return o.bodyError
 }
@@ -50,4 +52,10 @@ export function approvalState(h: HandoffView | null): { release: [string, Tone];
     : grant === "NONE" ? ["Waiting for your approval on Stage C", "warning"]
     : [`${grant[0]}${grant.slice(1).toLowerCase()}: approve again on Stage C`, "danger"]
   return { release, coding }
+}
+
+/** The release text with its file lists sorted: the API compares a retry's text to the stored packet as ordered lists
+ *  (RELEASE_CONFLICT otherwise), so the order the founder ticked files in must not matter. */
+export function releaseBody<T extends { paths: string[]; context: string[] }>(body: T): T {
+  return { ...body, paths: [...body.paths].sort(), context: [...body.context].sort() }
 }
