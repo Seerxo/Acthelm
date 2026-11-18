@@ -83,31 +83,39 @@ Production runs the **installed** 804f2a68 verifier and gateway. What that code 
 characters of `desk.html`. The first release must therefore be a commit whose `desk/` and `app/static` are still
 the caab3d3 bytes. The new rule takes effect from the second release.
 
-### Three ways to get that first commit
+### The first release: route C, a founder-signed release branch
 
-| | Route | Keeps every control? | Founder steps beyond "sign two releases, install, set up the rebuild" | Risk |
-|---|---|---|---|---|
-| R | **Revert on main** (prepared: branches `bootstrap/pr-a`, `bootstrap/pr-b`). PR-A = this fix + `desk/` and `app/static` back to caab3d3; PR-B restores them. | yes, nothing unusual | merge two PRs | public `main` shows the old Desk until PR-B; production runs the old Desk against the #76–#78 backend until PR-B |
-| B | **Fix branched before #78** (prepared: branch `bootstrap/alt-x`, commit X = 267c84d + this fix). Merged into `main` with a **merge commit**, X is an ancestor of `main` with caab3d3's Desk, and the host accepts it. The old gateway only reviews a tip, so for one tick its `fetch_url` must point at a founder-made bare mirror whose `main` is X. | yes on the host (it fetches GitHub `main` itself and re-derives SHA, diff, digest, review binding); the gateway's input is founder-set for one tick | **[FOUNDER]** merge with "Create a merge commit" (a squash loses X); **[FOUNDER]** root: make the mirror, edit the gateway config, run one tick, restore the config | unusual host procedure; if the repository only allows squash merges it cannot work (UNVERIFIED); production runs the old Desk against the #76/#77 backend only |
-| C | **Release branch** `release` = 267c84d + this fix, with a founder-signed policy v5 naming `branch: release`. | yes, but it changes the signed policy | **[FOUNDER]** sign policy v5; **[FOUNDER]** edit host and gateway configs; later **[FOUNDER]** sign policy v6 to return to `main` (the floor forbids going back to v4), after `main` has merged `release` | most founder-signed steps; two policy changes; same merge-commit requirement to get back to `main` |
+The first release (R1) is this fix on a line that still has caab3d3's `desk/` and `app/static` (it changes
+neither). It is released from a real GitHub branch whose tip is exactly R1; nothing changes how the gateway picks
+its candidate:
 
-No route lets the old code release a `main` tip that contains the #78 bundle, and no route needs a break-glass.
-B and C avoid the public revert; B is cheaper than C. R is the only one that uses nothing but ordinary PRs.
+1. R1 is a PR onto `main` (the required checks and the code-owner review apply). It is not merged before step 5.
+2. **[FOUNDER]** Create `release/r1` on GitHub pointing at exactly the R1 commit and protect it: locked
+   (read-only), no force-push, no deletion, enforced for admins. The candidate is then the tip of a real GitHub
+   branch that nobody can move.
+3. **[FOUNDER]** Sign policy v5: policy v4 with only `version: 5` and `branch: "release/r1"`. Root, with
+   `release-host.timer` stopped so that no automatic prepare starts: back up the policy and both configs, install
+   v5, set `branch` to `release/r1` in the host and the gateway config (`repository` and `fetch_url` stay the
+   GitHub remote, unchanged), run `prepare <R1>`, then start the timer again (the gateway waits while the host's
+   identity report is older than 15 minutes, and the host applies only on its timer).
+4. One gateway tick. The gateway fetches `release/r1` from GitHub and reviews its tip; the host fetches the same
+   branch from its pinned GitHub remote, requires the commit to be on it and to descend from caab3d3, and re-derives
+   SHA, diff, digest and review binding. **[FOUNDER]** Sign the draft (HIGH: `app/`, `scripts/`); the host applies
+   it, and the ledger's policy floor becomes 5.
+5. **[FOUNDER]** Merge R1 into `main` with a merge commit, sign policy v6 (v5 with `version: 6` and
+   `branch: "main"`) and set both configs back to `main`. The floor forbids going back to v4, so v6 is the only way
+   back. The second release is the `main` tip, which descends from R1.
 
-**Route B is a deviation from the standard release flow, stated as such.** Its limits:
+Every control stays as it is: the gateway itself takes the tip of the policy's branch from GitHub, the review is
+independent and bound to the exact diff, and the founder's signature is required in addition to it, never instead.
+The cost is two policy signatures and two config changes.
 
-- The mirror never changes GitHub `main`; it changes, for one tick, which commit the gateway takes as its candidate.
-- The candidate must be a verified ancestor of the real GitHub `main` history (merged with a merge commit), checked
-  before the tick.
-- The production host still verifies the release commit independently from GitHub: it fetches `main` itself,
-  requires the candidate to be its ancestor and re-derives SHA, diff, digest and review binding.
-- The mirror is used for exactly one founder-approved bootstrap tick. Afterwards the gateway configuration is
-  restored and its digest verified against the backup.
-- The founder's signature does not replace the independent review: the tick still needs the reviewer's APPROVE, and
-  a review that refuses stops the route. If route B itself is refused, route C (a founder-signed release branch) is
-  the alternative, not a second attempt through the mirror.
+Withdrawn: route B pointed the gateway's `fetch_url` at a founder-made mirror for one tick. The independent reviewer
+refused it, because it overrides the gateway's own candidate selection, and the host's later checks and the
+founder's signature do not restore that control. Route R (revert `desk/` and `app/static` on `main`, restore them
+in a second PR) remains possible, but public `main` would show the old Desk until the second PR.
 
-### Sequence (route R; B and C differ only in step 1–2)
+### Sequence (route R; route C replaces steps 1–3 with the steps above)
 
 | Step | What | Reviewer input |
 |---|---|---|
@@ -153,8 +161,8 @@ Production changes only when the host applies a signed manifest, so every failur
 | installed 804f | the same, rebased onto today's `main` 0563667 (adds #79, one test file) | 213,770 | yes | 834,806 |
 | this fix | **route R step 7:** PR-A → PR-B (`desk/` sources + header) | 426,963 | yes | 621,613 |
 | installed 804f | PR-A → PR-B without the new rule (for comparison) | 3,049,173 | **no** | -2,000,597 |
-| installed 804f | **route B/C first release:** caab3d3 → X (#76, #77, this fix) | 138,390 | yes | 910,186 |
-| this fix | **route B/C second release:** X → `main` + this fix (all of #78) | 504,127 | yes | 544,449 |
+| installed 804f | **route C first release:** caab3d3 → X (#76, #77, this fix) | 138,390 | yes | 910,186 |
+| this fix | **route C second release:** X → `main` + this fix (all of #78) | 504,127 | yes | 544,449 |
 | this fix | caab3d3 → `main` + this fix in one release (only possible once the rule is installed) | 638,064 | yes | 410,512 |
 
 Not verified here: the Docker path of `scripts/release-gateway-desk-build` (`npm ci --offline` in the pinned
