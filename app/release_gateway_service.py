@@ -33,6 +33,7 @@ IDENTITY_MAX_AGE = timedelta(minutes=15)
 MANIFEST_LIFETIME = timedelta(hours=2)
 REVIEW_TIMEOUT_S = 900
 MAX_BUILD_RECORD = 1 << 20           # a build record is a few KiB; the gateway reads nothing bigger
+DESK_BUILD_STOP_GRACE = 30.0       # seconds the wrapper gets after SIGTERM to remove its container
 DESK_BUILD_UNAVAILABLE = 75          # EX_TEMPFAIL from scripts/release-gateway-desk-build: retried, bounded
 DESK_BUILD_OUTPUT_CAP = 1 << 20      # bytes of build output the gateway drains (never stores); more fails the build
 
@@ -197,9 +198,9 @@ def _run_drained(argv: list, *, timeout: float, cap: int):
     """Run the build with its stdout and stderr drained and discarded, never kept: memory stays bounded whatever the
     candidate's build prints. Returns the exit code, "timeout", or "output" when more than `cap` bytes arrive. The
     child runs in its own process group; on any failure (cap, deadline, or a child that closed its output but keeps
-    running) the pipe is closed and the whole group is killed and reaped. A sudo'd wrapper is root and cannot be
-    signalled from here: the closed pipe (SIGPIPE) and the wrapper's own timeout and trap end it."""
-    import signal
+    running) the pipe is closed; the whole group is stopped (SIGTERM, then SIGKILL) after every run, even when the
+    child itself exited, and a group that does not stop raises instead of returning. A sudo'd wrapper is root and
+    cannot be killed from here, but sudo forwards SIGTERM to it and its trap removes the build container."""
     import time
     p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                          start_new_session=True)
@@ -224,16 +225,45 @@ def _run_drained(argv: list, *, timeout: float, cap: int):
         return verdict
     finally:
         p.stdout.close()
-        if p.poll() is None:
-            for kill in (lambda: os.killpg(p.pid, signal.SIGKILL), p.kill):
-                try:
-                    kill()
-                except (PermissionError, ProcessLookupError):
-                    pass
+        # The group outlives its leader: a descendant may keep running (and close its output) after the direct
+        # child exited, so the group is always stopped, on success too; it holds nothing the gateway still needs.
+        if not _stop_group(p):
+            # Never a quiet success: a build that cannot be stopped is an infrastructure fault (bounded retry).
+            raise RuntimeError("desk build process group did not stop")
+
+
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:      # a member we may not signal (the sudo'd root wrapper) is still a live member
+        return True
+    return True
+
+
+def _stop_group(p, grace: float = DESK_BUILD_STOP_GRACE) -> bool:
+    """SIGTERM the build's process group (sudo forwards it to the root wrapper, whose trap removes its container),
+    wait up to `grace` seconds, then SIGKILL what we may signal and wait again. True only once the group is empty."""
+    import signal
+    import time
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        p.poll()                 # reap the direct child: a zombie leader still counts as a group member
+        if not _group_alive(p.pid):
+            return True
+        for send in (lambda: os.killpg(p.pid, sig), (p.kill if sig == signal.SIGKILL else (lambda: None))):
             try:
-                p.wait(timeout=30)
-            except subprocess.TimeoutExpired:
+                send()
+            except (PermissionError, ProcessLookupError):
                 pass
+        end = time.monotonic() + grace
+        while time.monotonic() < end:
+            p.poll()
+            if not _group_alive(p.pid):
+                return True
+            time.sleep(0.2)
+    p.poll()
+    return not _group_alive(p.pid)
 
 
 def built_files(root: Path) -> dict:

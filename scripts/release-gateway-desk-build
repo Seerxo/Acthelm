@@ -71,12 +71,16 @@ install -d -m 0700 -o root -g root "$STAGE_ROOT"
 [[ ! -L $STAGE_ROOT && $(stat -c %u:%a "$STAGE_ROOT") == 0:700 ]] || unavailable "$STAGE_ROOT is not root-owned 0700"
 
 as_caller() { setpriv --reuid="$SUDO_UID" --regid="${SUDO_GID:-$SUDO_UID}" --clear-groups -- "$@"; }
-name='' stage=''
+name='' stage='' build=''
 cleanup() {
   if [[ -n $name ]]; then docker rm -f "$name" >/dev/null 2>&1 || true; fi
+  if [[ -n $build ]]; then kill "$build" 2>/dev/null || true; wait "$build" 2>/dev/null || true; fi
   if [[ -n $stage ]]; then rm -rf -- "$stage"; fi
 }
 trap cleanup EXIT
+# The gateway stops a build it gave up on with SIGTERM to the sudo process group (sudo forwards it here). Bash runs
+# a trap only between commands, so the build runs in the background under `wait`, which a trapped signal interrupts:
+# the EXIT trap then removes the container at once instead of after the build's own deadline.
 trap 'exit 1' INT TERM HUP
 stage=$(mktemp -d "$STAGE_ROOT/b.XXXXXXXX")
 name=release-gateway-desk-build-${stage##*/b.}
@@ -119,7 +123,7 @@ untar_checked "$stage/in.tar" "$IN_CAP" "$stage/in"
 # node_modules/.bin tools run from it; `--mount type=tmpfs` would be noexec). app/static leaves
 # the container as a tar on stdout (npm's output goes to stderr), capped by head.
 set +e
-timeout -k 15 "$DEADLINE" docker run --rm --name "$name" --network=none --read-only --cap-drop=ALL \
+( timeout -k 15 "$DEADLINE" docker run --rm --name "$name" --network=none --read-only --cap-drop=ALL \
   --security-opt=no-new-privileges --pids-limit=1024 --memory=4g --user "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" \
   --tmpfs /tmp:rw,exec,size=2g,mode=1777 -e HOME=/tmp \
   -e npm_config_update_notifier=false \
@@ -129,8 +133,12 @@ timeout -k 15 "$DEADLINE" docker run --rm --name "$name" --network=none --read-o
            { npm ci --offline --cache /tmp/npm-cache --ignore-scripts --no-audit --no-fund && npm run build; } >&2
            tar -C /tmp/w/app/static -cf - .' \
   | head -c $((OUT_CAP + 1)) >"$stage/out.tar"
-status=("${PIPESTATUS[@]}")
+  echo "${PIPESTATUS[0]}" >"$stage/status" ) &
+build=$!
+wait "$build"
+build=''
 set -e
+status=("$(cat "$stage/status" 2>/dev/null || echo 1)")
 [[ ${status[0]} == 0 ]] || { echo "release-gateway-desk-build: build failed (exit ${status[0]})" >&2; exit 1; }
 untar_checked "$stage/out.tar" "$OUT_CAP" "$stage/out"
 find "$stage/out" -type f -exec chmod 0644 -- {} +   # git must see 100644 (generated_facts refuses any other mode)
