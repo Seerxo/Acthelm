@@ -361,3 +361,54 @@ def test_a_noisy_desk_build_fails_closed_before_review(hw):
     hw.cfg.desk_build_command = _py("import sys\nwhile True: sys.stdout.write('y' * 65536)")
     out = hw.tick()
     assert out["outcome"] == "CHECKS_FAILED" and "bytes of output" in out["detail"] and packets == []
+
+
+def _tar_check(tmp_path, data: bytes):
+    import re
+    code = re.search(r"TAR_CHECK=\$\(cat <<'PY'\n(.*?)\nPY\n\)", SCRIPT.read_text(), re.S).group(1)
+    (tmp_path / "a.tar").write_bytes(data)
+    return subprocess.run(["python3", "-I", "-c", code, str(tmp_path / "a.tar"), str(1 << 20)],
+                          capture_output=True, text=True, timeout=30)
+
+
+def _tar(fmt=None, **kw):
+    import io
+    import tarfile
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w", format=fmt or tarfile.GNU_FORMAT, **kw) as t:
+        for name, data in (("a", b"x" * 700), ("d/b", b"y")):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            t.addfile(info, io.BytesIO(data))
+    return b.getvalue()
+
+
+@pytest.mark.parametrize("case", ["good", "cut", "no_end", "appended", "pax"])
+def test_the_wrappers_archive_check_needs_one_whole_gnu_archive(tmp_path, case):
+    """A truncated stream (a failed write), a second archive after the first, or a pax header is refused."""
+    import tarfile
+    good = _tar()
+    data = {"good": good, "cut": good[:512 * 5], "no_end": good[:512 * 4 + 512], "appended": good + _tar(),
+            "pax": _tar(tarfile.PAX_FORMAT, pax_headers={"comment": "x" * 4096})}[case]
+    out = _tar_check(tmp_path, data)
+    assert (out.returncode == 0) is (case == "good"), out.stderr
+
+
+def test_an_oversized_desk_tree_is_refused_before_it_is_written(monkeypatch):
+    """The gateway bounds what it writes for the wrapper while writing it: a huge desk/ fails the build and the
+    wrapper is never called."""
+    from types import SimpleNamespace
+    from app import release_gateway_service as svc
+    monkeypatch.setattr(svc.rg, "tree_blobs", lambda *a: iter([("desk/a", "100644", b"x" * 600)] * 3))
+    monkeypatch.setattr(svc, "DESK_INPUT_CAP", 1000)
+    cfg = SimpleNamespace(clone="unused", desk_build_command=_py("raise SystemExit('wrapper must not run')"))
+    out = svc.default_desk_build(cfg, "0" * 40)
+    assert out["passed"] is False and "exceeds" in out["summary"]
+
+
+def test_a_cleanup_failure_is_reported_even_when_the_group_does_not_stop(monkeypatch):
+    """Exit 74 from the wrapper names the leaked container; a group that also failed to stop never hides it."""
+    from app import release_gateway_service as svc
+    monkeypatch.setattr(svc, "_stop_group", lambda p, *a: (p.wait(), False)[1])
+    with pytest.raises(svc.DeskBuildCleanupFailed):
+        svc._run_drained(_py("import sys; sys.exit(74)"), timeout=30, cap=1 << 20)

@@ -43,6 +43,8 @@ class DeskBuildCleanupFailed(RuntimeError):
 DESK_BUILD_STOP_GRACE = 30.0       # seconds the wrapper gets after SIGTERM to remove its container
 DESK_BUILD_UNAVAILABLE = 75          # EX_TEMPFAIL from scripts/release-gateway-desk-build: retried, bounded
 DESK_BUILD_OUTPUT_CAP = 1 << 20      # bytes of build output the gateway drains (never stores); more fails the build
+DESK_INPUT_CAP = 64 << 20            # bytes of desk/ written for the wrapper (its IN_CAP), checked while writing
+DESK_INPUT_FILES = 20000             # files of desk/ (the wrapper's member limit)
 
 
 class Config:
@@ -181,9 +183,14 @@ def default_desk_build(cfg: Config, sha: str) -> dict:
     only desk/ read from git objects plus an empty app/static, so the build cannot copy the committed bundle. Returns
     {"passed", "summary", "files": {path: sha256}}; the caller compares the files with the payload."""
     import tempfile
-    with tempfile.TemporaryDirectory(prefix="gateway-desk-") as d:
+    # dir="/tmp": the sudoers rule allows only /tmp/gateway-desk-*, whatever TMPDIR says.
+    with tempfile.TemporaryDirectory(prefix="gateway-desk-", dir="/tmp") as d:
         root = Path(d)
+        size = count = 0
         for path, mode, data in rg.tree_blobs(cfg.clone, sha, rg.DESK_DIR):
+            size, count = size + len(data), count + 1
+            if size > DESK_INPUT_CAP or count > DESK_INPUT_FILES:   # bounded before the host disk fills
+                return {"passed": False, "summary": f"desk/ exceeds {DESK_INPUT_CAP} bytes or {DESK_INPUT_FILES} files"}
             target = root / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)
@@ -234,11 +241,13 @@ def _run_drained(argv: list, *, timeout: float, cap: int):
         p.stdout.close()
         # The group outlives its leader: a descendant may keep running (and close its output) after the direct
         # child exited, so the group is always stopped, on success too; it holds nothing the gateway still needs.
-        if not _stop_group(p):
-            # Never a quiet success: a build that cannot be stopped is an infrastructure fault (bounded retry).
-            raise RuntimeError("desk build process group did not stop")
+        stopped = _stop_group(p)
+        # The wrapper's own report comes first: a cleanup failure (exit 74) is never hidden behind a generic error.
         if p.returncode == DESK_BUILD_CLEANUP_FAILED:   # also after a cancel: the wrapper reports its own cleanup
             raise DeskBuildCleanupFailed(f"DESK BUILD CONTAINER NOT PROVEN REMOVED: {LEAKED_CONTAINER_ACTION}")
+        if not stopped:
+            # Never a quiet success: a build that cannot be stopped is an infrastructure fault (bounded retry).
+            raise RuntimeError("desk build process group did not stop")
 
 
 def _group_alive(pgid: int) -> bool:

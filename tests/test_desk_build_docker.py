@@ -248,3 +248,39 @@ def test_a_failed_npm_ci_never_yields_an_archive(host):
         assert list((work / "app/static").iterdir()) == []
     finally:
         shutil.rmtree(work, ignore_errors=True)
+
+
+def test_an_executable_build_script_keeps_its_mode(host):
+    """desk/ sources keep their executable bits in the staged copy (only group/world write is dropped), so a build
+    that runs a committed 100755 script still builds."""
+    work = caller_dir(ROOT)
+    try:
+        pkg = json.loads((work / "desk/package.json").read_text())
+        (work / "desk/build.sh").write_text("#!/bin/sh\nset -e\n" + pkg["scripts"]["build"] + "\n")
+        (work / "desk/build.sh").chmod(0o755)
+        pkg["scripts"]["build"] = "./build.sh"
+        (work / "desk/package.json").write_text(json.dumps(pkg))
+        out = sudo(str(INSTALLED), str(work), check=False, timeout=600)
+        assert out.returncode == 0, out.stderr[-2000:]
+        assert (work / "app/static/desk.html").is_file()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_an_archive_written_to_the_containers_stdout_by_the_build_is_refused(host):
+    """The build runs as the container's own uid and can open PID 1's file descriptors: during `npm run build >&2`
+    the shell keeps the real stdout on a saved descriptor, so the build can write its own archive into the stream
+    ahead of the real one. The stream must then hold exactly one archive, so it is refused, never read in part."""
+    work = caller_dir(ROOT)
+    try:
+        pkg = json.loads((work / "desk/package.json").read_text())
+        pkg["scripts"]["build"] += (   # every pipe of PID 1 other than its stderr is the real stdout
+            " && for f in /proc/1/fd/*; do case $(readlink $f) in pipe:*) [ \"$(readlink $f)\" ="
+            " \"$(readlink /proc/1/fd/2)\" ] || { tar -cf $f package.json && echo XGWINJECTED >&2; };; esac; done")
+        (work / "desk/package.json").write_text(json.dumps(pkg))
+        out = sudo(str(INSTALLED), str(work), check=False, timeout=600)
+        assert "XGWINJECTED" in out.stderr, out.stderr[-2000:]           # the injection really happened
+        assert out.returncode != 0 and "archive" in out.stderr, out.stderr[-2000:]
+        assert list((work / "app/static").iterdir()) == []
+    finally:
+        shutil.rmtree(work, ignore_errors=True)

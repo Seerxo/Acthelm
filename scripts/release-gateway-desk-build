@@ -13,8 +13,9 @@
 # root-owned staging dir, the container builds in its own size-limited tmpfs with no writable host mount and emits
 # app/static as a tar on stdout (capped), and the checked regular files are written back AS THE CALLER.
 #
-# Exit 75 (EX_TEMPFAIL) = a prerequisite of this host is missing (image pin, image, cache, setpriv): the gateway
-# retries, bounded, and never treats it as a pass. Any other non-zero exit is a failed build of that commit.
+# Exit 75 (EX_TEMPFAIL) = a prerequisite of this host is missing (tools, image pin, image, cache): the gateway
+# retries, bounded, and never treats it as a pass. Exit 74 = the build job or container could not be proven gone
+# (operator action). Any other non-zero exit is a failed build of that commit.
 set -euo pipefail
 umask 022
 
@@ -36,6 +37,8 @@ if [[ ${1:-} == seed ]]; then
   [[ -z ${SUDO_UID:-}${SUDO_USER:-} ]] || refuse "seed is a founder step for a real root session, refused under sudo"
 fi
 [[ $# == 1 ]] || { echo "usage: $0 [seed] <dir>" >&2; exit 2; }
+# Root-owned and writable by root alone (no group/world write), so nobody else can swap what root then uses.
+root_only() { [[ ! -L $1 && $(stat -c %u "$1") == 0 && $(( 0$(stat -c %a "$1") & 022 )) == 0 ]]; }
 work=$(cd -P -- "$1" 2>/dev/null && pwd -P) || refuse "no such directory: $1"
 [[ -d $work/desk && -f $work/desk/package-lock.json ]] || refuse "no desk/package-lock.json in $work"
 [[ -z $(find "$work" -type l -print -quit) ]] || refuse "symlink under $work"   # fast pre-check; staging re-checks
@@ -48,7 +51,11 @@ if [[ $mode == build ]]; then
   [[ -d $work/app/static && -z $(ls -A "$work/app/static") ]] || refuse "app/static must start empty"
 fi
 
-[[ -f $PIN_FILE && ! -L $PIN_FILE && $(stat -c %u "$PIN_FILE") == 0 ]] || unavailable "no root-owned image pin"
+for tool in docker python3 tar timeout setpriv find du head stat nproc; do
+  command -v "$tool" >/dev/null || unavailable "$tool is missing"
+done
+
+[[ -f $PIN_FILE ]] && root_only "$PIN_FILE" || unavailable "no image pin writable by root alone"
 IMAGE=$(<"$PIN_FILE")
 [[ $IMAGE =~ ^[a-z0-9./_-]+(:[A-Za-z0-9._-]+)?@sha256:[0-9a-f]{64}$ ]] || unavailable "image pin is not a digest"
 docker image inspect "$IMAGE" >/dev/null 2>&1 || unavailable "pinned image is not present (founder: docker pull)"
@@ -69,9 +76,9 @@ if [[ $mode == seed ]]; then
     sh -euc 'cp -R /src /tmp/desk && cd /tmp/desk && npm ci --cache /cache --ignore-scripts --no-audit --no-fund'
 fi
 
-[[ -d $CACHE && ! -L $CACHE && $(stat -c %u "$CACHE") == 0 ]] || unavailable "no root-owned npm cache (founder: seed)"
-command -v setpriv >/dev/null || unavailable "setpriv (util-linux) is missing"
-[[ -d $STATE && ! -L $STATE && $(stat -c %u "$STATE") == 0 ]] || unavailable "no root-owned $STATE (founder: seed)"
+[[ -d $STATE ]] && root_only "$STATE" || unavailable "no $STATE writable by root alone (founder: seed)"
+[[ -d $CACHE ]] && root_only "$CACHE" || unavailable "no npm cache writable by root alone (founder: seed)"
+[[ -z $(find "$CACHE" \( ! -user 0 -o -perm /022 \) -print -quit) ]] || unavailable "npm cache holds entries not root-only"
 install -d -m 0700 -o root -g root "$STAGE_ROOT"
 [[ ! -L $STAGE_ROOT && $(stat -c %u:%a "$STAGE_ROOT") == 0:700 ]] || unavailable "$STAGE_ROOT is not root-owned 0700"
 
@@ -86,6 +93,9 @@ container_gone() {
   out=$(timeout 20 docker ps -aq --filter "name=^${1}\$") || return 1
   [[ -z $out ]]
 }
+# A diagnostic must never decide the exit code: the gateway may already have closed the pipe (SIGPIPE kills only
+# this subshell, so cleanup still exits 74).
+say() { ( echo "release-gateway-desk-build: $*" >&2 ) || true; }
 remove_container() {   # bounded: 3 attempts; returns 1 if the container cannot be proven gone
   local i
   for i in 1 2 3; do
@@ -93,14 +103,26 @@ remove_container() {   # bounded: 3 attempts; returns 1 if the container cannot 
     container_gone "$1" && return 0
     sleep 2
   done
-  echo "release-gateway-desk-build: CONTAINER $1 NOT PROVEN REMOVED (docker refused or unreachable); an operator must remove it" >&2
+  say "CONTAINER $1 NOT PROVEN REMOVED (docker refused or unreachable); an operator must remove it"
   return 1
 }
 # --- container removal (end) ---
+# The build job is its own process group (timeout, docker client, head): stopped and proven empty BEFORE the
+# container is removed, so no client still in flight can create or start the container after its removal.
+stop_build() {
+  local i
+  kill -TERM -- "-$build" 2>/dev/null || true
+  for i in {1..30}; do kill -0 -- "-$build" 2>/dev/null || break; sleep 0.5; done
+  kill -KILL -- "-$build" 2>/dev/null || true
+  wait "$build" 2>/dev/null || true
+  for i in {1..20}; do kill -0 -- "-$build" 2>/dev/null || return 0; sleep 0.5; done
+  say "BUILD JOB (process group $build) NOT PROVEN STOPPED; an operator must stop it"
+  return 1
+}
 cleanup() {
   local failed=0
+  if [[ -n $build ]]; then stop_build || failed=1; fi
   if [[ -n $name ]]; then remove_container "$name" || failed=1; fi
-  if [[ -n $build ]]; then kill "$build" 2>/dev/null || true; wait "$build" 2>/dev/null || true; fi
   if [[ -n $stage ]]; then rm -rf -- "$stage"; fi
   if (( failed )); then trap - EXIT; exit "$CLEANUP_FAILED"; fi
 }
@@ -115,17 +137,26 @@ name=release-gateway-desk-build-${stage##*/b.}
 # A tar from untrusted hands: at most `cap` bytes, only regular files and directories, no absolute or `..` names,
 # extracted by root into `dest` (a fresh root-owned dir) and re-checked on disk.
 # Validated from headers alone before anything is written: the size cap and ulimit -f bound neither the member count
-# nor sparse members, so the sum of sizes, the count and the member types are checked here first.
+# nor sparse members, so the sum of sizes, the count and the member types are checked here first. Both archives are
+# GNU format (--format=gnu): pax headers are refused (one global header could make every listing line huge), and the
+# archive must end in its zero end-of-archive blocks with nothing after them, so a truncated stream or a second
+# archive appended to the real one is refused instead of read in part.
 TAR_CHECK=$(cat <<'PY'
 import sys, tarfile
 cap, total = int(sys.argv[2]), 0
-with tarfile.open(sys.argv[1], "r:") as t:
+with open(sys.argv[1], "rb") as f, tarfile.open(fileobj=f, mode="r:") as t:
     for n, m in enumerate(t, 1):
         total += m.size
         parts = m.name.split("/")
         if (n > 20000 or total > cap or m.type not in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE)
-                or m.issparse() or m.name.startswith("/") or ".." in parts):
+                or m.issparse() or m.pax_headers or m.name.startswith("/") or ".." in parts):
             sys.exit(f"refused member {n}: {m.name!r}")
+    if t.pax_headers:
+        sys.exit("refused: pax global header")
+    f.seek(t.offset)
+    rest = f.read()
+    if len(rest) < 1024 or rest.count(0) != len(rest):
+        sys.exit("refused: archive is truncated or has data after its end")
 PY
 )
 untar_checked() {  # <tar> <cap> <dest>
@@ -143,20 +174,24 @@ untar_checked() {  # <tar> <cap> <dest>
 }
 
 # In: read desk/ as the caller (whatever it swaps, it can only show us what it can read itself).
-as_caller tar -C "$work" -cf - desk | head -c $((IN_CAP + 1)) >"$stage/in.tar"
+as_caller tar --format=gnu -C "$work" -cf - desk | head -c $((IN_CAP + 1)) >"$stage/in.tar"
 untar_checked "$stage/in.tar" "$IN_CAP" "$stage/in"
 # The caller may build its tree under a restrictive umask (0700 dirs), and the container reads /src as SUDO_UID.
-# Only this verified, root-owned copy of the public desk/ sources is normalized; staging, cache and anything else
-# keep their own (0700 / root) modes. untar_checked already refused every non-regular, non-directory member.
-find "$stage/in/desk" -type d -exec chmod 0755 -- {} +
-find "$stage/in/desk" -type f -exec chmod 0644 -- {} +
+# Only this verified, root-owned copy of the public desk/ sources is normalized (readable by all, writable by root
+# alone, executable bits kept); staging, cache and anything else keep their own modes. untar_checked already refused
+# every non-regular, non-directory member, and tar --no-same-permissions dropped set-id bits.
+chmod -R a+rX,go-w -- "$stage/in/desk"
 
 # Build: no writable host mount; the only writable area is the container's size-limited tmpfs (exec: npm's
 # node_modules/.bin tools run from it; `--mount type=tmpfs` would be noexec). app/static leaves
-# the container as a tar on stdout (npm's output goes to stderr), capped by head.
-set +e
-( timeout -k 15 "$DEADLINE" docker run --rm --name "$name" --network=none --read-only --cap-drop=ALL \
-  --security-opt=no-new-privileges --pids-limit=1024 --memory=4g --user "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" \
+# the container as a tar on stdout (npm's output goes to stderr), capped by head. No daemon-side log (the gateway
+# drains and caps the output itself), no swap beyond the memory limit, at most half the host's CPUs.
+# The job runs in its own process group (set -m) and timeout stays in it (--foreground), so cleanup can stop all of it.
+CPUS=$(( $(nproc) > 2 ? $(nproc) / 2 : 1 ))
+set +e -m
+( timeout --foreground -k 15 "$DEADLINE" docker run --rm --name "$name" --network=none --read-only --cap-drop=ALL \
+  --security-opt=no-new-privileges --pids-limit=1024 --memory=4g --memory-swap=4g --cpus="$CPUS" \
+  --log-driver=none --user "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" \
   --tmpfs /tmp:rw,exec,size=2g,mode=1777 -e HOME=/tmp \
   -e npm_config_update_notifier=false \
   --mount "type=bind,source=$CACHE,destination=/cache,readonly" \
@@ -169,15 +204,16 @@ set +e
            cd /tmp/w/desk
            npm ci --offline --cache /tmp/npm-cache --ignore-scripts --no-audit --no-fund >&2
            npm run build >&2
-           tar -C /tmp/w/app/static -cf - .' \
+           tar --format=gnu -C /tmp/w/app/static -cf - .' \
   | head -c $((OUT_CAP + 1)) >"$stage/out.tar"
-  echo "${PIPESTATUS[0]}" >"$stage/status" ) &
+  echo "${PIPESTATUS[*]}" >"$stage/status" ) &
 build=$!
+set +m
 wait "$build"
 build=''
 set -e
-status=("$(cat "$stage/status" 2>/dev/null || echo 1)")
-[[ ${status[0]} == 0 ]] || { echo "release-gateway-desk-build: build failed (exit ${status[0]})" >&2; exit 1; }
+status=$(cat "$stage/status" 2>/dev/null || echo missing)
+[[ $status == "0 0" ]] || { echo "release-gateway-desk-build: build failed (exit statuses: $status)" >&2; exit 1; }
 untar_checked "$stage/out.tar" "$OUT_CAP" "$stage/out"
 find "$stage/out" -type f -exec chmod 0644 -- {} +   # git must see 100644 (generated_facts refuses any other mode)
 find "$stage/out" -type d -exec chmod 0755 -- {} +
