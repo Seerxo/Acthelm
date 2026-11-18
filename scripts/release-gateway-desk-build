@@ -118,6 +118,11 @@ untar_checked() {  # <tar> <cap> <dest>
 # In: read desk/ as the caller (whatever it swaps, it can only show us what it can read itself).
 as_caller tar -C "$work" -cf - desk | head -c $((IN_CAP + 1)) >"$stage/in.tar"
 untar_checked "$stage/in.tar" "$IN_CAP" "$stage/in"
+# The caller may build its tree under a restrictive umask (0700 dirs), and the container reads /src as SUDO_UID.
+# Only this verified, root-owned copy of the public desk/ sources is normalized; staging, cache and anything else
+# keep their own (0700 / root) modes. untar_checked already refused every non-regular, non-directory member.
+find "$stage/in/desk" -type d -exec chmod 0755 -- {} +
+find "$stage/in/desk" -type f -exec chmod 0644 -- {} +
 
 # Build: no writable host mount; the only writable area is the container's size-limited tmpfs (exec: npm's
 # node_modules/.bin tools run from it; `--mount type=tmpfs` would be noexec). app/static leaves

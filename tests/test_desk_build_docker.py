@@ -184,3 +184,33 @@ def test_a_build_the_gateway_gives_up_on_is_stopped_with_its_root_wrapper_and_co
                               check=False).stdout.split():
             sudo("docker", "rm", "-f", container, check=False)
         shutil.rmtree(work, ignore_errors=True)
+
+
+def test_a_tree_built_under_umask_077_still_builds(host):
+    """The gateway may create its desk/ tree under a restrictive umask (0700 directories); the root-owned staged copy
+    is normalized, so the container (running as the caller) can read it and the build reproduces the bundle."""
+    seed = subprocess.run(["sudo", "-n", "env", "-u", "SUDO_UID", "-u", "SUDO_USER", "-u", "SUDO_GID",
+                           "-u", "SUDO_COMMAND", str(INSTALLED), "seed", str(host)], capture_output=True, text=True,
+                          timeout=900)
+    assert seed.returncode == 0, seed.stderr[-2000:]
+    old = os.umask(0o077)
+    try:
+        work = Path(tempfile.mkdtemp(prefix="gateway-desk-"))
+        for src in sorted((ROOT / "desk").rglob("*")):     # like default_desk_build: mkdir + write, no copystat
+            dst = work / "desk" / src.relative_to(ROOT / "desk")
+            if src.is_dir():
+                dst.mkdir(parents=True, exist_ok=True)
+            elif src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(src.read_bytes())
+        (work / "app/static").mkdir(parents=True)
+    finally:
+        os.umask(old)
+    try:
+        assert stat.S_IMODE((work / "desk").stat().st_mode) == 0o700
+        out = sudo(str(INSTALLED), str(work), check=False, timeout=1800)
+        assert out.returncode == 0, out.stderr[-2000:]
+        built, committed = tree_files(work / "app/static"), tree_files(ROOT / "app/static")
+        assert {k: v[0] for k, v in built.items()} == {k: v[0] for k, v in committed.items()}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
