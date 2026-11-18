@@ -161,8 +161,14 @@ set +e
   -e npm_config_update_notifier=false \
   --mount "type=bind,source=$CACHE,destination=/cache,readonly" \
   --mount "type=bind,source=$stage/in/desk,destination=/src,readonly" "$IMAGE" \
-  sh -euc 'mkdir -p /tmp/w/app/static && cp -R /src /tmp/w/desk && cp -R /cache /tmp/npm-cache && cd /tmp/w/desk
-           { npm ci --offline --cache /tmp/npm-cache --ignore-scripts --no-audit --no-fund && npm run build; } >&2
+  sh -euc '# One command per line: under -e a failure inside an && list does not stop the shell, so a failed
+           # npm ci would otherwise still reach tar and archive an empty app/static.
+           mkdir -p /tmp/w/app/static
+           cp -R /src /tmp/w/desk
+           cp -R /cache /tmp/npm-cache
+           cd /tmp/w/desk
+           npm ci --offline --cache /tmp/npm-cache --ignore-scripts --no-audit --no-fund >&2
+           npm run build >&2
            tar -C /tmp/w/app/static -cf - .' \
   | head -c $((OUT_CAP + 1)) >"$stage/out.tar"
   echo "${PIPESTATUS[0]}" >"$stage/status" ) &

@@ -233,3 +233,18 @@ def test_no_build_starts_beside_a_leaked_container(host):
     finally:
         sudo("docker", "rm", "-f", leak, check=False)
         shutil.rmtree(work, ignore_errors=True)
+
+
+def test_a_failed_npm_ci_never_yields_an_archive(host):
+    """A dependency install that fails (lockfile out of sync, deterministic, offline) fails the build: no archive, no
+    files in app/static, so a candidate that deleted its generated files cannot get a passing rebuild proof."""
+    work = caller_dir(ROOT)
+    try:
+        pkg = json.loads((work / "desk/package.json").read_text())
+        pkg.setdefault("dependencies", {})["left-pad-not-in-lockfile"] = "1.0.0"
+        (work / "desk/package.json").write_text(json.dumps(pkg))
+        out = sudo(str(INSTALLED), str(work), check=False, timeout=600)
+        assert out.returncode != 0 and "build failed" in out.stderr, (out.returncode, out.stderr[-2000:])
+        assert list((work / "app/static").iterdir()) == []
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
