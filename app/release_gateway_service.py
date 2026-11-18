@@ -43,8 +43,6 @@ class DeskBuildCleanupFailed(RuntimeError):
 DESK_BUILD_STOP_GRACE = 30.0       # seconds the wrapper gets after SIGTERM to remove its container
 DESK_BUILD_UNAVAILABLE = 75          # EX_TEMPFAIL from scripts/release-gateway-desk-build: retried, bounded
 DESK_BUILD_OUTPUT_CAP = 1 << 20      # bytes of build output the gateway drains (never stores); more fails the build
-DESK_INPUT_CAP = 64 << 20            # bytes of desk/ written for the wrapper (its IN_CAP), checked while writing
-DESK_INPUT_FILES = 20000             # files of desk/ (the wrapper's member limit)
 
 
 class Config:
@@ -186,11 +184,7 @@ def default_desk_build(cfg: Config, sha: str) -> dict:
     # dir="/tmp": the sudoers rule allows only /tmp/gateway-desk-*, whatever TMPDIR says.
     with tempfile.TemporaryDirectory(prefix="gateway-desk-", dir="/tmp") as d:
         root = Path(d)
-        size = count = 0
-        for path, mode, data in rg.tree_blobs(cfg.clone, sha, rg.DESK_DIR):
-            size, count = size + len(data), count + 1
-            if size > DESK_INPUT_CAP or count > DESK_INPUT_FILES:   # bounded before the host disk fills
-                return {"passed": False, "summary": f"desk/ exceeds {DESK_INPUT_CAP} bytes or {DESK_INPUT_FILES} files"}
+        for path, mode, data in rg.tree_blobs(cfg.clone, sha, rg.DESK_DIR):   # size-bounded before any read
             target = root / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(data)

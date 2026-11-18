@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -394,16 +395,32 @@ def test_the_wrappers_archive_check_needs_one_whole_gnu_archive(tmp_path, case):
     assert (out.returncode == 0) is (case == "good"), out.stderr
 
 
-def test_an_oversized_desk_tree_is_refused_before_it_is_written(monkeypatch):
-    """The gateway bounds what it writes for the wrapper while writing it: a huge desk/ fails the build and the
-    wrapper is never called."""
-    from types import SimpleNamespace
-    from app import release_gateway_service as svc
-    monkeypatch.setattr(svc.rg, "tree_blobs", lambda *a: iter([("desk/a", "100644", b"x" * 600)] * 3))
-    monkeypatch.setattr(svc, "DESK_INPUT_CAP", 1000)
-    cfg = SimpleNamespace(clone="unused", desk_build_command=_py("raise SystemExit('wrapper must not run')"))
-    out = svc.default_desk_build(cfg, "0" * 40)
-    assert out["passed"] is False and "exceeds" in out["summary"]
+@pytest.mark.parametrize("case", ["one_big", "many_small", "too_many", "fits"])
+def test_tree_blobs_checks_sizes_before_reading_any_blob(tmp_path, monkeypatch, case):
+    """desk/ and app/static are bounded from the sizes git records (ls-tree -l): one oversized blob, many small ones
+    adding up, or too many files are refused before a single blob is read."""
+    repo = tmp_path / "r"
+    files = {"one_big": {"desk/a": 2000}, "many_small": {f"desk/{i}": 300 for i in range(4)},
+             "too_many": {f"desk/{i}": 1 for i in range(6)}, "fits": {"desk/a": 500, "desk/b": 400}}[case]
+    for name, size in files.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_bytes(b"x" * size)
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "t"], check=True)
+    monkeypatch.setattr(rg, "TREE_BLOBS_CAP", 1000)
+    monkeypatch.setattr(rg, "TREE_BLOBS_FILES", 5)
+    reads, real_run = [], subprocess.run
+    monkeypatch.setattr(rg.subprocess, "run", lambda argv, *a, **k: (reads.append(argv) if "cat-file" in argv else None,
+                                                                     real_run(argv, *a, **k))[1])
+    if case == "fits":
+        assert [p for p, _m, _d in rg.tree_blobs(repo / ".git", "HEAD", "desk")] == ["desk/a", "desk/b"]
+        assert len(reads) == 2
+    else:
+        with pytest.raises(rg.Refused, match="exceeds"):
+            list(rg.tree_blobs(repo / ".git", "HEAD", "desk"))
+        assert reads == []
 
 
 def test_a_cleanup_failure_is_reported_even_when_the_group_does_not_stop(monkeypatch):
@@ -412,3 +429,13 @@ def test_a_cleanup_failure_is_reported_even_when_the_group_does_not_stop(monkeyp
     monkeypatch.setattr(svc, "_stop_group", lambda p, *a: (p.wait(), False)[1])
     with pytest.raises(svc.DeskBuildCleanupFailed):
         svc._run_drained(_py("import sys; sys.exit(74)"), timeout=30, cap=1 << 20)
+
+
+@pytest.mark.parametrize("line", [b"100644 blob abc -\tdesk/a", b"100644 blob abc 1e9\tdesk/a",
+                                  b"100644 blob abc\tdesk/a", b"100644 blob abc 12", b"100644 blob abc 9999999999999999\tdesk/a"],
+                         ids=["dash", "exp", "missing", "no_tab", "huge"])
+def test_tree_blobs_refuses_an_unreadable_size(monkeypatch, line):
+    """An ls-tree size that is missing or not plain digits is refused (Refused, never another exception)."""
+    monkeypatch.setattr(rg.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=line + b"\0"))
+    with pytest.raises(rg.Refused):
+        list(rg.tree_blobs(Path("."), "HEAD", "desk"))

@@ -583,3 +583,24 @@ def test_founder_endpoint_audits_without_changing_task(scene):
     row = db.get(models.AuditLog, result["audit_id"])
     assert row.actor == who.id and row.action == "stage-c.refresh_reconcile.requested"
     assert task.status == enums.TaskStatus.BLOCKED
+
+
+@pytest.mark.parametrize("after", ["refused", "founder_named_refused", "founder_status"])
+def test_a_refused_refresh_leaves_the_merge_block_recoverable(blocked_scene, after):
+    """Review finding: this worker's refusal of a refresh request is an audit of that request only, so the merge
+    block stays recoverable after it; the same action name from anyone else, or a status change, still ends it."""
+    db, task, request, block, *_ = blocked_scene
+    if not task.error.startswith(stage_c_ci.MERGE_NOT_RECORDED):
+        assert stage_c_ci.merge_recovery_block(db, task) is None
+        return
+    assert stage_c_ci.merge_recovery_block(db, task).id == block.id
+    if after == "founder_status":
+        audit.record(db, actor="founder", action="task.status", entity_type="task", entity_key=task.key,
+                     task_id=task.id, after={"status": "BLOCKED"})
+    else:
+        audit.record(db, actor=stage_c_ci.ACTOR if after == "refused" else "founder",
+                     action="improvement.refresh_reconcile_refused", entity_type="task", entity_key=task.key,
+                     task_id=task.id, after={"request_audit_id": request.id, "reasons": ["REQUEST_MISMATCH"]})
+    db.commit()
+    found = stage_c_ci.merge_recovery_block(db, task)
+    assert (found.id if found else None) == (block.id if after == "refused" else None)

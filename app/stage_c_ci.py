@@ -25,7 +25,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from app import approval_identity, audit, coder_diff, enums, merge_authorization, models, stage_c, stage_c_merge_gate
@@ -108,11 +108,16 @@ def merge_recovery_block(db: Session, task: models.Task):
     number = pr_number(_evidence(task, "PR_OPEN").get("pr"))
     if number is None:
         return None
+    # A refresh request, its dry run and this worker's own refusal of it change nothing about the task: they never
+    # hide the merge block. A refused refresh proves nothing either; the block below is re-checked as before and the
+    # merge is re-evaluated in full. Anything else after the block (a founder action, a status change) still wins.
     latest = db.scalar(select(models.AuditLog).where(
         models.AuditLog.entity_type == "task", models.AuditLog.entity_key == task.key,
         models.AuditLog.task_id == task.id,
         models.AuditLog.action.notin_(("stage-c.refresh_reconcile.requested",
-                                       "stage-c.refresh_reconcile.dry_run"))).order_by(models.AuditLog.id.desc()).limit(1))
+                                       "stage-c.refresh_reconcile.dry_run")),
+        ~and_(models.AuditLog.action == "improvement.refresh_reconcile_refused", models.AuditLog.actor == ACTOR))
+        .order_by(models.AuditLog.id.desc()).limit(1))
     if (not latest or latest.actor != ACTOR or latest.action != "improvement.blocked"
             or not isinstance(latest.after, dict)):
         return None
