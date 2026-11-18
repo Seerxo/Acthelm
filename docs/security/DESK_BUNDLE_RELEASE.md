@@ -94,6 +94,19 @@ the caab3d3 bytes. The new rule takes effect from the second release.
 No route lets the old code release a `main` tip that contains the #78 bundle, and no route needs a break-glass.
 B and C avoid the public revert; B is cheaper than C. R is the only one that uses nothing but ordinary PRs.
 
+**Route B is a deviation from the standard release flow, stated as such.** Its limits:
+
+- The mirror never changes GitHub `main`; it changes, for one tick, which commit the gateway takes as its candidate.
+- The candidate must be a verified ancestor of the real GitHub `main` history (merged with a merge commit), checked
+  before the tick.
+- The production host still verifies the release commit independently from GitHub: it fetches `main` itself,
+  requires the candidate to be its ancestor and re-derives SHA, diff, digest and review binding.
+- The mirror is used for exactly one founder-approved bootstrap tick. Afterwards the gateway configuration is
+  restored and its digest verified against the backup.
+- The founder's signature does not replace the independent review: the tick still needs the reviewer's APPROVE, and
+  a review that refuses stops the route. If route B itself is refused, route C (a founder-signed release branch) is
+  the alternative, not a second attempt through the mirror.
+
 ### Sequence (route R; B and C differ only in step 1–2)
 
 | Step | What | Reviewer input |

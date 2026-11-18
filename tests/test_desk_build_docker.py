@@ -139,9 +139,11 @@ def _gateway_drain():
     src = (ROOT / "app/release_gateway_service.py").read_text()
     names = {"_run_drained", "_stop_group", "_group_alive"}
     tree = ast.parse(src)
+    consts = {"DESK_BUILD_STOP_GRACE", "DESK_BUILD_CLEANUP_FAILED", "LEAKED_CONTAINER_ACTION"}
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    nodes += [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "DeskBuildCleanupFailed"]
     nodes += [n for n in tree.body if isinstance(n, ast.Assign) and any(
-        isinstance(t, ast.Name) and t.id == "DESK_BUILD_STOP_GRACE" for t in n.targets)]
+        isinstance(t, ast.Name) and t.id in consts for t in n.targets)]
     ns = {"os": os, "select": select, "subprocess": subprocess}
     exec(compile(ast.Module(sorted(nodes, key=lambda n: n.lineno), []), "release_gateway_service.py", "exec"), ns)
     return types.SimpleNamespace(**{k: ns[k] for k in names})
@@ -213,4 +215,21 @@ def test_a_tree_built_under_umask_077_still_builds(host):
         built, committed = tree_files(work / "app/static"), tree_files(ROOT / "app/static")
         assert {k: v[0] for k, v in built.items()} == {k: v[0] for k, v in committed.items()}
     finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_no_build_starts_beside_a_leaked_container(host):
+    """A container left by an earlier build (its removal could not be proven) blocks every new build until an operator
+    removes it: the wrapper answers 75 (infrastructure, retried, never a pass) and starts nothing."""
+    leak = "release-gateway-desk-build-leaktest"
+    sudo("docker", "run", "-d", "--rm", "--name", leak, "--network=none", IMAGE, "sleep", "300")
+    work = caller_dir(ROOT)
+    try:
+        out = sudo(str(INSTALLED), str(work), check=False, timeout=300)
+        assert out.returncode == 75 and "operator must remove it" in out.stderr, out.stderr[-2000:]
+        assert list((work / "app/static").iterdir()) == []
+        names = sudo("docker", "ps", "-a", "--format", "{{.Names}}", "--filter", "name=release-gateway-desk-build").stdout
+        assert names.split() == [leak]                       # nothing new started beside it
+    finally:
+        sudo("docker", "rm", "-f", leak, check=False)
         shutil.rmtree(work, ignore_errors=True)

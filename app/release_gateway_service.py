@@ -33,6 +33,13 @@ IDENTITY_MAX_AGE = timedelta(minutes=15)
 MANIFEST_LIFETIME = timedelta(hours=2)
 REVIEW_TIMEOUT_S = 900
 MAX_BUILD_RECORD = 1 << 20           # a build record is a few KiB; the gateway reads nothing bigger
+DESK_BUILD_CLEANUP_FAILED = 74   # the wrapper could not prove its build container removed (operator action)
+LEAKED_CONTAINER_ACTION = ("operator action required: list it with `docker ps -a --filter name=release-gateway-desk-build`"
+                           " and remove it; no desk build runs until it is gone")
+
+
+class DeskBuildCleanupFailed(RuntimeError):
+    """A desk build container may still be running: an infrastructure fault reported verbatim, never a pass."""
 DESK_BUILD_STOP_GRACE = 30.0       # seconds the wrapper gets after SIGTERM to remove its container
 DESK_BUILD_UNAVAILABLE = 75          # EX_TEMPFAIL from scripts/release-gateway-desk-build: retried, bounded
 DESK_BUILD_OUTPUT_CAP = 1 << 20      # bytes of build output the gateway drains (never stores); more fails the build
@@ -230,6 +237,8 @@ def _run_drained(argv: list, *, timeout: float, cap: int):
         if not _stop_group(p):
             # Never a quiet success: a build that cannot be stopped is an infrastructure fault (bounded retry).
             raise RuntimeError("desk build process group did not stop")
+        if p.returncode == DESK_BUILD_CLEANUP_FAILED:   # also after a cancel: the wrapper reports its own cleanup
+            raise DeskBuildCleanupFailed(f"DESK BUILD CONTAINER NOT PROVEN REMOVED: {LEAKED_CONTAINER_ACTION}")
 
 
 def _group_alive(pgid: int) -> bool:
@@ -443,6 +452,9 @@ def _tick(cfg: Config, *, now, clock, checks, review, fetch, desk_build) -> dict
             built = desk_build(sha)
         except rg.Refused as refused:
             return _decide(cfg, state, sha, "DESK_BUILD_MISMATCH", str(refused), now)
+        except DeskBuildCleanupFailed as error:   # a build container may be left running: say so, never a pass
+            print(f"release-gateway: {error}", file=sys.stderr)
+            return _infra(cfg, state, sha, attempts, str(error), now)
         except Exception as error:   # a missing tool or runner: infrastructure, bounded, never a pass
             return _infra(cfg, state, sha, attempts, f"desk build runner failed: {type(error).__name__}", now)
         if not isinstance(built, dict) or built.get("passed") is not True:

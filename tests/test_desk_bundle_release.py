@@ -316,6 +316,45 @@ def test_a_desk_build_group_that_cannot_be_stopped_raises_instead_of_returning(m
         svc._run_drained(_py("print('ok')"), timeout=10, cap=1 << 20)
 
 
+FAKE_DOCKER = """#!/bin/sh
+case "$1" in
+  rm) [ "$FAKE_RM" = ok ] && : > "$FAKE_DIR/removed"; exit 0 ;;
+  ps) [ "$FAKE_PS" = down ] && exit 1; [ -e "$FAKE_DIR/removed" ] || echo deadbeef; exit 0 ;;
+esac
+exit 1
+"""
+
+
+@pytest.mark.parametrize("rm,ps,ok", [("ok", "up", True), ("refused", "up", False), ("ok", "down", False)],
+                         ids=["removed", "refused", "daemon_down"])
+def test_container_removal_is_proven(tmp_path, rm, ps, ok):
+    """The wrapper's cleanup counts a container as removed only when the daemon answers and lists none: a refused
+    removal or an unreachable daemon is a cleanup failure with an operator message, never success."""
+    src = (Path(__file__).resolve().parents[1] / "scripts/release-gateway-desk-build").read_text()
+    funcs = src.split("# --- container removal (begin) ---")[1].split("# --- container removal (end) ---")[0]
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin/docker").write_text(FAKE_DOCKER)
+    (tmp_path / "bin/docker").chmod(0o755)
+    (tmp_path / "bin/sleep").write_text("#!/bin/sh\nexit 0\n")
+    (tmp_path / "bin/sleep").chmod(0o755)
+    out = subprocess.run(["bash", "-c", funcs + "\nremove_container release-gateway-desk-build-x"],
+                         env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "FAKE_RM": rm, "FAKE_PS": ps,
+                              "FAKE_DIR": str(tmp_path)}, capture_output=True, text=True, timeout=60)
+    assert (out.returncode == 0) is ok, out.stderr
+    assert ("NOT PROVEN REMOVED" in out.stderr) is (not ok)
+
+
+@pytest.mark.parametrize("cancelled", [False, True], ids=["exit", "cancel"])
+def test_unremoved_container_is_an_infrastructure_error(cancelled):
+    """A wrapper reporting it could not remove its container (exit 74) stops the gateway, on a normal exit and after
+    a cancel alike; it is never returned as a build result."""
+    from app import release_gateway_service as svc
+    code = ("import signal, sys, time\nsignal.signal(signal.SIGTERM, lambda *a: sys.exit(74))\ntime.sleep(60)"
+            if cancelled else "import sys; sys.exit(74)")
+    with pytest.raises(svc.DeskBuildCleanupFailed, match="NOT PROVEN REMOVED.*operator action required"):
+        svc._run_drained(_py(code), timeout=2 if cancelled else 30, cap=1 << 20)
+
+
 def test_a_noisy_desk_build_fails_closed_before_review(hw):
     packets = capture(hw)
     desk_commit(hw)
