@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -316,9 +317,125 @@ def test_a_desk_build_group_that_cannot_be_stopped_raises_instead_of_returning(m
         svc._run_drained(_py("print('ok')"), timeout=10, cap=1 << 20)
 
 
+FAKE_DOCKER = """#!/bin/sh
+case "$1" in
+  rm) [ "$FAKE_RM" = ok ] && : > "$FAKE_DIR/removed"; exit 0 ;;
+  ps) [ "$FAKE_PS" = down ] && exit 1; [ -e "$FAKE_DIR/removed" ] || echo deadbeef; exit 0 ;;
+esac
+exit 1
+"""
+
+
+@pytest.mark.parametrize("rm,ps,ok", [("ok", "up", True), ("refused", "up", False), ("ok", "down", False)],
+                         ids=["removed", "refused", "daemon_down"])
+def test_container_removal_is_proven(tmp_path, rm, ps, ok):
+    """The wrapper's cleanup counts a container as removed only when the daemon answers and lists none: a refused
+    removal or an unreachable daemon is a cleanup failure with an operator message, never success."""
+    src = (Path(__file__).resolve().parents[1] / "scripts/release-gateway-desk-build").read_text()
+    funcs = src.split("# --- container removal (begin) ---")[1].split("# --- container removal (end) ---")[0]
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin/docker").write_text(FAKE_DOCKER)
+    (tmp_path / "bin/docker").chmod(0o755)
+    (tmp_path / "bin/sleep").write_text("#!/bin/sh\nexit 0\n")
+    (tmp_path / "bin/sleep").chmod(0o755)
+    out = subprocess.run(["bash", "-c", funcs + "\nremove_container release-gateway-desk-build-x"],
+                         env={"PATH": f"{tmp_path / 'bin'}:/usr/bin:/bin", "FAKE_RM": rm, "FAKE_PS": ps,
+                              "FAKE_DIR": str(tmp_path)}, capture_output=True, text=True, timeout=60)
+    assert (out.returncode == 0) is ok, out.stderr
+    assert ("NOT PROVEN REMOVED" in out.stderr) is (not ok)
+
+
+@pytest.mark.parametrize("cancelled", [False, True], ids=["exit", "cancel"])
+def test_unremoved_container_is_an_infrastructure_error(cancelled):
+    """A wrapper reporting it could not remove its container (exit 74) stops the gateway, on a normal exit and after
+    a cancel alike; it is never returned as a build result."""
+    from app import release_gateway_service as svc
+    code = ("import signal, sys, time\nsignal.signal(signal.SIGTERM, lambda *a: sys.exit(74))\ntime.sleep(60)"
+            if cancelled else "import sys; sys.exit(74)")
+    with pytest.raises(svc.DeskBuildCleanupFailed, match="NOT PROVEN REMOVED.*operator action required"):
+        svc._run_drained(_py(code), timeout=2 if cancelled else 30, cap=1 << 20)
+
+
 def test_a_noisy_desk_build_fails_closed_before_review(hw):
     packets = capture(hw)
     desk_commit(hw)
     hw.cfg.desk_build_command = _py("import sys\nwhile True: sys.stdout.write('y' * 65536)")
     out = hw.tick()
     assert out["outcome"] == "CHECKS_FAILED" and "bytes of output" in out["detail"] and packets == []
+
+
+def _tar_check(tmp_path, data: bytes):
+    import re
+    code = re.search(r"TAR_CHECK=\$\(cat <<'PY'\n(.*?)\nPY\n\)", SCRIPT.read_text(), re.S).group(1)
+    (tmp_path / "a.tar").write_bytes(data)
+    return subprocess.run(["python3", "-I", "-c", code, str(tmp_path / "a.tar"), str(1 << 20)],
+                          capture_output=True, text=True, timeout=30)
+
+
+def _tar(fmt=None, **kw):
+    import io
+    import tarfile
+    b = io.BytesIO()
+    with tarfile.open(fileobj=b, mode="w", format=fmt or tarfile.GNU_FORMAT, **kw) as t:
+        for name, data in (("a", b"x" * 700), ("d/b", b"y")):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            t.addfile(info, io.BytesIO(data))
+    return b.getvalue()
+
+
+@pytest.mark.parametrize("case", ["good", "cut", "no_end", "appended", "pax"])
+def test_the_wrappers_archive_check_needs_one_whole_gnu_archive(tmp_path, case):
+    """A truncated stream (a failed write), a second archive after the first, or a pax header is refused."""
+    import tarfile
+    good = _tar()
+    data = {"good": good, "cut": good[:512 * 5], "no_end": good[:512 * 4 + 512], "appended": good + _tar(),
+            "pax": _tar(tarfile.PAX_FORMAT, pax_headers={"comment": "x" * 4096})}[case]
+    out = _tar_check(tmp_path, data)
+    assert (out.returncode == 0) is (case == "good"), out.stderr
+
+
+@pytest.mark.parametrize("case", ["one_big", "many_small", "too_many", "fits"])
+def test_tree_blobs_checks_sizes_before_reading_any_blob(tmp_path, monkeypatch, case):
+    """desk/ and app/static are bounded from the sizes git records (ls-tree -l): one oversized blob, many small ones
+    adding up, or too many files are refused before a single blob is read."""
+    repo = tmp_path / "r"
+    files = {"one_big": {"desk/a": 2000}, "many_small": {f"desk/{i}": 300 for i in range(4)},
+             "too_many": {f"desk/{i}": 1 for i in range(6)}, "fits": {"desk/a": 500, "desk/b": 400}}[case]
+    for name, size in files.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_bytes(b"x" * size)
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run([*git, "add", "-A"], check=True)
+    subprocess.run([*git, "commit", "-qm", "t"], check=True)
+    monkeypatch.setattr(rg, "TREE_BLOBS_CAP", 1000)
+    monkeypatch.setattr(rg, "TREE_BLOBS_FILES", 5)
+    reads, real_run = [], subprocess.run
+    monkeypatch.setattr(rg.subprocess, "run", lambda argv, *a, **k: (reads.append(argv) if "cat-file" in argv else None,
+                                                                     real_run(argv, *a, **k))[1])
+    if case == "fits":
+        assert [p for p, _m, _d in rg.tree_blobs(repo / ".git", "HEAD", "desk")] == ["desk/a", "desk/b"]
+        assert len(reads) == 2
+    else:
+        with pytest.raises(rg.Refused, match="exceeds"):
+            list(rg.tree_blobs(repo / ".git", "HEAD", "desk"))
+        assert reads == []
+
+
+def test_a_cleanup_failure_is_reported_even_when_the_group_does_not_stop(monkeypatch):
+    """Exit 74 from the wrapper names the leaked container; a group that also failed to stop never hides it."""
+    from app import release_gateway_service as svc
+    monkeypatch.setattr(svc, "_stop_group", lambda p, *a: (p.wait(), False)[1])
+    with pytest.raises(svc.DeskBuildCleanupFailed):
+        svc._run_drained(_py("import sys; sys.exit(74)"), timeout=30, cap=1 << 20)
+
+
+@pytest.mark.parametrize("line", [b"100644 blob abc -\tdesk/a", b"100644 blob abc 1e9\tdesk/a",
+                                  b"100644 blob abc\tdesk/a", b"100644 blob abc 12", b"100644 blob abc 9999999999999999\tdesk/a"],
+                         ids=["dash", "exp", "missing", "no_tab", "huge"])
+def test_tree_blobs_refuses_an_unreadable_size(monkeypatch, line):
+    """An ls-tree size that is missing or not plain digits is refused (Refused, never another exception)."""
+    monkeypatch.setattr(rg.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout=line + b"\0"))
+    with pytest.raises(rg.Refused):
+        list(rg.tree_blobs(Path("."), "HEAD", "desk"))

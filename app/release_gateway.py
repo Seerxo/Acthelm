@@ -203,17 +203,33 @@ GENERATED_DIR = "app/static"
 DESK_DIR = "desk"
 
 
+TREE_BLOBS_CAP = 64 << 20      # bytes under desk/ or app/static (the desk build wrapper's own input/output cap)
+TREE_BLOBS_FILES = 20000       # files under one prefix (the wrapper's member limit)
+
+
 def tree_blobs(git_dir: Path, sha: str, prefix: str):
     """(path, mode, bytes) of every file under `prefix` at `sha`, read from git objects (no .gitattributes, no
-    checkout). Only regular files: a symlink, submodule or odd path is refused (a build never needs one)."""
-    out = subprocess.run(["git", "-C", str(git_dir), "-c", "core.quotePath=false", "ls-tree", "-r", "-z", "--full-tree",
-                          sha, "--", prefix], check=True, capture_output=True).stdout
+    checkout). Only regular files: a symlink, submodule or odd path is refused (a build never needs one). The sizes
+    git records for the whole prefix are checked before any blob is read, so an oversized candidate is refused
+    without loading it."""
+    out = subprocess.run(["git", "-C", str(git_dir), "-c", "core.quotePath=false", "ls-tree", "-r", "-z", "-l",
+                          "--full-tree", sha, "--", prefix], check=True, capture_output=True).stdout
+    entries, total = [], 0
     for entry in (e for e in out.split(b"\0") if e):
-        meta, raw = entry.split(b"\t", 1)
-        mode, _kind, obj = meta.decode().split()
+        meta, _tab, raw = entry.partition(b"\t")
+        fields = meta.decode("ascii", "replace").split()
         path = raw.decode("utf-8", "surrogateescape")
-        if mode not in ("100644", "100755") or any(c in ("", ".", "..") for c in path.split("/")):
+        if len(fields) != 4 or fields[0] not in ("100644", "100755") or not _tab \
+                or any(c in ("", ".", "..") for c in path.split("/")):
             raise Refused(f"{path} under {prefix}/ is not a plain regular file")
+        mode, _kind, obj, size = fields
+        if not re.fullmatch(r"[0-9]{1,15}", size):   # git prints `-` for a non-blob; anything odd is refused
+            raise Refused(f"{path} under {prefix}/ has no readable size")
+        total += int(size)
+        entries.append((path, mode, obj))
+        if total > TREE_BLOBS_CAP or len(entries) > TREE_BLOBS_FILES:
+            raise Refused(f"{prefix}/ exceeds {TREE_BLOBS_CAP} bytes or {TREE_BLOBS_FILES} files")
+    for path, mode, obj in entries:
         yield path, mode, subprocess.run(["git", "-C", str(git_dir), "cat-file", "blob", obj], check=True,
                                          capture_output=True).stdout
 

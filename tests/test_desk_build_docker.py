@@ -139,9 +139,11 @@ def _gateway_drain():
     src = (ROOT / "app/release_gateway_service.py").read_text()
     names = {"_run_drained", "_stop_group", "_group_alive"}
     tree = ast.parse(src)
+    consts = {"DESK_BUILD_STOP_GRACE", "DESK_BUILD_CLEANUP_FAILED", "LEAKED_CONTAINER_ACTION"}
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    nodes += [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "DeskBuildCleanupFailed"]
     nodes += [n for n in tree.body if isinstance(n, ast.Assign) and any(
-        isinstance(t, ast.Name) and t.id == "DESK_BUILD_STOP_GRACE" for t in n.targets)]
+        isinstance(t, ast.Name) and t.id in consts for t in n.targets)]
     ns = {"os": os, "select": select, "subprocess": subprocess}
     exec(compile(ast.Module(sorted(nodes, key=lambda n: n.lineno), []), "release_gateway_service.py", "exec"), ns)
     return types.SimpleNamespace(**{k: ns[k] for k in names})
@@ -183,4 +185,102 @@ def test_a_build_the_gateway_gives_up_on_is_stopped_with_its_root_wrapper_and_co
         for container in sudo("docker", "ps", "-aq", "--filter", "name=release-gateway-desk-build",
                               check=False).stdout.split():
             sudo("docker", "rm", "-f", container, check=False)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_a_tree_built_under_umask_077_still_builds(host):
+    """The gateway may create its desk/ tree under a restrictive umask (0700 directories); the root-owned staged copy
+    is normalized, so the container (running as the caller) can read it and the build reproduces the bundle."""
+    seed = subprocess.run(["sudo", "-n", "env", "-u", "SUDO_UID", "-u", "SUDO_USER", "-u", "SUDO_GID",
+                           "-u", "SUDO_COMMAND", str(INSTALLED), "seed", str(host)], capture_output=True, text=True,
+                          timeout=900)
+    assert seed.returncode == 0, seed.stderr[-2000:]
+    old = os.umask(0o077)
+    try:
+        work = Path(tempfile.mkdtemp(prefix="gateway-desk-"))
+        for src in sorted((ROOT / "desk").rglob("*")):     # like default_desk_build: mkdir + write, no copystat
+            dst = work / "desk" / src.relative_to(ROOT / "desk")
+            if src.is_dir():
+                dst.mkdir(parents=True, exist_ok=True)
+            elif src.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(src.read_bytes())
+        (work / "app/static").mkdir(parents=True)
+    finally:
+        os.umask(old)
+    try:
+        assert stat.S_IMODE((work / "desk").stat().st_mode) == 0o700
+        out = sudo(str(INSTALLED), str(work), check=False, timeout=1800)
+        assert out.returncode == 0, out.stderr[-2000:]
+        built, committed = tree_files(work / "app/static"), tree_files(ROOT / "app/static")
+        assert {k: v[0] for k, v in built.items()} == {k: v[0] for k, v in committed.items()}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_no_build_starts_beside_a_leaked_container(host):
+    """A container left by an earlier build (its removal could not be proven) blocks every new build until an operator
+    removes it: the wrapper answers 75 (infrastructure, retried, never a pass) and starts nothing."""
+    leak = "release-gateway-desk-build-leaktest"
+    sudo("docker", "run", "-d", "--rm", "--name", leak, "--network=none", IMAGE, "sleep", "300")
+    work = caller_dir(ROOT)
+    try:
+        out = sudo(str(INSTALLED), str(work), check=False, timeout=300)
+        assert out.returncode == 75 and "operator must remove it" in out.stderr, out.stderr[-2000:]
+        assert list((work / "app/static").iterdir()) == []
+        names = sudo("docker", "ps", "-a", "--format", "{{.Names}}", "--filter", "name=release-gateway-desk-build").stdout
+        assert names.split() == [leak]                       # nothing new started beside it
+    finally:
+        sudo("docker", "rm", "-f", leak, check=False)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_a_failed_npm_ci_never_yields_an_archive(host):
+    """A dependency install that fails (lockfile out of sync, deterministic, offline) fails the build: no archive, no
+    files in app/static, so a candidate that deleted its generated files cannot get a passing rebuild proof."""
+    work = caller_dir(ROOT)
+    try:
+        pkg = json.loads((work / "desk/package.json").read_text())
+        pkg.setdefault("dependencies", {})["left-pad-not-in-lockfile"] = "1.0.0"
+        (work / "desk/package.json").write_text(json.dumps(pkg))
+        out = sudo(str(INSTALLED), str(work), check=False, timeout=600)
+        assert out.returncode != 0 and "build failed" in out.stderr, (out.returncode, out.stderr[-2000:])
+        assert list((work / "app/static").iterdir()) == []
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_an_executable_build_script_keeps_its_mode(host):
+    """desk/ sources keep their executable bits in the staged copy (only group/world write is dropped), so a build
+    that runs a committed 100755 script still builds."""
+    work = caller_dir(ROOT)
+    try:
+        pkg = json.loads((work / "desk/package.json").read_text())
+        (work / "desk/build.sh").write_text("#!/bin/sh\nset -e\n" + pkg["scripts"]["build"] + "\n")
+        (work / "desk/build.sh").chmod(0o755)
+        pkg["scripts"]["build"] = "./build.sh"
+        (work / "desk/package.json").write_text(json.dumps(pkg))
+        out = sudo(str(INSTALLED), str(work), check=False, timeout=600)
+        assert out.returncode == 0, out.stderr[-2000:]
+        assert (work / "app/static/desk.html").is_file()
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_an_archive_written_to_the_containers_stdout_by_the_build_is_refused(host):
+    """The build runs as the container's own uid and can open PID 1's file descriptors: during `npm run build >&2`
+    the shell keeps the real stdout on a saved descriptor, so the build can write its own archive into the stream
+    ahead of the real one. The stream must then hold exactly one archive, so it is refused, never read in part."""
+    work = caller_dir(ROOT)
+    try:
+        pkg = json.loads((work / "desk/package.json").read_text())
+        pkg["scripts"]["build"] += (   # every pipe of PID 1 other than its stderr is the real stdout
+            " && for f in /proc/1/fd/*; do case $(readlink $f) in pipe:*) [ \"$(readlink $f)\" ="
+            " \"$(readlink /proc/1/fd/2)\" ] || { tar -cf $f package.json && echo XGWINJECTED >&2; };; esac; done")
+        (work / "desk/package.json").write_text(json.dumps(pkg))
+        out = sudo(str(INSTALLED), str(work), check=False, timeout=600)
+        assert "XGWINJECTED" in out.stderr, out.stderr[-2000:]           # the injection really happened
+        assert out.returncode != 0 and "archive" in out.stderr, out.stderr[-2000:]
+        assert list((work / "app/static").iterdir()) == []
+    finally:
         shutil.rmtree(work, ignore_errors=True)
