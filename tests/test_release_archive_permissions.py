@@ -171,3 +171,86 @@ restore_source "$B"
     for rel, mode in old.items():
         assert stat.S_IMODE((host / rel).stat().st_mode) == mode, rel
         assert (host / rel).read_text() == f"old {rel}\n", rel
+
+
+def _commit(repo: Path, message: str) -> None:
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "-qm",
+                    message], check=True)
+
+
+def test_the_driver_and_the_gateway_pack_the_same_files(tmp_path):
+    """One release payload: the deploy driver's archive and the gateway/host release_archive hold the same members,
+    desk/ and .dockerignore included."""
+    from app import release_gateway as rg
+    repo = _toy_repo(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    archive, _ = pack(repo, out)
+    driver = sorted(m.name for m in archive.getmembers() if not m.isdir())
+    gateway = tarfile.open(fileobj=io.BytesIO(rg.release_archive(repo, "HEAD")))
+    assert driver == sorted(m.name for m in gateway.getmembers() if not m.isdir())
+    assert ".dockerignore" in driver and "desk/nested/file.txt" in driver
+
+
+def test_only_desk_and_dockerignore_may_be_absent(tmp_path):
+    """An older commit without the two new paths still packs; a commit missing any other release path does not."""
+    repo = _toy_repo(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "rm", "-rq", "desk", ".dockerignore"], check=True)
+    _commit(repo, "older: no desk")
+    out = tmp_path / "old"
+    out.mkdir()
+    archive, _ = pack(repo, out)
+    assert not any(m.name.startswith("desk") or m.name == ".dockerignore" for m in archive.getmembers())
+    subprocess.run(["git", "-C", str(repo), "rm", "-rq", "migrations"], check=True)
+    _commit(repo, "broken: no migrations")
+    out = tmp_path / "broken"
+    out.mkdir()
+    with pytest.raises(subprocess.CalledProcessError):
+        pack(repo, out)
+
+
+def test_desk_and_dockerignore_are_image_inputs(tmp_path):
+    """The image build consumes desk/ and .dockerignore, so a change to either is a new inputs_digest (a new build
+    record), never a reuse of images built from other sources."""
+    from app import release_gateway as rg
+    repo = _toy_repo(tmp_path)
+    digest = lambda: rg.inputs_digest(rg.release_archive(repo, "HEAD"))
+    before = digest()
+    (repo / "desk" / "nested" / "file.txt").write_text("changed\n")
+    _commit(repo, "desk source")
+    after_desk = digest()
+    (repo / ".dockerignore").write_text("app/static\n")
+    _commit(repo, "build context")
+    assert len({before, after_desk, digest()}) == 3
+
+
+RUNNING = "caab3d38851665bcb674e08be78acfc375ac4533"   # the release production runs: desk/ in git, no .dockerignore
+
+
+def _members(tar: tarfile.TarFile) -> dict:
+    return {m.name: (m.mode, m.type, m.linkname, tar.extractfile(m).read() if m.isfile() else b"")
+            for m in tar.getmembers() if not m.isdir()}
+
+
+def _older_commits(tmp_path: Path):
+    repo = _toy_repo(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "rm", "-rq", "desk", ".dockerignore"], check=True)
+    _commit(repo, "older: no desk")
+    yield repo, "HEAD"
+    if subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{RUNNING}^{{commit}}"]).returncode == 0:
+        yield ROOT, RUNNING                                # skipped in a shallow clone without that history
+
+
+def test_an_older_commit_packs_the_same_payload_in_the_driver_and_the_gateway(tmp_path):
+    """Rollback compatibility: for a commit from before desk/ shipped, the deploy driver and release_archive (what the
+    gateway reviews and the host builds) produce the same members with the same modes and bytes."""
+    from app import release_gateway as rg
+    for n, (repo, sha) in enumerate(_older_commits(tmp_path)):
+        out = tmp_path / f"out{n}"
+        out.mkdir()
+        driver, _ = pack(repo, out, sha)
+        gateway = tarfile.open(fileobj=io.BytesIO(rg.release_archive(repo, sha)))
+        got, want = _members(driver), _members(gateway)
+        assert got == want, sorted(set(got) ^ set(want))
+        assert ".dockerignore" not in got                  # absent from these commits; nothing invents it

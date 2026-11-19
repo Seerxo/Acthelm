@@ -96,3 +96,7 @@ jobs:
         env:
           SEERXO_REAL_RECOVERY: "1"
         run: python -u -m pytest -q -s tests/test_release_recovery_docker.py
+      - name: Real Desk image build serves the desk stage, not the git copy
+        env:
+          SEERXO_REAL_DESK_IMAGE: "1"
+        run: python -u -m pytest -q -s tests/test_desk_image_bundle.py
