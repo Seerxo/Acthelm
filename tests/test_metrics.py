@@ -310,6 +310,57 @@ def test_revenue_unit_is_none_when_the_stored_reading_has_no_unit():
     assert metrics_store.revenue(db, now=NOW)["unit"] is None
 
 
+def _mrr(db, value, at, source="polar-api"):
+    metrics_store.record(db, schemas.MetricsIn(business_unit="seerxo", observations=[
+        schemas.MetricIn(subject="polar", metric="mrr", value=value, source=source, observed_at=at)]), now=NOW)
+
+
+def test_mrr_change_compares_the_two_newest_readings():
+    db = _db()
+    _mrr(db, 50, NOW - timedelta(days=3))
+    _mrr(db, 200, NOW - timedelta(days=2))
+    _mrr(db, 250, NOW - timedelta(hours=1))
+    assert metrics_store.mrr_change(db, now=NOW) == {
+        "current": 250.0, "previous": 200.0, "change": 50.0, "percent_change": 25.0,
+        "source": "polar-api",
+        "current_observed_at": (NOW - timedelta(hours=1)).isoformat(),
+        "previous_observed_at": (NOW - timedelta(days=2)).isoformat()}
+
+
+def test_mrr_change_handles_a_drop():
+    db = _db()
+    _mrr(db, 200, NOW - timedelta(days=1))
+    _mrr(db, 150, NOW)
+    out = metrics_store.mrr_change(db, now=NOW)
+    assert out["change"] == -50.0 and out["percent_change"] == -25.0
+
+
+def test_mrr_change_needs_two_readings():
+    db = _db()
+    assert metrics_store.mrr_change(db, now=NOW) is None
+    _mrr(db, 100, NOW)
+    assert metrics_store.mrr_change(db, now=NOW) is None
+
+
+def test_mrr_change_from_zero_has_no_percent():
+    db = _db()
+    _mrr(db, 0, NOW - timedelta(days=1))
+    _mrr(db, 80, NOW)
+    out = metrics_store.mrr_change(db, now=NOW)
+    assert out["change"] == 80.0 and out["percent_change"] is None
+    assert out["previous"] == 0.0 and out["current"] == 80.0
+
+
+def test_mrr_change_skips_readings_from_other_sources():
+    db = _db()
+    _mrr(db, 100, NOW - timedelta(days=2))
+    _mrr(db, 999, NOW - timedelta(days=1), source="seerxo-backend")
+    assert metrics_store.mrr_change(db, now=NOW) is None
+    _mrr(db, 110, NOW)
+    out = metrics_store.mrr_change(db, now=NOW)
+    assert out["previous"] == 100.0 and out["current"] == 110.0 and out["change"] == 10.0
+
+
 def test_series_is_one_series_oldest_first_within_the_window():
     db = _db()
     metrics_store.record(db, _views(10, NOW - timedelta(days=2)), now=NOW)
