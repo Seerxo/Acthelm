@@ -1,0 +1,4 @@
+# Build context for the release images. desk/ ships so a later image stage can build the Desk SPA from source;
+# local dependency and build output never enter the context.
+desk/node_modules
+desk/dist

@@ -76,7 +76,7 @@ def payload_digest(listing: str) -> str:
 
 # What a release ships: the same paths scripts/deploy-company-os.sh packs (PATHS), pinned equal by a test.
 DEPLOY_PATHS = ("app", "migrations", "scripts", "agents", "skills", "tests", "alembic.ini", "requirements.txt",
-                "Dockerfile", "docker-compose.yml", "docs/PERMANENT_FACTS.md")
+                "Dockerfile", "docker-compose.yml", "docs/PERMANENT_FACTS.md", "desk", ".dockerignore")
 
 # The component -> Dockerfile target map. Compose could otherwise re-map which target a service builds without
 # changing `inputs_digest`; prepare and the bound-mode driver both refuse a compose file that differs from this.
