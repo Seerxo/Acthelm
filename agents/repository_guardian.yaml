@@ -28,4 +28,4 @@ required_statuses: []
 # Absent: task branches are pushed to the repository itself (agent needs Write). Enabled by a founder-merged
 # change to this file once the fork existed and the agent token could push to it (B5 option A, 2026-10-20).
 publish_forks:
-  seerxo/acthelm: seerxo-agent/seerxo-os
+  seerxo/acthelm: seerxo-agent/acthelm
