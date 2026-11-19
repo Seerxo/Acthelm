@@ -18,7 +18,7 @@ FAILURES = ["tests/test_metrics.py:2: AssertionError",
 
 
 def _setup(monkeypatch, tmp_path, coder, checks=None):
-    pipeline(monkeypatch, tmp_path, publish_repository="seerxo-agent/seerxo-os")
+    pipeline(monkeypatch, tmp_path, publish_repository="seerxo-agent/acthelm")
     monkeypatch.setattr(worker, "BACKOFF", (timedelta(0),) * 3)       # retries are judged here, not their pacing
     mirror = tmp_path / "jobs/.control/sez-company.git"
     (mirror / "app").mkdir()
