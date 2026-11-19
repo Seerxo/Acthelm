@@ -13,7 +13,7 @@ from app import enums, stage_c_runner, worker
 from tests.test_stage_c_worker import Reviewer, pipeline, write_task
 from tests.test_worker import SPECS, _db
 
-FORK = "seerxo-agent/seerxo-os"   # the repository policy publishes from the B5 fork
+FORK = "seerxo-agent/acthelm"   # the repository policy publishes from the B5 fork
 PAT = "github_pat_" + "A1b2C3" * 6
 JWT = "eyJ" + "hbGciOiJIUzI1NiJ9" + ".eyJ" + "zdWIiOiJ4In0xMjM0" + "." + "s1gnature" + "ABCDEFGH"
 REFRESH = '"refresh_token": "' + "r" * 24 + '"'
