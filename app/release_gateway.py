@@ -75,16 +75,21 @@ def payload_digest(listing: str) -> str:
 # What a release ships: the same paths scripts/deploy-company-os.sh packs (PATHS), pinned equal by a test.
 DEPLOY_PATHS = ("app", "migrations", "scripts", "agents", "skills", "tests", "alembic.ini", "requirements.txt",
                 "Dockerfile", "docker-compose.yml", "docs/PERMANENT_FACTS.md", "desk", ".dockerignore")
+# release_archive and payload_listing take only the paths a commit has (ls-tree), so an older commit without desk/
+# or .dockerignore still packs and hashes; the driver's packing does the same for these two paths only.
+# The list before desk/ and .dockerignore shipped. A release applied by tooling that still used it has its payload
+# digest recorded under it, so a rebase recomputes the running release's payload under both lists (rebase()).
+PREVIOUS_DEPLOY_PATHS = tuple(p for p in DEPLOY_PATHS if p not in ("desk", ".dockerignore"))
 
 # The component -> Dockerfile target map. Compose could otherwise re-map which target a service builds without
 # changing `inputs_digest`; prepare and the bound-mode driver both refuse a compose file that differs from this.
 BUILD_TARGETS = {"api": "api", "worker": "worker", "reasoner": "reasoner", "egress": "egress"}
 
 
-def payload_listing(git_dir: Path, sha: str) -> str:
+def payload_listing(git_dir: Path, sha: str, paths: tuple[str, ...] = DEPLOY_PATHS) -> str:
     """`sha256  path` per shipped file at `sha`, the listing deploy-company-os.sh builds as main.sha256."""
     tree = subprocess.run(["git", "-C", str(git_dir), "-c", "core.quotePath=false", "ls-tree", "-r", "-z",
-                           "--format=%(objectname) %(path)", sha, "--", *DEPLOY_PATHS],
+                           "--format=%(objectname) %(path)", sha, "--", *paths],
                           check=True, capture_output=True).stdout
     lines = []
     for entry in (e for e in tree.split(b"\0") if e):
@@ -1300,7 +1305,10 @@ def rebase(ledger: Path, statement: bytes, signature: str, *, founder_key: str, 
         facts = provenance(st["base_sha"], state["last_sha"])
         if facts.get("old_repository") != st["old_repository"]:
             raise Refused("rebase statement names another old repository")
-        if facts.get("old_payload_digest") != st["old_payload_digest"]:
+        # The host recomputes the running payload from its old clone under the current and the previous path list
+        # (rebase_provenance); the recorded digest (checked above) must equal one of them exactly.
+        computed = facts.get("old_payload_digests") or [facts.get("old_payload_digest")]
+        if st["old_payload_digest"] not in [d for d in computed if isinstance(d, str)]:
             raise Refused("the old clone's payload for the running release differs from the recorded payload")
         if facts.get("base_on_branch") is not True:
             raise Refused(f"base commit is not on {st['branch']} of {st['repository']}")

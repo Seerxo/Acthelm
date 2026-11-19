@@ -957,11 +957,12 @@ def rebase_provenance(cfg: Config, old: Config):
         old_in_new = subprocess.run(["git", "-C", str(cfg.clone), "cat-file", "-e", f"{old_sha}^{{commit}}"],
                                     capture_output=True).returncode == 0
         try:
-            old_payload = rg.payload_digest(rg.payload_listing(old.clone, old_sha))
+            old_payloads = [rg.payload_digest(rg.payload_listing(old.clone, old_sha, paths))
+                            for paths in (rg.DEPLOY_PATHS, rg.PREVIOUS_DEPLOY_PATHS)]
         except subprocess.CalledProcessError:
-            old_payload = None
+            old_payloads = [None]
         return {"old_repository": old.repository, "base_on_branch": on_branch, "old_in_new": old_in_new,
-                "old_payload_digest": old_payload}
+                "old_payload_digest": old_payloads[0], "old_payload_digests": old_payloads}
     return facts
 
 

@@ -173,6 +173,7 @@ restore_source "$B"
         assert (host / rel).read_text() == f"old {rel}\n", rel
 
 
+# _toy_repo (above) creates every entry of the driver's PATHS: desk/ as a directory, .dockerignore as a file.
 def _commit(repo: Path, message: str) -> None:
     subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "-qm",
@@ -254,3 +255,13 @@ def test_an_older_commit_packs_the_same_payload_in_the_driver_and_the_gateway(tm
         got, want = _members(driver), _members(gateway)
         assert got == want, sorted(set(got) ^ set(want))
         assert ".dockerignore" not in got                  # absent from these commits; nothing invents it
+
+
+def test_the_previous_path_list_leaves_out_exactly_desk_and_dockerignore(tmp_path):
+    """What a rebase recomputes for a release recorded before desk/ shipped: same files minus the two new paths."""
+    from app import release_gateway as rg
+    repo = _toy_repo(tmp_path)
+    now, before = (rg.payload_listing(repo, "HEAD", paths) for paths in (rg.DEPLOY_PATHS, rg.PREVIOUS_DEPLOY_PATHS))
+    dropped = {line[66:] for line in now.splitlines()} - {line[66:] for line in before.splitlines()}
+    assert dropped == {".dockerignore", "desk/nested/file.txt"}
+    assert set(before.splitlines()) < set(now.splitlines())
