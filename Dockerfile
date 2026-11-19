@@ -1,5 +1,17 @@
 # Base images pinned by digest (multi-arch index, resolved 2026-10-06): the same commit
 # builds the same base. Bump deliberately: change tag and digest together.
+# --------------------------------------------------------------------------- desk
+# Founder Desk SPA built from reviewed desk/ sources; the api stage takes app/static from here, not from git.
+# Same node image the release gateway rebuild pinned (DESK_BUNDLE_RELEASE.md). npm ci verifies every package
+# against the lockfile integrity hash; --ignore-scripts is safe (only fsevents, darwin-only, has an install script).
+# `npm run build` is the CI build unchanged: it writes ../app/static, i.e. /w/app/static.
+FROM node:26.13.0@sha256:438603bbb5cda404b9416f0b5c8026f61501ab911760d861ec28c36b5d675725 AS desk
+WORKDIR /w/desk
+COPY desk/package.json desk/package-lock.json ./
+RUN npm ci --ignore-scripts --no-audit --no-fund
+COPY desk/ ./
+RUN mkdir -p /w/app/static && npm run build
+
 FROM python:3.12-slim@sha256:02108f5d322dd89f1c9e552442c25acb0543dfdbc455693a5599624f20d9155d AS api
 
 # postgresql-client is needed by scripts/backup.sh (pg_dump/pg_restore) and by
@@ -16,6 +28,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY alembic.ini .
 COPY migrations ./migrations
 COPY app ./app
+# app/static is excluded by .dockerignore: the bundle comes from the desk stage only.
+COPY --from=desk /w/app/static ./app/static
 COPY scripts ./scripts
 COPY tests ./tests
 COPY agents ./agents
