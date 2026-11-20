@@ -76,17 +76,32 @@ def payload_digest(listing: str) -> str:
 
 # What a release ships: the same paths scripts/deploy-company-os.sh packs (PATHS), pinned equal by a test.
 DEPLOY_PATHS = ("app", "migrations", "scripts", "agents", "skills", "tests", "alembic.ini", "requirements.txt",
-                "Dockerfile", "docker-compose.yml", "docs/PERMANENT_FACTS.md")
+                "Dockerfile", "docker-compose.yml", "docs/PERMANENT_FACTS.md", "desk", ".dockerignore")
+# release_archive and payload_listing take only the paths a commit has (ls-tree), so an older commit without desk/
+# or .dockerignore still packs and hashes; the driver's packing does the same for these two paths only.
+# The list before desk/ and .dockerignore shipped. A release applied by tooling that still used it has its payload
+# digest recorded under it, so a rebase recomputes the running release's payload under both lists (rebase()).
+OPTIONAL_DEPLOY_PATHS = ("desk", ".dockerignore")
+# Every release ships these; the deploy driver and the gateway/host refuse a commit that lacks one. It is also the
+# list releases were recorded under before desk/ and .dockerignore shipped.
+REQUIRED_DEPLOY_PATHS = tuple(p for p in DEPLOY_PATHS if p not in OPTIONAL_DEPLOY_PATHS)
+PREVIOUS_DEPLOY_PATHS = REQUIRED_DEPLOY_PATHS
+
+
+def _missing_required(present: list[str], paths: tuple[str, ...]) -> list[str]:
+    """The required release paths (among `paths`) with no file at the commit: the same rule the driver applies."""
+    return [p for p in REQUIRED_DEPLOY_PATHS
+            if p in paths and not any(x == p or x.startswith(p + "/") for x in present)]
 
 # The component -> Dockerfile target map. Compose could otherwise re-map which target a service builds without
 # changing `inputs_digest`; prepare and the bound-mode driver both refuse a compose file that differs from this.
 BUILD_TARGETS = {"api": "api", "worker": "worker", "reasoner": "reasoner", "egress": "egress"}
 
 
-def payload_listing(git_dir: Path, sha: str) -> str:
+def payload_listing(git_dir: Path, sha: str, paths: tuple[str, ...] = DEPLOY_PATHS) -> str:
     """`sha256  path` per shipped file at `sha`, the listing deploy-company-os.sh builds as main.sha256."""
     tree = subprocess.run(["git", "-C", str(git_dir), "-c", "core.quotePath=false", "ls-tree", "-r", "-z",
-                           "--format=%(objectname) %(path)", sha, "--", *DEPLOY_PATHS],
+                           "--format=%(objectname) %(path)", sha, "--", *paths],
                           check=True, capture_output=True).stdout
     lines = []
     for entry in (e for e in tree.split(b"\0") if e):
@@ -94,6 +109,9 @@ def payload_listing(git_dir: Path, sha: str) -> str:
         blob = subprocess.run(["git", "-C", str(git_dir), "cat-file", "-p", obj], check=True,
                               capture_output=True).stdout
         lines.append(f"{hashlib.sha256(blob).hexdigest()}  {path}")
+    missing = _missing_required([line[66:] for line in lines], paths)
+    if missing:
+        raise Refused(f"the release payload lacks required paths: {', '.join(missing)}")
     return "\n".join(lines) + "\n"
 
 
@@ -121,7 +139,9 @@ def release_archive(git_dir: Path, sha: str) -> bytes:
     present = subprocess.run(["git", "-C", str(git_dir), "-c", "core.quotePath=false", "ls-tree", "-z", "--name-only",
                               sha, "--", *DEPLOY_PATHS], check=True, capture_output=True).stdout
     paths = [p.decode("utf-8", "surrogateescape") for p in present.split(b"\0") if p]
-    # ponytail: only the shipped paths this commit has (git archive refuses a missing one; a real release has all)
+    missing = _missing_required(paths, DEPLOY_PATHS)
+    if missing:   # as the driver: only desk/ and .dockerignore may be absent (a commit from before they shipped)
+        raise Refused(f"the release payload lacks required paths: {', '.join(missing)}")
     tar = subprocess.run(["git", "-C", str(git_dir), "-c", "tar.umask=0022", "archive", "--format=tar", sha,
                           *paths], check=True, capture_output=True).stdout if paths else b"\0" * 1024
     if payload_digest(archive_listing(tar)) != payload_digest(payload_listing(git_dir, sha)):
@@ -1424,7 +1444,10 @@ def rebase(ledger: Path, statement: bytes, signature: str, *, founder_key: str, 
         facts = provenance(st["base_sha"], state["last_sha"])
         if facts.get("old_repository") != st["old_repository"]:
             raise Refused("rebase statement names another old repository")
-        if facts.get("old_payload_digest") != st["old_payload_digest"]:
+        # The host recomputes the running payload from its old clone under the current and the previous path list
+        # (rebase_provenance); the recorded digest (checked above) must equal one of them exactly.
+        computed = facts.get("old_payload_digests") or [facts.get("old_payload_digest")]
+        if st["old_payload_digest"] not in [d for d in computed if isinstance(d, str)]:
             raise Refused("the old clone's payload for the running release differs from the recorded payload")
         if facts.get("base_on_branch") is not True:
             raise Refused(f"base commit is not on {st['branch']} of {st['repository']}")

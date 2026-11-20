@@ -1314,6 +1314,28 @@ def test_the_host_git_evidence_must_bind_the_running_release_and_the_new_chain(k
     assert "chain_base" not in json.loads(ledger.read_text())
 
 
+def test_a_running_release_recorded_under_the_previous_path_list_can_still_rebase(keys, tmp_path):
+    """A release applied by tooling before desk/ and .dockerignore shipped has its payload recorded under the old
+    list; once the new tooling is installed the host recomputes it under both lists and one must match exactly."""
+    ledger, prod = applied_once(keys, tmp_path)
+    state = do_rebase(keys, ledger, prod, rebase_statement(keys, ledger),
+                      facts_over={"old_payload_digest": "1" * 64, "old_payload_digests": ["1" * 64, DIGEST]})
+    assert state["chain_base"] == BASE and rg.read_history(ledger)[-1]["old_payload_digest"] == DIGEST
+
+
+def test_neither_path_list_reproducing_the_recorded_payload_refuses_the_rebase(keys, tmp_path):
+    ledger, prod = applied_once(keys, tmp_path)
+    refused("old clone's payload", do_rebase, keys, ledger, prod, rebase_statement(keys, ledger),
+            facts_over={"old_payload_digest": DIGEST, "old_payload_digests": ["1" * 64, "2" * 64]})
+    assert "chain_base" not in json.loads(ledger.read_text())
+
+
+def test_the_previous_path_list_is_the_one_releases_were_recorded_under():
+    assert rg.PREVIOUS_DEPLOY_PATHS == ("app", "migrations", "scripts", "agents", "skills", "tests", "alembic.ini",
+                                        "requirements.txt", "Dockerfile", "docker-compose.yml",
+                                        "docs/PERMANENT_FACTS.md")
+
+
 def test_a_rebase_needs_a_newer_policy_a_settled_ledger_and_matching_production(keys, tmp_path):
     ledger, prod = applied_once(keys, tmp_path)
     same = rebase_policy(keys, version=1)
