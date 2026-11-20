@@ -34,6 +34,21 @@ def keypair(d: Path, name: str):
     return d / name, (d / f"{name}.pub").read_text().strip()
 
 
+def seed_required_paths(root: Path) -> None:
+    """A placeholder for every required release path the fixture does not create itself: release_archive and
+    payload_listing refuse a commit without one (as the deploy driver does), and every real release has them all."""
+    for rel in rg.REQUIRED_DEPLOY_PATHS:
+        target = root / rel
+        if target.exists():
+            continue
+        if "." in target.name or target.name == "Dockerfile":
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("\n")
+        else:
+            target.mkdir(parents=True)
+            (target / ".keep").write_text("")
+
+
 class World:
     def __init__(self, tmp: Path):
         self.tmp = tmp
@@ -46,6 +61,7 @@ class World:
         (self.work / "app").mkdir()
         (self.work / "docs/HANDOFF.md").write_text("old\n")
         (self.work / "app/main.py").write_text("x = 1\n")
+        seed_required_paths(self.work)
         self.builds = tmp / "builds"
         self.builds.mkdir()
         self.base = self.commit("base")
@@ -247,10 +263,10 @@ def test_the_payload_listing_is_the_one_the_deploy_script_ships(w):
     line = next(l for l in deploy.splitlines() if l.startswith("PATHS="))
     assert tuple(line.split("=", 1)[1].strip('"').split()) == rg.DEPLOY_PATHS
     sha = w.commit("app", **{"app/main.py": "x = 3\n", "scripts/s.sh": "echo\n"})
-    shell = subprocess.run(["bash", "-c", "git ls-tree -r \"$1\" --format='%(objectname) %(path)' -- app scripts "
-                            "| while read -r obj p; do printf '%s  %s\\n' \"$(git cat-file -p \"$obj\" | shasum -a 256 "
-                            "| cut -c1-64)\" \"$p\"; done", "_", sha], cwd=w.work, capture_output=True, text=True,
-                           check=True).stdout
+    # The driver's own manifest loop, verbatim, over its own PATHS.
+    loop = deploy[deploy.index("git -c core.quotePath=false ls-tree -r -z"):deploy.index('> "$TMP/main.sha256"')]
+    shell = subprocess.run(["bash", "-c", f'set -euo pipefail; SHA="$1"; PATHS="{" ".join(rg.DEPLOY_PATHS)}"\n{loop}',
+                            "_", sha], cwd=w.work, capture_output=True, text=True, check=True).stdout
     assert rg.payload_digest(shell) == rg.payload_digest(rg.payload_listing(w.work, sha))
 
 

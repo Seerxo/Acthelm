@@ -285,3 +285,20 @@ def test_the_driver_manifest_names_files_exactly_as_the_gateway(tmp_path, name):
     if "\t" not in name:
         assert any(line.endswith("  " + name) for line in sums)
     assert rg.payload_digest("\n".join(sums) + "\n") == rg.payload_digest(rg.payload_listing(repo, "HEAD"))
+
+
+def test_the_gateway_refuses_a_missing_required_path_as_the_driver_does(tmp_path):
+    """One rule on both sides: only desk/ and .dockerignore may be absent. release_archive and payload_listing (what
+    the gateway reviews and the host builds) refuse a commit that lacks any other release path."""
+    from app import release_gateway as rg
+    repo = _toy_repo(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "rm", "-rq", "desk", ".dockerignore"], check=True)
+    _commit(repo, "older: no desk")
+    rg.release_archive(repo, "HEAD")                                   # the two optional paths may be absent
+    rg.payload_listing(repo, "HEAD")
+    subprocess.run(["git", "-C", str(repo), "rm", "-rq", "migrations"], check=True)
+    _commit(repo, "broken: no migrations")
+    for build in (rg.release_archive, rg.payload_listing):
+        with pytest.raises(rg.Refused, match="lacks required paths: migrations"):
+            build(repo, "HEAD")
+    assert rg.REQUIRED_DEPLOY_PATHS == tuple(p for p in rg.DEPLOY_PATHS if p not in ("desk", ".dockerignore"))

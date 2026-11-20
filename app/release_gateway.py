@@ -79,7 +79,17 @@ DEPLOY_PATHS = ("app", "migrations", "scripts", "agents", "skills", "tests", "al
 # or .dockerignore still packs and hashes; the driver's packing does the same for these two paths only.
 # The list before desk/ and .dockerignore shipped. A release applied by tooling that still used it has its payload
 # digest recorded under it, so a rebase recomputes the running release's payload under both lists (rebase()).
-PREVIOUS_DEPLOY_PATHS = tuple(p for p in DEPLOY_PATHS if p not in ("desk", ".dockerignore"))
+OPTIONAL_DEPLOY_PATHS = ("desk", ".dockerignore")
+# Every release ships these; the deploy driver and the gateway/host refuse a commit that lacks one. It is also the
+# list releases were recorded under before desk/ and .dockerignore shipped.
+REQUIRED_DEPLOY_PATHS = tuple(p for p in DEPLOY_PATHS if p not in OPTIONAL_DEPLOY_PATHS)
+PREVIOUS_DEPLOY_PATHS = REQUIRED_DEPLOY_PATHS
+
+
+def _missing_required(present: list[str], paths: tuple[str, ...]) -> list[str]:
+    """The required release paths (among `paths`) with no file at the commit: the same rule the driver applies."""
+    return [p for p in REQUIRED_DEPLOY_PATHS
+            if p in paths and not any(x == p or x.startswith(p + "/") for x in present)]
 
 # The component -> Dockerfile target map. Compose could otherwise re-map which target a service builds without
 # changing `inputs_digest`; prepare and the bound-mode driver both refuse a compose file that differs from this.
@@ -97,6 +107,9 @@ def payload_listing(git_dir: Path, sha: str, paths: tuple[str, ...] = DEPLOY_PAT
         blob = subprocess.run(["git", "-C", str(git_dir), "cat-file", "-p", obj], check=True,
                               capture_output=True).stdout
         lines.append(f"{hashlib.sha256(blob).hexdigest()}  {path}")
+    missing = _missing_required([line[66:] for line in lines], paths)
+    if missing:
+        raise Refused(f"the release payload lacks required paths: {', '.join(missing)}")
     return "\n".join(lines) + "\n"
 
 
@@ -124,7 +137,9 @@ def release_archive(git_dir: Path, sha: str) -> bytes:
     present = subprocess.run(["git", "-C", str(git_dir), "-c", "core.quotePath=false", "ls-tree", "-z", "--name-only",
                               sha, "--", *DEPLOY_PATHS], check=True, capture_output=True).stdout
     paths = [p.decode("utf-8", "surrogateescape") for p in present.split(b"\0") if p]
-    # ponytail: only the shipped paths this commit has (git archive refuses a missing one; a real release has all)
+    missing = _missing_required(paths, DEPLOY_PATHS)
+    if missing:   # as the driver: only desk/ and .dockerignore may be absent (a commit from before they shipped)
+        raise Refused(f"the release payload lacks required paths: {', '.join(missing)}")
     tar = subprocess.run(["git", "-C", str(git_dir), "-c", "tar.umask=0022", "archive", "--format=tar", sha,
                           *paths], check=True, capture_output=True).stdout if paths else b"\0" * 1024
     if payload_digest(archive_listing(tar)) != payload_digest(payload_listing(git_dir, sha)):
