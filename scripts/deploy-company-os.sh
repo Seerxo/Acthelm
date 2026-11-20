@@ -68,13 +68,23 @@ else
   git fetch -q origin
   SHA=$(git rev-parse origin/main)
 fi
-PATHS="app migrations scripts agents skills tests alembic.ini requirements.txt Dockerfile docker-compose.yml docs/PERMANENT_FACTS.md"
+PATHS="app migrations scripts agents skills tests alembic.ini requirements.txt Dockerfile docker-compose.yml docs/PERMANENT_FACTS.md desk .dockerignore"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 # tar.umask=0022: git's default (0002) packs files 0664/0775, and the host's root extraction keeps archive
 # modes, so every release file was group-writable. Pin it here so a local git config cannot change it.
-COPYFILE_DISABLE=1 git -c tar.umask=0022 archive --format=tar "$SHA" $PATHS | gzip > "$TMP/src.tgz"
-git ls-tree -r "$SHA" --format='%(objectname) %(path)' -- $PATHS | while read -r obj p; do
+# The archive list is PATHS. desk and .dockerignore are new, so an older commit without them still packs; every
+# other path stays required and git archive fails on a commit that lacks one.
+ARCHIVE=""
+for p in $PATHS; do
+  case $p in desk|.dockerignore) git cat-file -e "$SHA:$p" 2>/dev/null || continue ;; esac
+  ARCHIVE="$ARCHIVE $p"
+done
+COPYFILE_DISABLE=1 git -c tar.umask=0022 archive --format=tar "$SHA" $ARCHIVE | gzip > "$TMP/src.tgz"
+# Raw paths, NUL-separated, exactly as payload_listing (the gateway and the host) reads them: no C-quoting of
+# non-ASCII names, and spaces or tabs in a name stay part of it.
+git -c core.quotePath=false ls-tree -r -z "$SHA" --format='%(objectname) %(path)' -- $PATHS |
+  while IFS= read -r -d '' entry; do obj=${entry%% *} p=${entry#* }
   printf '%s  %s\n' "$(git cat-file -p "$obj" | shasum -a 256 | cut -c1-64)" "$p"; done > "$TMP/main.sha256"
 cat > "$TMP/company-os-deploy.sh" <<'REMOTE'
 set -euo pipefail

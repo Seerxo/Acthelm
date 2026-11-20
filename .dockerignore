@@ -1,0 +1,5 @@
+# Build context for the release images. desk/ ships so the desk stage builds the Desk SPA from source;
+# app/static comes from the desk stage only, never from the checkout; local dependency and build output never enter the context.
+app/static
+desk/node_modules
+desk/dist
