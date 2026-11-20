@@ -81,7 +81,10 @@ for p in $PATHS; do
   ARCHIVE="$ARCHIVE $p"
 done
 COPYFILE_DISABLE=1 git -c tar.umask=0022 archive --format=tar "$SHA" $ARCHIVE | gzip > "$TMP/src.tgz"
-git ls-tree -r "$SHA" --format='%(objectname) %(path)' -- $PATHS | while read -r obj p; do
+# Raw paths, NUL-separated, exactly as payload_listing (the gateway and the host) reads them: no C-quoting of
+# non-ASCII names, and spaces or tabs in a name stay part of it.
+git -c core.quotePath=false ls-tree -r -z "$SHA" --format='%(objectname) %(path)' -- $PATHS |
+  while IFS= read -r -d '' entry; do obj=${entry%% *} p=${entry#* }
   printf '%s  %s\n' "$(git cat-file -p "$obj" | shasum -a 256 | cut -c1-64)" "$p"; done > "$TMP/main.sha256"
 cat > "$TMP/company-os-deploy.sh" <<'REMOTE'
 set -euo pipefail

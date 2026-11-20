@@ -244,8 +244,9 @@ def _older_commits(tmp_path: Path):
 
 
 def test_an_older_commit_packs_the_same_payload_in_the_driver_and_the_gateway(tmp_path):
-    """Rollback compatibility: for a commit from before desk/ shipped, the deploy driver and release_archive (what the
-    gateway reviews and the host builds) produce the same members with the same modes and bytes."""
+    """An older commit (from before desk/ shipped, including the running release caab3d3) still packs: the deploy
+    driver and release_archive (what the gateway reviews and the host builds) produce the same members with the same
+    modes and bytes. Declared rollback is disabled (release_gateway._check_rollback); this is about packing only."""
     from app import release_gateway as rg
     for n, (repo, sha) in enumerate(_older_commits(tmp_path)):
         out = tmp_path / f"out{n}"
@@ -265,3 +266,22 @@ def test_the_previous_path_list_leaves_out_exactly_desk_and_dockerignore(tmp_pat
     dropped = {line[66:] for line in now.splitlines()} - {line[66:] for line in before.splitlines()}
     assert dropped == {".dockerignore", "desk/nested/file.txt"}
     assert set(before.splitlines()) < set(now.splitlines())
+
+
+@pytest.mark.parametrize("name", ["app/Türkçe ğüşıöç.py", "app/with space.txt", "app/tab\tname.txt", "desk/ünicode/é.ts"])
+def test_the_driver_manifest_names_files_exactly_as_the_gateway(tmp_path, name):
+    """main.sha256 from the driver equals payload_listing for names git would C-quote (non-ASCII) or that hold a space
+    or a tab: both read NUL-separated paths with core.quotePath=false, so the host's manifest check and the gateway's
+    digest agree. Non-ASCII names and spaces stay raw; git still quotes control characters such as a tab in
+    %(path) on both sides, so such a file never matches its build-context name and the build refuses it."""
+    from app import release_gateway as rg
+    repo = _toy_repo(tmp_path)
+    (repo / name).parent.mkdir(parents=True, exist_ok=True)
+    (repo / name).write_text("x\n")
+    _commit(repo, "odd name")
+    out = tmp_path / "out"
+    out.mkdir()
+    _, sums = pack(repo, out)
+    if "\t" not in name:
+        assert any(line.endswith("  " + name) for line in sums)
+    assert rg.payload_digest("\n".join(sums) + "\n") == rg.payload_digest(rg.payload_listing(repo, "HEAD"))
