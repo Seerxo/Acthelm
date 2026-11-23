@@ -62,6 +62,10 @@ POLL_EVERY = timedelta(seconds=60)
 STALE_AFTER = timedelta(seconds=180)
 MAX_BACKOFF = timedelta(minutes=15)
 RELEASABLE = (enums.TaskStatus.BACKLOG, enums.TaskStatus.READY, enums.TaskStatus.BLOCKED)
+# A delivery refused for these reasons can never succeed with its packet: the founder's release ran out or the task
+# changed after it. Only the founder's own new release replaces it (never automatically), built from the task as stored
+# now, with a new id, digest and expiry; Stage C never confirmed the old packet, and production never activates it.
+RENEWABLE = ("RELEASE_EXPIRED", "TASK_CHANGED")
 HARD_STOP = (401, 403, 404, 409, 410, 422)   # founder-approved watchdog rule: auth/absence/conflict never retry
 UUID_RE = r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 _SHA40, _SHA64, _KEY = r"^[0-9a-f]{40}$", r"^[0-9a-f]{64}$", r"^[A-Z]+-\d{1,6}$"
@@ -298,7 +302,10 @@ def release(db: Session, task: models.Task, *, founder: str, now: datetime | Non
     now = now or datetime.now(timezone.utc)
     db.refresh(task, with_for_update=True)
     remote = _remote(task)
-    if remote is not None:
+    renew = (remote is not None and remote.get("delivery") == "REFUSED" and remote.get("last_error_code") in RENEWABLE
+             and remote.get("remote_task_key") is None and not remote.get("cancel_requested_at")
+             and task.status == enums.TaskStatus.WAITING_EXTERNAL)
+    if remote is not None and not renew:
         if remote.get("delivery") in ("SUSPENDED", "REFUSED"):   # explicit founder retry; delivery re-verifies
             _set_remote(task, delivery="PENDING", attempts=0, next_attempt_at=None, last_error_code=None)
             audit.record(db, actor=founder, action="handoff.retry", entity_type="task", entity_key=task.key,
@@ -306,9 +313,15 @@ def release(db: Session, task: models.Task, *, founder: str, now: datetime | Non
         db.commit()
         remote = _remote(task)
         return {"id": remote["id"], "payload_sha256": remote["payload_sha256"], "delivery": remote["delivery"]}
-    if task.status not in RELEASABLE:
+    if not renew and task.status not in RELEASABLE:
         raise HandoffError(409, "TASK_NOT_RELEASABLE")
-    text = _eligible_text(db, task)
+    text = _eligible_text(db, task)            # a renewal passes the same eligibility checks as a first release
+    if renew:
+        # The old packet and its release are superseded, never reused: its record leaves the task (the audit keeps
+        # it), so delivery re-verifies only the new release below against its own new audit row.
+        audit.record(db, actor=founder, action="handoff.supersede", entity_type="task", entity_key=task.key,
+                     task_id=task.id, before={**_release_fields(remote), "code": remote.get("last_error_code")})
+        task.context = {k: v for k, v in task.context.items() if k != "remote_stage_c"}
     packet = {"version": VERSION, "id": str(uuid.uuid4()), "origin": "production", "origin_task_key": task.key,
               "repository": control.AUTH_REPOSITORY, "issued_at": now.isoformat(),
               "expires_at": (now + MAX_TTL).isoformat(), "risk": "LOW", "kind": "code_change", "task": text}

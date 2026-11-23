@@ -330,6 +330,69 @@ def test_reverify(w, change):
     assert w.sync(now=now)["requests"] == []                                 # a refusal is not retried
 
 
+
+@pytest.mark.parametrize("change", ["expired", "edited"])
+def test_the_founder_renews_an_expired_or_edited_release(w, change):
+    """R3 finding 4: a release refused for RELEASE_EXPIRED / TASK_CHANGED was stuck for good. The founder's own new
+    release (never sync) supersedes it with a new packet from the task as stored now; the old one is never sent."""
+    old = w.release().json()
+    with Session(w.prod) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        if change == "edited":
+            task.objective = "the corrected objective"
+        s.commit()
+    later = datetime.now(timezone.utc) + timedelta(hours=25)
+    out = w.sync(now=later if change == "expired" else None)["requests"]
+    assert out[0]["outcome"] == {"expired": "RELEASE_EXPIRED", "edited": "TASK_CHANGED"}[change] and w.calls == []
+    assert w.sync()["requests"] == []                                         # sync alone never renews it
+    assert w.prod_task().context["remote_stage_c"]["id"] == old["id"]
+    r = w.release()
+    assert r.status_code == 201, r.text
+    new = r.json()
+    assert new["id"] != old["id"] and new["payload_sha256"] != old["payload_sha256"] and new["delivery"] == "PENDING"
+    remote = w.prod_task().context["remote_stage_c"]
+    assert remote["packet"]["task"]["objective"] == w.prod_task().objective
+    assert w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL
+    with Session(w.prod) as s:
+        rows = s.scalars(select(models.AuditLog).where(models.AuditLog.entity_key == "TASK-0001")
+                         .order_by(models.AuditLog.id)).all()
+        actions = [r.action for r in rows]
+        assert actions.count("handoff.release") == 2 and "handoff.supersede" in actions   # history kept
+        sup = next(r for r in rows if r.action == "handoff.supersede")
+        assert sup.actor == FID and sup.before["id"] == old["id"]
+    assert w.sync()["requests"][0]["outcome"] == "IMPORTED"
+    assert [c for c in w.calls if old["id"] in c[1]] == []                    # the old packet never reached Stage C
+    assert [t.context["remote_stage_c"]["id"] for t in w.sc_tasks()] == [new["id"]]
+
+
+def test_a_superseded_release_cannot_be_put_back(w):
+    """The old packet's founder release no longer authorizes anything once a new release superseded it."""
+    w.release()
+    old_remote = dict(w.prod_task().context["remote_stage_c"])
+    w.sync(now=datetime.now(timezone.utc) + timedelta(hours=25))
+    w.release()
+    with Session(w.prod) as s:                                                # replay the old record by hand
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        task.context = {**task.context, "remote_stage_c": {**old_remote, "delivery": "PENDING"}}
+        s.commit()
+    out = w.sync()["requests"]
+    assert out[0]["outcome"] == "RELEASE_NOT_AUTHORIZED" and w.calls == []
+    assert w.sc_tasks() == []
+
+
+@pytest.mark.parametrize("code", ["RELEASE_NOT_AUTHORIZED", "HTTP_409"])
+def test_other_refusals_are_never_renewed(w, code):
+    """Only an expired or changed release is renewable; any other refusal keeps its packet (a plain retry)."""
+    old = w.release().json()
+    with Session(w.prod) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        task.context = {**task.context, "remote_stage_c": {**task.context["remote_stage_c"], "delivery": "REFUSED",
+                                                             "last_error_code": code}}
+        s.commit()
+    assert w.release().json()["id"] == old["id"]
+    with Session(w.prod) as s:
+        assert s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.supersede")) is None
+
 def test_cancel_first(w):
     """Founder cancels before delivery: Stage C gets a tombstone, and a delayed PUT can never import it."""
     hid = w.release().json()["id"]
