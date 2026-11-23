@@ -310,7 +310,9 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
   needs a new Start Pilot. The standing authorization does not arm the worker.
 - The armed worker is bound to that task: while `STAGE_C_ARMED_TASK` is set, `control.write_authorization_denial`
   and `consume_write_authorization` refuse every other task (`stage_c_armed_for_other_task`), whatever
-  authorization it holds, and spend nothing. A Start Pilot for another task re-arms the worker for that task.
+  authorization it holds, and spend nothing. The armed task itself writes only under its own one-task grant: no
+  standing fallback, so once that grant is consumed or revoked it cannot claim another run before the next tick
+  disarms. A Start Pilot for another task re-arms the worker for that task.
 
 This host has no release ledger, so `scripts/compose-bound.sh` is not used here; the timer runs the same pinned
 Compose command the manual pilot used. The API gets no Docker socket and no new endpoint.

@@ -87,6 +87,26 @@ def test_a_worker_armed_for_one_task_never_writes_for_another(monkeypatch, tmp_p
     assert authorization(db).value["consumed_by_run_id"] == 6 and standing(db).value["used"]["count"] == 0
 
 
+def test_the_armed_task_never_falls_back_to_standing_after_its_pilot_grant(monkeypatch, tmp_path):
+    """R3 review finding 2: while the worker stays armed for X (between timer ticks), X itself must not claim another
+    run under a standing grant once its one-task grant is consumed or revoked. Armed = that task's pilot grant only."""
+    db, x, ps = armed(monkeypatch, tmp_path)
+    control.issue_standing(db, [PATH], SHA_A, founder=FOUNDER_ID, max_per_day=3)
+    control.authorize_pilot(db, x.key, SHA_A, founder=FOUNDER_ID)
+    monkeypatch.setenv(control.ARMED_TASK_ENV, x.key)
+    assert control.consume_write_authorization(db, x, SHA_A, 6) is None       # the pilot grant, spent once
+    db.commit()
+    assert control.write_authorization_denial(db, x, SHA_A) == "stage_c_authorization_consumed"
+    assert control.consume_write_authorization(db, x, SHA_A, 7) == "stage_c_authorization_consumed"
+    control.revoke_pilot_authorization(db, actor=FOUNDER_ID)
+    assert control.write_authorization_denial(db, x, SHA_A) == "stage_c_authorization_missing"
+    assert control.consume_write_authorization(db, x, SHA_A, 8) == "stage_c_authorization_missing"
+    assert standing(db).value["used"]["count"] == 0
+    assert "stage-c.standing.consume" not in audit_actions(db)
+    monkeypatch.delenv(control.ARMED_TASK_ENV)                                # unarmed: the standing grant is as before
+    assert control.write_authorization_denial(db, x, SHA_A) is None
+
+
 @pytest.mark.parametrize("value", ["", "task-0100", "TASK-0100 ", "TASK-0999"])
 def test_an_armed_value_that_is_not_exactly_this_task_refuses(monkeypatch, tmp_path, value):
     db, x, ps = armed(monkeypatch, tmp_path)
