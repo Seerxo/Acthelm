@@ -64,7 +64,10 @@ MAX_BACKOFF = timedelta(minutes=15)
 RELEASABLE = (enums.TaskStatus.BACKLOG, enums.TaskStatus.READY, enums.TaskStatus.BLOCKED)
 # A delivery refused for these reasons can never succeed with its packet: the founder's release ran out or the task
 # changed after it. Only the founder's own new release replaces it (never automatically), built from the task as stored
-# now, with a new id, digest and expiry; Stage C never confirmed the old packet, and production never activates it.
+# now, with a new id, digest and expiry, and only while production never recorded an activation of the old packet
+# (refused before delivery, or after import but before activation). Production never sends the old packet again, and
+# Stage C retires an import that was never activated when the new packet for the same task arrives (import_packet):
+# one open task per production task, and the old import can never be activated.
 RENEWABLE = ("RELEASE_EXPIRED", "TASK_CHANGED")
 HARD_STOP = (401, 403, 404, 409, 410, 422)   # founder-approved watchdog rule: auth/absence/conflict never retry
 UUID_RE = r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -303,8 +306,8 @@ def release(db: Session, task: models.Task, *, founder: str, now: datetime | Non
     db.refresh(task, with_for_update=True)
     remote = _remote(task)
     renew = (remote is not None and remote.get("delivery") == "REFUSED" and remote.get("last_error_code") in RENEWABLE
-             and remote.get("remote_task_key") is None and not remote.get("cancel_requested_at")
-             and task.status == enums.TaskStatus.WAITING_EXTERNAL)
+             and not remote.get("cancel_requested_at") and task.status == enums.TaskStatus.WAITING_EXTERNAL
+             and not _activation_recorded(db, task, remote.get("id")))
     if remote is not None and not renew:
         if remote.get("delivery") in ("SUSPENDED", "REFUSED"):   # explicit founder retry; delivery re-verifies
             _set_remote(task, delivery="PENDING", attempts=0, next_attempt_at=None, last_error_code=None)
@@ -339,6 +342,16 @@ def release(db: Session, task: models.Task, *, founder: str, now: datetime | Non
                  after={"status": task.status.value, **_release_fields(remote)})
     db.commit()
     return {"id": remote["id"], "payload_sha256": remote["payload_sha256"], "delivery": "PENDING"}
+
+
+def _activation_recorded(db: Session, task: models.Task, hid) -> bool:
+    """Did production ever record Stage C's activation of this handoff? Read from the audit log, not the mutable
+    record. An activation Stage C committed but whose reply was lost is not here; Stage C then refuses the renewed
+    packet itself (import_packet), so live work is never superseded."""
+    rows = db.scalars(select(models.AuditLog).where(
+        models.AuditLog.action == "handoff.activation", models.AuditLog.entity_key == task.key,
+        models.AuditLog.task_id == task.id))
+    return any(isinstance(r.after, dict) and r.after.get("id") == hid for r in rows)
 
 
 def _release_fields(remote: dict) -> dict:
@@ -782,6 +795,7 @@ def import_packet(db: Session, hid: str, raw, now: datetime | None = None) -> tu
     agent = db.scalar(select(models.Agent).where(models.Agent.key == "developer"))
     if project is None or agent is None:
         raise HandoffError(409, "RECEIVER_NOT_CONFIGURED")
+    _retire_superseded(db, packet.origin_task_key, hid, now)
     reservation = {"origin": "production", "origin_task_key": packet.origin_task_key,
                    "payload_sha256": packet.payload_sha256, "task_key": None,
                    "expires_at": expires.isoformat(), "cancelled_at": None, "first_authorized_at": None,
@@ -821,6 +835,41 @@ def import_packet(db: Session, hid: str, raw, now: datetime | None = None) -> tu
                         "origin_task_key": packet.origin_task_key})
     db.commit()
     return 201, _receipt(db, hid, row.value)
+
+
+def _retire_superseded(db: Session, origin_task_key: str, hid: str, now: datetime) -> None:
+    """A new packet for a production task replaces an earlier import of it (the founder renewed an expired or changed
+    release). An earlier import that was never activated is withdrawn in this same transaction (tombstoned and its
+    task cancelled), so Stage C never holds two open tasks for one production task and the old packet can never be
+    activated. An activated one is live work: the new packet is refused (409) and nothing changes. Lock order task ->
+    handoff row, as cancel_import and activate_import; an import never activated was never authorized, so no grant."""
+    olds = db.scalars(select(models.Task).where(
+        models.Task.context["remote_stage_c"]["origin_task_key"].as_string() == origin_task_key,
+        models.Task.status.not_in((enums.TaskStatus.DONE, enums.TaskStatus.CANCELLED)))
+        .order_by(models.Task.id).with_for_update().execution_options(populate_existing=True)).all()
+    for task in olds:
+        ref = imported(task)
+        old_hid = str(ref.get("id")) if ref else None
+        if old_hid is None or old_hid == hid:
+            continue
+        row = _row(db, old_hid, lock=True)
+        value = dict(row.value) if row is not None and isinstance(row.value, dict) else None
+        if value is None or value.get("task_key") != task.key:
+            raise HandoffError(409, "PAYLOAD_CONFLICT")
+        if value.get("state") == "ACTIVATED" or value.get("first_authorized_at"):
+            raise HandoffError(409, "ACTIVE_IMPORT")
+        if not value.get("cancelled_at"):
+            row.value = {**value, "cancelled_at": now.isoformat(), "superseded_by": hid}
+        before = task.status.value
+        task.status, task.completed_at = enums.TaskStatus.CANCELLED, now
+        audit.record(db, actor=SERVICE, action="task.status", entity_type="task", entity_key=task.key,
+                     task_id=task.id, reason="HANDOFF_SUPERSEDED", before={"status": before},
+                     after={"status": "CANCELLED"})
+        audit.record(db, actor=SERVICE, action="handoff.supersede", entity_type="control_state",
+                     entity_key=KEY_PREFIX + old_hid, task_id=task.id,
+                     after={"id": old_hid, "payload_sha256": value.get("payload_sha256"), "task_key": task.key,
+                            "superseded_by": hid})
+        models.bump_revision(task)
 
 
 def cancel_import(db: Session, hid: str, sha: str, now: datetime | None = None) -> dict:

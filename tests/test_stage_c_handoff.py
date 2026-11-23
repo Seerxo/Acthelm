@@ -380,6 +380,109 @@ def test_a_superseded_release_cannot_be_put_back(w):
     assert w.sc_tasks() == []
 
 
+def _open_sc(w):
+    return [t for t in w.sc_tasks() if t.status not in (enums.TaskStatus.DONE, enums.TaskStatus.CANCELLED)]
+
+
+def _sc_activate(w, hid, sha):
+    with w.on("sc"), Session(w.sc) as s:
+        return h.activate_import(s, hid, sha)
+
+
+def _refused_after_import(w, change):
+    """Release, import on Stage C, then let the activation be refused (expired or edited) before it is ever sent."""
+    old = w.release().json()
+    assert w.sync()["requests"][0]["outcome"] == "IMPORTED"
+    if change == "edited":
+        with Session(w.prod) as s:
+            s.scalar(select(models.Task).where(models.Task.key == "TASK-0001")).objective = "the corrected objective"
+            s.commit()
+    later = datetime.now(timezone.utc) + timedelta(hours=25)
+    out = w.sync(now=later if change == "expired" else None)["requests"]
+    assert out[0]["outcome"] == {"expired": "RELEASE_EXPIRED", "edited": "TASK_CHANGED"}[change]
+    assert not [c for c in w.calls if c[1].endswith("/activate")]           # never activated
+    remote = w.prod_task().context["remote_stage_c"]
+    assert remote["delivery"] == "REFUSED" and remote["remote_task_key"]
+    return old
+
+
+@pytest.mark.parametrize("change", ["expired", "edited"])
+def test_renew_after_import(w, change):
+    """R3 review finding 4: a packet refused after IMPORT but before ACTIVATION was stranded (renewal needed
+    remote_task_key None). Only the founder's new release renews it; Stage C retires the old import when the new one
+    arrives, so there is never a second open task and the old packet can never be activated."""
+    old = _refused_after_import(w, change)
+    assert w.sync()["requests"] == [] and w.prod_task().context["remote_stage_c"]["id"] == old["id"]   # never auto
+    r = w.release()
+    assert r.status_code == 201, r.text
+    new = r.json()
+    assert new["id"] != old["id"] and new["payload_sha256"] != old["payload_sha256"]
+    with Session(w.prod) as s:
+        sup = s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.supersede"))
+        assert sup.actor == FID and sup.before["id"] == old["id"]
+    assert w.sync()["requests"][0]["outcome"] == "IMPORTED"
+    [live] = _open_sc(w)
+    assert live.context["remote_stage_c"]["id"] == new["id"] and len(w.sc_tasks()) == 2   # no duplicate open task
+    [gone] = [t for t in w.sc_tasks() if t.context["remote_stage_c"]["id"] == old["id"]]
+    assert gone.status == enums.TaskStatus.CANCELLED
+    with pytest.raises(h.HandoffError) as e:                                  # the old import never activates
+        _sc_activate(w, old["id"], old["payload_sha256"])
+    assert e.value.code == "CANCELLED"
+    assert w.sync()["requests"][0]["outcome"] == "ACTIVATED"
+    with Session(w.sc) as s:
+        assert s.scalar(select(func.count()).select_from(models.AuditLog)
+                        .where(models.AuditLog.action == "handoff.supersede")) == 1
+
+
+def test_renew_refused_if_activated(w):
+    """Once production recorded an activation, the old packet is Stage C's live work: never superseded."""
+    old = w.release().json()
+    w.sync()
+    assert w.sync()["requests"][0]["outcome"] == "ACTIVATED"
+    with Session(w.prod) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        task.context = {**task.context, "remote_stage_c": {**task.context["remote_stage_c"], "delivery": "REFUSED",
+                                                             "last_error_code": "RELEASE_EXPIRED"}}
+        s.commit()
+    assert w.release().json()["id"] == old["id"]
+    with Session(w.prod) as s:
+        assert s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.supersede")) is None
+
+
+def test_renew_lost_activation_ack(w):
+    """Stage C activated the old import but production never saw the ack: the renewal reaches Stage C, which refuses
+    it (409, a hard stop) rather than retire live work or open a second task."""
+    old = w.release().json()
+    w.sync()
+    assert _sc_activate(w, old["id"], old["payload_sha256"])["activation"] == "ACTIVATED"
+    w.sync(now=datetime.now(timezone.utc) + timedelta(hours=25))
+    new = w.release().json()
+    assert new["id"] != old["id"]
+    out = w.sync()["requests"][0]
+    assert out["outcome"] == "HTTP_409" and w.prod_task().context["remote_stage_c"]["delivery"] == "REFUSED"
+    [only] = _open_sc(w)
+    assert only.context["remote_stage_c"]["id"] == old["id"] and len(w.sc_tasks()) == 1
+    assert w.release().json()["id"] == new["id"]                              # HTTP_409 is never renewable
+
+
+@pytest.mark.parametrize("who", ["cancel", "operator"])
+def test_renew_refused(w, who):
+    old = _refused_after_import(w, "expired")
+    if who == "cancel":
+        with Session(w.prod) as s:
+            task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+            task.context = {**task.context, "remote_stage_c": {**task.context["remote_stage_c"],
+                                                                 "cancel_requested_at": "2026-01-01T00:00:00+00:00"}}
+            s.commit()
+        assert w.release().json()["id"] == old["id"]
+    else:
+        with w.on("prod"), Session(w.prod) as s, pytest.raises(PermissionError):
+            h.release(s, s.scalar(select(models.Task).where(models.Task.key == "TASK-0001")), founder="operator:x")
+    with Session(w.prod) as s:
+        assert s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.supersede")) is None
+    assert len(_open_sc(w)) == 1
+
+
 @pytest.mark.parametrize("code", ["RELEASE_NOT_AUTHORIZED", "HTTP_409"])
 def test_other_refusals_are_never_renewed(w, code):
     """Only an expired or changed release is renewable; any other refusal keeps its packet (a plain retry)."""
