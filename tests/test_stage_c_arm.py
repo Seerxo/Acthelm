@@ -91,7 +91,12 @@ def test_decide_errors(monkeypatch, tmp_path):
 
 
 # ------------------------------------------------------------------------------- the root script, fake docker
-OVERRIDE_JSON = '{"services": {"company-worker": {"environment": {"ENABLE_AUTONOMOUS_CODE_WRITE": "true"}}}}\n'
+def override_json(task="TASK-0100"):
+    return ('{"services": {"company-worker": {"environment": {"ENABLE_AUTONOMOUS_CODE_WRITE": "true", '
+            f'"STAGE_C_ARMED_TASK": "{task}"}}}}}}}}\n')
+
+
+OVERRIDE_JSON = override_json()
 IMAGES = {f"COMPANY_OS_IMAGE_{n}": "sha256:" + c * 64 for n, c in zip(("API", "WORKER", "REASONER", "EGRESS"), "1234")}
 FAKE_DOCKER = """#!/bin/sh
 echo "docker $*" >> "$FAKE_LOG"
@@ -100,11 +105,16 @@ case "$*" in
   "exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE")
     [ "$FAKE_ERROR" != flag ] && [ "$FAKE_ERROR" != stopped ] || exit 1
     cat "$FAKE_STATE" ;;
+  "exec company-worker printenv STAGE_C_ARMED_TASK") [ -s "$FAKE_STATE.task" ] || exit 1; cat "$FAKE_STATE.task" ;;
   "exec company-api printenv CODER_PAUSE_FENCE_ENABLED") echo true ;;
   inspect*) [ "$FAKE_ERROR" != inspect ] || exit 1; [ "$FAKE_ERROR" = stopped ] && echo false || echo true ;;
   compose*) [ "$FAKE_COMPOSE_FAIL" != 1 ] || exit 1
     env | grep '^COMPANY_OS_' | sort >> "$FAKE_LOG"
-    case "$*" in *stage-c-pilot*) echo true > "$FAKE_STATE" ;; *) echo false > "$FAKE_STATE" ;; esac ;;
+    case "$*" in
+      *stage-c-pilot*) echo true > "$FAKE_STATE"
+        sed -n 's/.*"STAGE_C_ARMED_TASK": "\\([^"]*\\)".*/\\1/p' "$(printf '%s\\n' "$@" | grep stage-c-pilot)" > "$FAKE_STATE.task" ;;
+      *) echo false > "$FAKE_STATE"; rm -f "$FAKE_STATE.task" ;;
+    esac ;;
 esac
 """
 
@@ -149,6 +159,18 @@ def test_sh_arm(tmp_path):
     assert "action=ARM reason=authorized task=TASK-0100" in log
     out, log2, _ = _run(tmp_path, "ARM TASK-0100", "true")                # already armed: nothing more
     assert log2.count("compose") == log.count("compose")
+
+
+def test_sh_rearms_for_a_new_task(tmp_path):
+    """Armed for one task, a Start Pilot for another re-arms the worker for that task only (R3 finding 1)."""
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false")
+    assert out.returncode == 0 and (tmp_path / "state.task").read_text().strip() == "TASK-0100"
+    out, log2, ovr = _run(tmp_path, "ARM TASK-0200", "true")
+    assert out.returncode == 0, out.stderr
+    assert log2.count("docker compose") == 2 * log.count("docker compose")    # recreated (cumulative log), not left as TASK-0100
+    assert ovr.read_text() == override_json("TASK-0200") and json.loads(ovr.read_text())
+    assert (tmp_path / "state.task").read_text().strip() == "TASK-0200"
+    assert "action=ARM reason=authorized task=TASK-0200" in log2
 
 
 @pytest.mark.parametrize("error", ["inspect", "flag"], ids=["i", "f"])

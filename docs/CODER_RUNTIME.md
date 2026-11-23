@@ -298,7 +298,8 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
   the source SHA in `.pilot-source-sha`, agents not paused, a fresh watchdog readiness for that SHA, and either an
   unexpired, unrevoked authorization for that SHA or the authorized task's own run still in flight after it consumed
   the authorization (the repository lease held by `stage-c-runner:<task>`, or the consuming run still STARTED).
-- Arm writes `/root/stage-c-pilot.compose.yml` (mode 600, exactly the JSON above) and recreates only
+- Arm writes `/root/stage-c-pilot.compose.yml` (mode 600: the JSON above plus `"STAGE_C_ARMED_TASK": "<task key>"`,
+  the one task the Start Pilot named) and recreates only
   `company-worker` with the four image IDs from `pilot-images.env`; it refuses unless `company-api` has
   `CODER_PAUSE_FENCE_ENABLED=true`. Disarm recreates the worker without the override and deletes it. If the worker
   cannot be recreated safely, it is stopped. Any read error disarms. A tick that already matches changes nothing.
@@ -307,6 +308,9 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
 - Stop Pilot disarms within about 20 seconds even mid-run: the worker is recreated and the run is recovered as an
   infrastructure interruption (`stage_c_worker.recover_interrupted`). Every new claim, including a CI repair,
   needs a new Start Pilot. The standing authorization does not arm the worker.
+- The armed worker is bound to that task: while `STAGE_C_ARMED_TASK` is set, `control.write_authorization_denial`
+  and `consume_write_authorization` refuse every other task (`stage_c_armed_for_other_task`), whatever
+  authorization it holds, and spend nothing. A Start Pilot for another task re-arms the worker for that task.
 
 This host has no release ledger, so `scripts/compose-bound.sh` is not used here; the timer runs the same pinned
 Compose command the manual pilot used. The API gets no Docker socket and no new endpoint.
