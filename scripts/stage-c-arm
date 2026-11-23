@@ -86,7 +86,15 @@ disarm() {
     # Cannot recreate it safely (unreadable image pins or a Compose failure): stop it. A stopped worker
     # writes nothing; the next tick with good inputs starts it again, unarmed or armed as decided.
     docker stop company-worker >/dev/null 2>&1 || true
+    # The override goes either way: a running container never re-reads it, and no later Compose run may re-arm
+    # from it. Only a worker read back as not running counts as stopped; a failed, ignored or unreadable stop
+    # may leave it running armed, so this tick reports DISARM_FAILED and exits 1 (the next tick tries again).
     rm -f -- "$OVERRIDE"
+    after=$(docker inspect -f '{{.State.Running}}' company-worker 2>/dev/null) || after=UNKNOWN
+    if [ "$after" != false ]; then
+      log DISARM_FAILED "$REASON" "$TASK"
+      exit 1
+    fi
     log DISARM_STOP "$REASON" "$TASK"
   fi
 }

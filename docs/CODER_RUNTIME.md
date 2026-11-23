@@ -302,7 +302,8 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
   the one task the Start Pilot named) and recreates only
   `company-worker` with the four image IDs from `pilot-images.env`; it refuses unless `company-api` has
   `CODER_PAUSE_FENCE_ENABLED=true`. Disarm recreates the worker without the override and deletes it. If the worker
-  cannot be recreated safely, it is stopped. Any read error disarms. A tick that already matches changes nothing.
+  cannot be recreated safely, it is stopped and read back: only a worker shown as not running logs `DISARM_STOP`;
+  otherwise the tick logs `DISARM_FAILED` and exits 1 (the override is removed either way). Any read error disarms. A tick that already matches changes nothing.
 - Each arm/disarm logs one journal line (`journalctl -t stage-c-arm`): time, action, reason code, task key.
   `scripts/stage-c-arm --dry-run` prints the decision and the worker state and changes nothing.
 - Stop Pilot disarms within about 20 seconds even mid-run: the worker is recreated and the run is recovered as an
