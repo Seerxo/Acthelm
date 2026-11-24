@@ -3,10 +3,11 @@
 // "pending" however the diagram draws it. Code missions use their recorded Stage C history (stage_c.advance).
 import type { Run, TaskDetail } from "./api"
 import { DELIVERY_STAGES } from "./delivery.ts"
+import { prLink } from "./accept.ts"
 
 export type StepState = "done" | "current" | "waiting" | "failed" | "blocked" | "cancelled" | "pending"
 export interface Step { key: string; label: string; state: StepState; at?: string | null; until?: string | null; detail?: string
-  /** A link the backend recorded (the PR URL from stage_c_runner.publish), never one the Desk builds. */
+  /** The backend-verified PR link (lib/accept.ts prLink), never one the Desk builds from recorded history. */
   href?: string }
 
 const GITHUB = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)$/
@@ -24,6 +25,7 @@ function mission(t: TaskDetail): Step[] | null {
   const order: string[] = DELIVERY_STAGES.map(([k]) => k)
   const current = order.indexOf(imp.stage)
   const abandoned = imp.stage === "ABANDONED"
+  const link = prLink(t)
   return DELIVERY_STAGES.map(([key, label], i) => {
     const h = at(key)
     const ev = (h?.evidence ?? {}) as Record<string, unknown>
@@ -31,12 +33,14 @@ function mission(t: TaskDetail): Step[] | null {
     const pr = url ? url.match(GITHUB)![1] : typeof ev.pr === "number" ? ev.pr : typeof ev.pr_number === "number" ? ev.pr_number : null
     const detail = [pr !== null && `PR #${pr}`, typeof ev.commit === "string" && ev.commit.slice(0, 7),
       typeof ev.ci_state === "string" && `CI ${ev.ci_state}`, typeof ev.failed_check === "string" && `failed: ${ev.failed_check}`,
-      typeof ev.verdict === "string" && `review ${ev.verdict.toLowerCase()}`].filter(Boolean).join(" · ") || undefined
+      typeof ev.verdict === "string" && `review ${ev.verdict.toLowerCase()}`,
+      key === "PR_OPEN" && link?.state === "unverified" && "PR link unverified"].filter(Boolean).join(" · ") || undefined
     const state: StepState = abandoned ? (h ? "done" : "cancelled")
       : i < current ? (h ? "done" : "pending")          // no record of a past stage: not claimed done
       : i === current ? (t.status === "BLOCKED" ? "blocked" : t.status === "FAILED" ? "failed" : "current")
       : "pending"
-    return { key, label, state, at: h?.at ?? null, detail, href: url }
+    const href = url && link?.state === "verified" && link.pr.url === url ? url : undefined
+    return { key, label, state, at: h?.at ?? null, detail, href }
   })
 }
 

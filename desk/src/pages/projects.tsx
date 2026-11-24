@@ -12,7 +12,12 @@ import { EventList } from "@/pages/system"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { DataRows } from "@/components/data-rows"
 import { TrendGrid } from "@/components/trend"
-import { ChevronRight } from "lucide-react"
+import { ChevronRight, Plus } from "lucide-react"
+import { useState, type ComponentProps } from "react"
+import { goalBody } from "@/lib/founder-forms"
+import { Button } from "@/components/ui/button"
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
+import { Input } from "@/components/ui/input"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 
 function useUnitFacts() {
@@ -68,7 +73,7 @@ export function BusinessTable({ only }: { only?: Unit[] } = {}) {
   const facts = useUnitFacts()
   const units = only ?? d.portfolio
   if (!Array.isArray(units)) return <Calm status={<Status value="UNKNOWN" />} title="Portfolio unavailable">This API version does not report it.</Calm>
-  if (!units.length) return <Calm title="No business units recorded">Units appear once the company records them. Nothing is estimated while none are recorded.</Calm>
+  if (!units.length) return <Calm title="No business units recorded" />
   return <>
     <div className="hidden lg:block">
       <DataRows label="Business units" rows={units} rowKey={u => u.key} titleHead="Unit"
@@ -95,7 +100,7 @@ export function BusinessTable({ only }: { only?: Unit[] } = {}) {
         const stale = dataState(u).stale > 0
         return <li key={u.key}>
           <button type="button" onClick={() => go("project", u.key)}
-            className="group grid min-h-[178px] w-full content-start gap-4 rounded-xl border bg-card p-4 text-left transition-[border-color,background-color,box-shadow] duration-150 hover:border-brand/30 hover:bg-surface/70 hover:shadow-xs focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
+            className="group grid min-h-[178px] w-full content-start gap-4 rounded-xl border bg-card p-4 text-left transition-[border-color,background-color,box-shadow] duration-150 hover:border-foreground/20 hover:bg-surface/70 hover:shadow-xs focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
             <span className="flex min-w-0 items-start justify-between gap-3">
               <span className="grid min-w-0 gap-1"><span className="truncate text-[15px] font-semibold tracking-tight">{u.name}</span>
                 <span className="text-xs text-muted-foreground">{u.priority} priority · {humanize(u.status)}</span></span>
@@ -137,18 +142,18 @@ export function ProjectsPage() {
   const attention = units.filter(u => { const f = facts(u.key); return f.incidents.length + f.blocked.length > 0 }).length
   const c = d.current_priority
   return <>
-    <PageHeader title={pageTitle("projects")} description="Each business, its verified numbers and its work."
-      />
-    <FigureStrip label="Portfolio at a glance" items={[
+    <PageHeader title={pageTitle("projects")} />
+    {Array.isArray(d.portfolio) && <FigureStrip label="Portfolio at a glance" items={[
       { label: "Live", value: String(live.length), sub: "active business units" },
-      { label: "Need attention", value: String(attention), tone: attention ? "warning" : undefined, sub: attention ? "stale or missing data" : "data is current" },
+      { label: "Need attention", value: String(attention), tone: attention ? "warning" : undefined, sub: attention ? "open incidents or stopped work" : "no incident or stopped work" },
       { label: "Not active", value: String(rest.length), sub: "ideas and paused units" },
-    ]} />
+    ]} />}
     {c && (
       <section className="panel grid gap-1.5 px-4 py-3.5" aria-label="Current priority">
         <span className="eyebrow">Current priority · {c.kind === "goal" ? "goal" : "highest-priority open work"}</span>
-        <button type="button" className="text-left text-[15px] font-semibold tracking-tight hover:underline disabled:no-underline"
-          disabled={c.kind !== "task"} onClick={() => c.kind === "task" && c.key && open({ kind: "task", key: c.key })}>{c.title}</button>
+        {c.kind === "task" && c.key
+          ? <button type="button" className="min-h-11 text-left text-[15px] font-semibold tracking-tight underline-offset-2 hover:underline focus-visible:underline sm:min-h-0" onClick={() => open({ kind: "task", key: c.key! })}>{c.title}</button>
+          : <span className="text-[15px] font-semibold tracking-tight [overflow-wrap:anywhere]">{c.title}</span>}
         {c.why && <p className="text-[13px] text-muted-foreground">{c.why}</p>}
         {c.kind === "goal" && (c.metric || c.target || c.open_tasks === 0 || (c.measure && !c.measure.latest)) && <p className="text-xs text-muted-foreground">{c.metric && c.target && <>{c.metric}: {c.baseline || "—"} → {c.target}</>}
           {c.measure && !c.measure.latest && <span className="text-warning"> · no verified observation yet</span>}
@@ -156,11 +161,11 @@ export function ProjectsPage() {
       </section>
     )}
     {!Array.isArray(d.portfolio) ? <Calm status={<Status value="UNKNOWN" />} title="Project data unavailable">This API version does not report it.</Calm>
-      : !units.length ? <Calm title="No business units recorded">Units appear once the company records them. Nothing is estimated while none are recorded.</Calm>
+      : !units.length ? <Calm title="No business units recorded" />
       : <>
         <section className="grid gap-3" aria-label="Live businesses">
           <h2 className="px-0.5 text-[15px] font-semibold tracking-tight">Live <span className="num text-[13px] font-normal text-muted-foreground">{live.length}</span></h2>
-          {live.length ? <BusinessTable only={live} /> : <p className="panel px-4 py-4 text-[13px] text-muted-foreground">No business unit is active. Agents only take recurring work for active units.</p>}
+          {live.length ? <BusinessTable only={live} /> : <p className="panel px-4 py-4 text-[13px] text-muted-foreground">No business unit is active.</p>}
         </section>
         {rest.length > 0 && (
           <Collapsible className="grid gap-3">
@@ -198,6 +203,50 @@ function UnitStats({ u }: { u: Unit }) {
   )
 }
 
+/** New goal (POST /goals, verified founder only): recorded PROPOSED for one of this unit's projects. */
+function NewGoal({ projects }: { projects: { key: string; name: string }[] }) {
+  const { act } = useDesk()
+  const blank = { title: "", metric: "", target: "", baseline: "", project: projects[0]?.key ?? "" }
+  const [f, setF] = useState(blank)
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const built = goalBody(f)
+  const field = (k: keyof typeof blank, label: string, props: ComponentProps<"input"> = {}) => (
+    <label className="grid gap-1.5 text-[13px] font-medium">{label}
+      <Input value={f[k]} onChange={e => setF(x => ({ ...x, [k]: e.target.value }))} className="font-normal" {...props} /></label>)
+  const submit: ComponentProps<"form">["onSubmit"] = async e => {
+    e.preventDefault()
+    if (!built.body || busy) return
+    setBusy(true)
+    const ok = await act("/goals", built.body, "Goal recorded as PROPOSED")
+    setBusy(false)
+    if (ok) { setF(blank); setOpen(false) }
+  }
+  return (
+    <Dialog open={open} onOpenChange={o => { if (!busy) setOpen(o) }}>
+      <DialogTrigger asChild><Button size="sm" variant="outline" className="h-11 sm:h-8"><Plus />New goal</Button></DialogTrigger>
+      <DialogContent className="sm:max-w-md">
+        <form onSubmit={submit} className="grid gap-4">
+          <DialogHeader><DialogTitle>New goal</DialogTitle>
+            <DialogDescription>Recorded as PROPOSED; work is measured against it once it is active.</DialogDescription></DialogHeader>
+          <fieldset disabled={busy} className="grid min-w-0 gap-4">
+            {field("title", "Title", { required: true, minLength: 3, maxLength: 300, placeholder: "e.g. Reach 10k monthly views" })}
+            {field("metric", "Metric", { required: true, minLength: 2, maxLength: 200, placeholder: "What is measured" })}
+            <div className="grid gap-3 sm:grid-cols-2">
+              {field("baseline", "Baseline (optional)", { maxLength: 100 })}
+              {field("target", "Target", { required: true, maxLength: 100 })}
+            </div>
+            {projects.length > 1 && <label className="grid gap-1.5 text-[13px] font-medium">Project
+              <select value={f.project} onChange={e => setF(x => ({ ...x, project: e.target.value }))}
+                className="h-11 rounded-md border bg-transparent px-2 font-normal focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none sm:h-9">{projects.map(p => <option key={p.key} value={p.key}>{p.name}</option>)}</select></label>}
+          </fieldset>
+          <DialogFooter><Button type="submit" disabled={busy || !built.body} className="h-10 px-4">{busy ? "Recording…" : "Record goal"}</Button></DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 /** Goals this unit's projects serve, and the projects themselves (from the Desk catalog). */
 function UnitGoals({ u }: { u: Unit }) {
   const d = useData()
@@ -207,11 +256,11 @@ function UnitGoals({ u }: { u: Unit }) {
   const goals = d.catalog.goals.filter(g => g.project && keys.has(g.project))
   return (
     <div className="grid gap-10 lg:grid-cols-2">
-      <Section title="Goals" action={<span className="num">{goals.length}</span>}>
+      <Section title="Goals" action={<span className="flex items-center gap-2"><span className="num">{goals.length}</span>{projects.length > 0 && <NewGoal projects={projects} />}</span>}>
         {goals.length ? <ul className="grid grid-cols-1 divide-y divide-border/70" aria-label="Goals">{goals.map(g => (
           <li key={g.id} className="flex items-start justify-between gap-3 py-2 text-sm first:pt-0">
             <span className="min-w-0 break-words">{g.title}</span><Status value={g.status} />
-          </li>))}</ul> : <Calm title="No open goal">Set a goal so work for this unit is measured against an outcome.</Calm>}
+          </li>))}</ul> : <Calm title="No goal recorded">Set a goal so work for this unit is measured against an outcome.</Calm>}
       </Section>
       <Section title="Projects" action={<span className="num">{projects.length}</span>}>
         {projects.length ? <ul className="grid grid-cols-1 divide-y divide-border/70" aria-label="Projects">{projects.map(p => (
@@ -237,10 +286,10 @@ export function ProjectDetail({ unitKey }: { unitKey: string }) {
     <PageHeader eyebrow="Business unit" title={u.name} description={`Priority ${u.priority} · ${dataSummary(u).toLowerCase()}`}
       meta={<><Status value={u.status} /><Summary parts={[[f.work.length, "open"], [f.incidents.length, f.incidents.length > 1 ? "incidents" : "incident", "warning"]]} /></>} />
     {/* Results and execution are kept apart: finished tasks are not business results. */}
-    <Section title="Business results" description="Verified readings from reporting sources only. Task completion is not counted here.">
+    <Section title="Business results" description="Verified readings only; finished tasks are not results.">
       {u.metrics.length ? <div className="grid gap-4"><UnitStats u={u} />
         {/* The unit's own 30-day trends; per-video YouTube series stay in Growth's table. */}
-        <TrendGrid metrics={u.metrics.filter(m => !m.subject.startsWith("youtube:")).slice(0, 4)} /></div> : <Calm title="No verified result reported">Nothing is shown until a source reports for this project; that is unknown, not zero.</Calm>}
+        <TrendGrid metrics={u.metrics.filter(m => !m.subject.startsWith("youtube:")).slice(0, 4)} /></div> : <Calm title="No verified result reported">Unknown, not zero.</Calm>}
     </Section>
     {priority && (
       <Section title="Current priority">
@@ -264,7 +313,7 @@ export function ProjectDetail({ unitKey }: { unitKey: string }) {
       <Section title="Incidents">
         {f.incidents.length ? f.incidents.map(i => (
           <div key={i.key} className="flex items-center justify-between gap-3 border-b border-border/70 py-2 text-sm last:border-0">
-            <span className="min-w-0"><span className="font-medium">{i.title}</span><span className="block text-xs text-muted-foreground"><span className="font-mono">{i.key}</span> · open {ago(i.started_at)}</span></span>
+            <span className="min-w-0"><span className="font-medium">{i.title}</span><span className="block text-xs text-muted-foreground [overflow-wrap:anywhere]"><span className="font-mono">{i.key}</span> · open {ago(i.started_at)}</span></span>
             <Status value={i.severity} />
           </div>)) : <Calm title="No open incidents" />}
       </Section>

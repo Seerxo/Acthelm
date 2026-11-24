@@ -58,9 +58,13 @@ export function vitals(d: DeskState, now: number): Vital[] {
   return [automation, incidents, backups, services]
 }
 
-export function operating(d: DeskState, opts: { stale: boolean; now: number }): Operating {
+/** `opts.decisions` is Home's merged "Decisions for you" list (lib/dashboard.ts needsYou): when given, every count
+ *  in the headline and the primary button is that list's, so the header never disagrees with the panel. Which state
+ *  wins stays keyed on the API's queue, so a review item never hides a stopped worker or a pause. */
+export function operating(d: DeskState, opts: { stale: boolean; now: number; decisions?: { level: string }[] }): Operating {
   const needs = Array.isArray(d.needs_you) ? d.needs_you : null
-  const critical = needs?.filter(n => n.level === "critical").length ?? 0
+  const decisions = opts.decisions ?? needs ?? []
+  const critical = decisions.filter(n => n.level === "critical").length
   const running = count(d, ["IN_PROGRESS"])
   const next = count(d, ["READY", "QUEUED"])
   const stopped = count(d, ["BLOCKED", "FAILED"])
@@ -82,17 +86,18 @@ export function operating(d: DeskState, opts: { stale: boolean; now: number }): 
     d.incidents.length ? { text: `${plural(d.incidents.length, "open incident")}`, tone: v[1].tone } : { text: v[1].value.toLowerCase().replace("none open", "no open incidents") },
   ]
 
-  const review_n = (n: number) => ({ label: `Review ${plural(n, "item")}`, target: { page: "approvals" } as Target })
+  // The merged list lives in Home's panel; the approvals page lists only the API's rows.
+  const decide = { label: `Review ${plural(decisions.length, "item")}`, target: (opts.decisions ? { page: "needs-you" } : { page: "approvals" }) as Target }
   let level: Level, headline: string, tone: Tone, primary: Operating["primary"]
   if (opts.stale) {
     level = "stale"; tone = "warning"; headline = "Showing last known data"
     primary = { label: "Refresh", target: { page: "refresh" } }
   } else if (critical) {
     level = "critical"; tone = "danger"; headline = `${plural(critical, "critical issue")} ${critical === 1 ? "needs" : "need"} you`
-    primary = review_n(needs!.length)
+    primary = decide
   } else if (needs?.length) {
-    level = "decision"; tone = "warning"; headline = `${plural(needs.length, "item")} ${needs.length === 1 ? "needs" : "need"} your decision`
-    primary = review_n(needs.length)
+    level = "decision"; tone = "warning"; headline = `${plural(decisions.length, "item")} ${decisions.length === 1 ? "needs" : "need"} your decision`
+    primary = decide
   } else if (d.control.agents_paused) {
     level = "paused"; tone = "warning"; headline = "Agent execution is paused"
     primary = { label: "Review automation", target: { page: "automation" } }
@@ -112,6 +117,10 @@ export function operating(d: DeskState, opts: { stale: boolean; now: number }): 
     headline = bad.key === "incidents" ? (d.incidents.length ? `${plural(d.incidents.length, "incident")} open` : "Incidents not verified")
       : bad.key === "services" ? `Services: ${bad.value}` : "Backups are not verified"
     primary = { label: bad.key === "incidents" ? "Open incidents" : bad.key === "services" ? "Check services" : "Check backups", target: { page: bad.page } }
+  } else if (decisions.length) {
+    // Only Home's merged list reaches here: PRs to merge, results to accept, Stage C blockers. Never "normal" above them.
+    level = "normal"; tone = "warning"; headline = `${plural(decisions.length, "item")} ${decisions.length === 1 ? "needs" : "need"} you`
+    primary = decide
   } else {
     level = "normal"; tone = "success"; headline = running ? "Operating normally" : "Operating normally · idle"
     primary = { label: "Brief the CEO", target: "brief" }
