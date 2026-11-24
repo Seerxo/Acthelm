@@ -43,7 +43,10 @@ export function stageCOnHost(sc: StageCState | null): StageCState | null {
   return sc && stageCEvidence(sc) ? sc : null
 }
 
-export function needsYou(d: Pick<DeskState, "needs_you" | "tasks" | "improvements">, sc: StageCState | null): NeedsView {
+/** `scFresh`: whether the LAST /stage-c/state read succeeded. After a failed read the hook keeps the previous state
+ *  (shown stale elsewhere), but no decision may come from it: no "ready to merge", no readiness item; Stage C's
+ *  tasks and readiness are reported unknown instead. */
+export function needsYou(d: Pick<DeskState, "needs_you" | "tasks" | "improvements">, sc: StageCState | null, scFresh = true): NeedsView {
   const items: NeedItem[] = []
   const unknown: string[] = []
   const seen = new Set<string>()
@@ -60,7 +63,7 @@ export function needsYou(d: Pick<DeskState, "needs_you" | "tasks" | "improvement
   else unknown.push("attention queue")
 
   // sc null: Stage C is not proven on this host (stageCOnHost), so it adds nothing and is not "unknown" either.
-  if (sc && !sc.tasks) unknown.push("Stage C tasks")
+  if (sc && (!scFresh || !sc.tasks)) unknown.push("Stage C tasks")
   else if (sc?.tasks) for (const t of sc.tasks) {
     if (!t.key || CLOSED.includes(t.status)) continue
     if (mergeable(t)) {
@@ -86,7 +89,8 @@ export function needsYou(d: Pick<DeskState, "needs_you" | "tasks" | "improvement
       detail: `${t.key} · finished by the agent; review and accept`, target: { page: "tasks", key: t.key } }, t.key)
   }
 
-  if (sc) {
+  if (sc && !scFresh) unknown.push("Stage C readiness")
+  else if (sc) {
     // task_needs_founder is the task rows above; listing it again would count one decision twice.
     const blockers = sc.blockers?.filter(b => b !== "task_needs_founder") ?? null
     const failed = sc.runtime.preflight.failed ?? []

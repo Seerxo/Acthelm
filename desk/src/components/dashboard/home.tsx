@@ -80,11 +80,11 @@ export function NowCard() {
 }
 
 // --------------------------------------------------------------------------- 2. Finished
-export function FinishedCard({ sc }: { sc: StageCState | null }) {
+export function FinishedCard({ sc, fresh }: { sc: StageCState | null; fresh: boolean }) {
   const d = useData()
   const { go, open } = useDesk()
   const done = recentlyFinished(d.tasks)
-  const pr = sc ? autonomy(d, sc).lastPr : null
+  const pr = sc && fresh ? autonomy(d, sc).lastPr : null   // never a "ready to merge" link from a failed read
   return (
     <Panel title="Recently finished" action={<More onClick={() => go("activity")}>Activity</More>}>
       {pr && <PrRow pr={pr} />}
@@ -110,11 +110,11 @@ function PrRow({ pr }: { pr: NonNullable<ReturnType<typeof autonomy>["lastPr"]> 
 // --------------------------------------------------------------------------- 3. Decisions: needs you
 const SHOW = 6
 
-export function NeedsCard({ sc }: { sc: StageCState | null }) {
+export function NeedsCard({ sc, fresh }: { sc: StageCState | null; fresh: boolean }) {
   const d = useData()
   const { go, open } = useDesk()
   const openNeed = useOpenNeed()
-  const { items, unknown } = needsYou(d, sc)
+  const { items, unknown } = needsYou(d, sc, fresh)
   const [all, setAll] = useState(false)
   const shown = all ? items : items.slice(0, SHOW)
   const openItem = (it: NeedItem) => {

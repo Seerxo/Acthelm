@@ -130,3 +130,13 @@ test("a BLOCKED or FAILED task at READY_TO_MERGE is shown stopped, never as read
   assert.ok(ids.includes("task:TASK-7") && ids.includes("task:TASK-8"))   // the stopped row is no longer hidden
   assert.equal(autonomy(state(), s).counts?.readyToMerge, 1)
 })
+
+test("after a failed Stage C read, the stale state never says ready to merge: Stage C is unknown", () => {
+  const s = sc({ blockers: ["write_disabled"], tasks: [{ key: "TASK-9", status: "REVIEW", stage: "READY_TO_MERGE", pr: { number: 90 } }] })
+  const d = state({ tasks: [task("TASK-9", "REVIEW")] })
+  assert.ok(needsYou(d, s, true).items.some(i => i.id === "sc:merge:TASK-9"))   // the last read succeeded
+  const v = needsYou(d, s, false)                                                 // the last read failed
+  assert.ok(!v.items.some(i => i.id.startsWith("sc:")))
+  assert.ok(v.items.some(i => i.id === "task:TASK-9"))                            // the Desk's own row stays
+  assert.deepEqual(v.unknown, ["Stage C tasks", "Stage C readiness"])
+})
