@@ -450,8 +450,9 @@ def test_renew_refused_if_activated(w):
 
 
 def test_renew_lost_activation_ack(w):
-    """Stage C activated the old import but production never saw the ack: the renewal reaches Stage C, which refuses
-    it (409, a hard stop) rather than retire live work or open a second task."""
+    """Stage C activated the old import but production never saw the ack. The renewal reaches Stage C, which refuses it
+    (ACTIVE_IMPORT) rather than retire live work or open a second task; production then restores the old handoff
+    record, so polling and cancellation address the live import again. Nothing is renewed automatically."""
     old = w.release().json()
     w.sync()
     assert _sc_activate(w, old["id"], old["payload_sha256"])["activation"] == "ACTIVATED"
@@ -459,10 +460,41 @@ def test_renew_lost_activation_ack(w):
     new = w.release().json()
     assert new["id"] != old["id"]
     out = w.sync()["requests"][0]
-    assert out["outcome"] == "HTTP_409" and w.prod_task().context["remote_stage_c"]["delivery"] == "REFUSED"
+    assert out["outcome"] == "RESTORED", out
+    remote = w.prod_task().context["remote_stage_c"]
+    assert remote["id"] == old["id"] and remote["delivery"] == "DELIVERED" and "superseded" not in remote
     [only] = _open_sc(w)
     assert only.context["remote_stage_c"]["id"] == old["id"] and len(w.sc_tasks()) == 1
-    assert w.release().json()["id"] == new["id"]                              # HTTP_409 is never renewable
+    with Session(w.prod) as s:
+        row = s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.supersede_reverted"))
+        assert row.before["id"] == new["id"] and row.after["id"] == old["id"] and row.after["code"] == "ACTIVE_IMPORT"
+    assert w.release().json()["id"] == old["id"]                              # no new founder approval is made
+    assert w.sync()["requests"][0]["outcome"] == "OBSERVED"                   # the live import is polled again
+    assert w.calls[-1] == ("GET", h.API_PREFIX + old["id"])
+    with w.on("prod"):
+        assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
+                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 200
+    assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED"               # ...and cancelled by its own id
+    assert w.calls[-1] == ("POST", f"{h.API_PREFIX}{old['id']}/cancel") and _open_sc(w) == []
+
+
+def test_renew_twice_keeps_live_id(w):
+    """A renewal that itself expired before delivery is renewed again: the record that reached Stage C is carried
+    forward, so the live import is the one restored."""
+    old = w.release().json()
+    w.sync()
+    _sc_activate(w, old["id"], old["payload_sha256"])
+    w.sync(now=datetime.now(timezone.utc) + timedelta(hours=25))
+    mid = w.release().json()
+    with Session(w.prod) as s:   # the second packet expires before it is ever delivered
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        assert task.context["remote_stage_c"]["superseded"]["id"] == old["id"]
+    assert w.sync(now=datetime.now(timezone.utc) + timedelta(hours=25))["requests"][0]["outcome"] == "RELEASE_EXPIRED"
+    last = w.release().json()
+    assert last["id"] not in (old["id"], mid["id"])
+    assert w.prod_task().context["remote_stage_c"]["superseded"]["id"] == old["id"]
+    assert w.sync()["requests"][0]["outcome"] == "RESTORED"
+    assert w.prod_task().context["remote_stage_c"]["id"] == old["id"] and len(w.sc_tasks()) == 1
 
 
 @pytest.mark.parametrize("who", ["cancel", "operator"])

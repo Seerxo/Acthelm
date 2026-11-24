@@ -319,11 +319,16 @@ def release(db: Session, task: models.Task, *, founder: str, now: datetime | Non
     if not renew and task.status not in RELEASABLE:
         raise HandoffError(409, "TASK_NOT_RELEASABLE")
     text = _eligible_text(db, task)            # a renewal passes the same eligibility checks as a first release
+    superseded = None
     if renew:
         # The old packet and its release are superseded, never reused: its record leaves the task (the audit keeps
-        # it), so delivery re-verifies only the new release below against its own new audit row.
+        # it), so delivery re-verifies only the new release below against its own new audit row. The newest record
+        # that reached Stage C is kept aside (never delivered or activated from there): if Stage C answers that it is
+        # live (an activation whose reply was lost), _deliver restores it, so the live import stays addressable.
         audit.record(db, actor=founder, action="handoff.supersede", entity_type="task", entity_key=task.key,
                      task_id=task.id, before={**_release_fields(remote), "code": remote.get("last_error_code")})
+        superseded = ({k: v for k, v in remote.items() if k != "superseded"} if remote.get("remote_task_key")
+                      else remote.get("superseded"))
         task.context = {k: v for k, v in task.context.items() if k != "remote_stage_c"}
     packet = {"version": VERSION, "id": str(uuid.uuid4()), "origin": "production", "origin_task_key": task.key,
               "repository": control.AUTH_REPOSITORY, "issued_at": now.isoformat(),
@@ -336,6 +341,8 @@ def release(db: Session, task: models.Task, *, founder: str, now: datetime | Non
                          attempts=0, next_attempt_at=None, last_attempt_at=None, last_success_at=None,
                          last_error_code=None, remote_task_key=None, cancel_requested_at=None,
                          cancellation="NONE", poll_failures=0)
+    if superseded:
+        remote = _set_remote(task, superseded=superseded)
     task.status = enums.TaskStatus.WAITING_EXTERNAL
     audit.record(db, actor=founder, action="handoff.release", entity_type="task", entity_key=task.key,
                  task_id=task.id, before={"status": previous.value},
@@ -550,6 +557,9 @@ def _deliver(db: Session, task_id: int, transport: Transport, now: datetime) -> 
     if remote is None or remote.get("id") != hid:
         db.commit()
         return {"task_id": task_id, "kind": "deliver", "outcome": "SKIPPED"}
+    if status == 409 and isinstance(remote.get("superseded"), dict) \
+            and (_verified("PUT", path, status, body, sig) or {}).get("error") == "ACTIVE_IMPORT":
+        return _restore_superseded(db, task, remote, now)
     if status not in (200, 201):
         return _fail(db, task, remote, _transport_code(status), hard=status in HARD_STOP, now=now, delivery=True)
     data = _verified("PUT", path, status, body, sig)
@@ -569,6 +579,24 @@ def _deliver(db: Session, task_id: int, transport: Transport, now: datetime) -> 
                                          "remote_task_key": receipt.task_key, "http": status})
     db.commit()
     return {"task": task.key, "kind": "deliver", "outcome": "IMPORTED"}
+
+
+def _restore_superseded(db: Session, task: models.Task, remote: dict, now: datetime) -> dict:
+    """Stage C refused a renewed packet because the import it replaces is live (activated or authorized there; the
+    activation reply never reached production). Put that import's record back as delivered, so polling, the Desk and
+    a cancellation address the live work by its own id again. The renewed packet is dropped (never delivered); this
+    renews nothing and records no activation: the next poll reports Stage C's own state."""
+    old = remote["superseded"]
+    task.context = {**task.context, "remote_stage_c": {
+        **old, "delivery": "DELIVERED", "attempts": 0, "poll_failures": 0, "last_error_code": "ACTIVE_IMPORT",
+        "last_attempt_at": now.isoformat(), "next_attempt_at": None}}
+    audit.record(db, actor="company-worker", action="handoff.supersede_reverted", entity_type="task",
+                 entity_key=task.key, task_id=task.id,
+                 before={"id": remote.get("id"), "payload_sha256": remote.get("payload_sha256")},
+                 after={"id": old.get("id"), "payload_sha256": old.get("payload_sha256"),
+                        "remote_task_key": old.get("remote_task_key"), "code": "ACTIVE_IMPORT"})
+    db.commit()
+    return {"task": task.key, "kind": "deliver", "outcome": "RESTORED"}
 
 
 def _activate(db: Session, task_id: int, transport: Transport, now: datetime) -> dict:
