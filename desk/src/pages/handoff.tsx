@@ -2,11 +2,11 @@
 // Endpoints only (app/main.py): GET /desk/handoffs, GET /stage-c/state, POST /stage-c/tasks, GET /tasks/{key},
 // POST /tasks/{key}/handoff. The API refuses anyone but the verified founder and any task it cannot release; the
 // screen mirrors that (lib/handoff.ts) so an unauthorized task never even offers the button.
-import { useCallback, useEffect, useState, type ComponentProps } from "react"
+import { useCallback, useEffect, useRef, useState, type ComponentProps } from "react"
 import { toast } from "sonner"
 import { api, type TaskDetail } from "@/lib/api"
 import { codeTaskBody } from "@/lib/founder-forms"
-import { approvalState, liveView, releaseBlock, type HandoffList, type HandoffView } from "@/lib/handoff"
+import { approvalState, liveView, releaseBlock, shownTask, type HandoffList, type HandoffView } from "@/lib/handoff"
 import { useNow } from "@/lib/use-now"
 import { parseStageC } from "@/lib/stage-c"
 import { when } from "@/lib/format"
@@ -26,15 +26,19 @@ export function HandoffPage() {
   const [founder, setFounder] = useState<boolean | null>(null)
   const [allowed, setAllowed] = useState<string[] | null>(null)
   const [f, setF] = useState(BLANK)
-  const [key, setKey] = useState<string | null>(null)      // the task this screen releases
-  const [task, setTask] = useState<Task | null>(null)
+  const [key, setKeyState] = useState<string | null>(null)      // the task this screen releases
+  const keyRef = useRef<string | null>(null)                     // the same key, readable from an in-flight read
+  const setKey = (k: string | null) => { keyRef.current = k; setKeyState(k) }
+  const [stored, setTask] = useState<Task | null>(null)
+  const task = shownTask(key, stored)   // never another task's late answer: status, release check and POST agree
   const [lookup, setLookup] = useState("")
   const [busy, setBusy] = useState(false)
 
   const readList = useCallback(() => api<HandoffList>("/desk/handoffs")
     .then(r => { setList(r); setFounder(true) })
     .catch(e => setFounder((e as { status?: number }).status === 403 ? false : null)), [])
-  const readTask = useCallback((k: string) => api<Task>(`/tasks/${encodeURIComponent(k)}`).then(setTask), [])
+  const readTask = useCallback((k: string) => api<Task>(`/tasks/${encodeURIComponent(k)}`)
+    .then(t => { if (keyRef.current === k) setTask(t) }), [])   // the key changed meanwhile: drop the answer
   useEffect(() => {
     void readList()
     api<unknown>("/stage-c/state").then(r => setAllowed(parseStageC(r).code_task_paths ?? [])).catch(() => setAllowed([]))
@@ -84,10 +88,11 @@ export function HandoffPage() {
     setBusy(false)
   }
   const release = async () => {
-    if (!key || block || busy) return
+    if (!task || block || busy) return
+    const k = task.key   // the task whose state is shown and checked above
     setBusy(true)
-    await act(`/tasks/${encodeURIComponent(key)}/handoff`, {}, r => `${key} released to Stage C · ${(r as { id?: string }).id ?? ""}`)
-    await Promise.all([readTask(key).catch(() => undefined), readList()])
+    await act(`/tasks/${encodeURIComponent(k)}/handoff`, {}, r => `${k} released to Stage C · ${(r as { id?: string }).id ?? ""}`)
+    await Promise.all([readTask(k).catch(() => undefined), readList()])
     setBusy(false)
   }
   const reset = () => { setF(BLANK); setKey(null); setTask(null); setLookup(""); setOpened(false) }
