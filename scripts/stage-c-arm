@@ -109,13 +109,15 @@ if [[ "$RUNNING" != false && ( "$ARMED" != true && "$ARMED" != false || "$RUNNIN
 fi
 
 if [ "$ACTION" = ARM ]; then
-  # Already armed for this very task: nothing to do. Armed for another task: re-arm for this one.
-  [ "$ARMED" = true ] && [ "$ARMED_TASK" = "$TASK" ] && exit 0
+  # The pause fence is re-checked on every ARM tick, also for a worker already armed: the API can be recreated with
+  # the fence off while the worker stays armed.
   if [ "$(docker exec company-api printenv CODER_PAUSE_FENCE_ENABLED 2>/dev/null || true)" != true ]; then
     REASON=pause_fence_off
     disarm
     exit 1
   fi
+  # Already armed for this very task: nothing to do. Armed for another task: re-arm for this one.
+  [ "$ARMED" = true ] && [ "$ARMED_TASK" = "$TASK" ] && exit 0
   if [ -L "$OVERRIDE" ]; then log ARM_REFUSED override_symlink "$TASK"; exit 1; fi
   tmp=$(umask 077 && mktemp "$(dirname "$OVERRIDE")/.stage-c-pilot.XXXXXX")
   printf '%s\n' "$OVERRIDE_JSON" > "$tmp"

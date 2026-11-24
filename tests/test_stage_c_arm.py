@@ -106,7 +106,7 @@ case "$*" in
     [ "$FAKE_ERROR" != flag ] && [ "$FAKE_ERROR" != stopped ] || exit 1
     cat "$FAKE_STATE" ;;
   "exec company-worker printenv STAGE_C_ARMED_TASK") [ -s "$FAKE_STATE.task" ] || exit 1; cat "$FAKE_STATE.task" ;;
-  "exec company-api printenv CODER_PAUSE_FENCE_ENABLED") echo true ;;
+  "exec company-api printenv CODER_PAUSE_FENCE_ENABLED") echo "${FAKE_FENCE:-true}" ;;
   inspect*)
     if [ -s "$FAKE_STATE.stopped" ]; then [ "$(cat "$FAKE_STATE.stopped")" = false ] || exit 1; echo false; exit 0; fi
     [ "$FAKE_ERROR" != inspect ] || exit 1; [ "$FAKE_ERROR" = stopped ] && echo false || echo true ;;
@@ -129,7 +129,7 @@ esac
 """
 
 
-def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop=""):
+def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop="", fence="true"):
     bin_, host, root = tmp_path / "bin", tmp_path / "opt", tmp_path / "root"
     for d in (bin_, host, root):
         d.mkdir(exist_ok=True)
@@ -143,7 +143,7 @@ def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop=""
     env = {"PATH": f"{bin_}:/usr/bin:/bin", "STAGE_C_ARM_DIR": str(host),
            "STAGE_C_ARM_OVERRIDE": str(root / "stage-c-pilot.compose.yml"), "FAKE_LOG": str(tmp_path / "log"),
            "FAKE_STATE": str(tmp_path / "state"), "FAKE_DECISION": decision,
-           "FAKE_ERROR": error, "FAKE_COMPOSE_FAIL": str(int(compose_fail)), "FAKE_STOP": stop,
+           "FAKE_ERROR": error, "FAKE_COMPOSE_FAIL": str(int(compose_fail)), "FAKE_STOP": stop, "FAKE_FENCE": fence,
            "FAKE_SNIPPET": str(tmp_path / "snippet.py")}
     out = subprocess.run(["bash", str(ROOT / "scripts/stage-c-arm"), *args], env=env, capture_output=True,
                          text=True, timeout=30)
@@ -169,6 +169,16 @@ def test_sh_arm(tmp_path):
     assert "action=ARM reason=authorized task=TASK-0100" in log
     out, log2, _ = _run(tmp_path, "ARM TASK-0100", "true")                # already armed: nothing more
     assert log2.count("compose") == log.count("compose")
+
+
+def test_sh_already_armed_rechecks_the_pause_fence(tmp_path):
+    """R4a pre-review finding 3: a worker already armed for the requested task is not left armed once the API runs
+    with the pause fence off; every ARM tick re-checks the fence before the already-armed shortcut."""
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false")
+    assert out.returncode == 0 and ovr.exists()
+    out, log2, ovr = _run(tmp_path, "ARM TASK-0100", "true", fence="false")
+    assert out.returncode == 1
+    assert "reason=pause_fence_off" in log2[len(log):] and not ovr.exists()
 
 
 def test_sh_rearms_for_a_new_task(tmp_path):
