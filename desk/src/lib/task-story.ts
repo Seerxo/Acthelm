@@ -2,6 +2,7 @@
 // status, owner, timestamps, error, supervisor verdict and dependencies; nothing is invented and nothing is promoted
 // (REVIEW is never "done", queued is never "running", a missing reason says it is missing).
 import type { TaskDetail, TaskRow, Tone } from "./api"
+import { mergedForReview } from "./accept.ts"
 
 /** Founder-facing groups, in the order the Work page shows them. */
 export type Group = "attention" | "running" | "review" | "next" | "waiting" | "backlog" | "closed"
@@ -25,8 +26,10 @@ export const isActive = (status: string) => !["closed", "backlog"].includes(grou
 
 /** One line for a list row: what happens next. `reason` is a recorded explanation (task error or a needs-you
  *  `why`) when the caller has one; without it a stopped task says where the reason is, not what it might be. */
-export function nextLine(t: Pick<TaskRow, "status" | "agent">, opts: { reason?: string | null; paused?: boolean } = {}): string {
+export function nextLine(t: Pick<TaskRow, "status" | "agent">, opts: { reason?: string | null; paused?: boolean; merged?: boolean } = {}): string {
   const who = t.agent ?? null
+  // A REVIEW task whose verified PR is merged (lib/accept.ts): only the founder's acceptance is left.
+  if (opts.merged && t.status === "REVIEW") return "Merged. Waiting for you to accept it as done"
   switch (t.status) {
     case "WAITING_APPROVAL": return "Waiting for your approval"
     case "BLOCKED": return opts.reason ? `Blocked: ${opts.reason}` : "Blocked. The reason is recorded on the task"
@@ -74,10 +77,12 @@ export function story(t: TaskDetail, opts: { paused?: boolean } = {}): Story {
     : null
   const tone: Tone = stopped ? "danger" : ["WAITING_APPROVAL", "WAITING_EXTERNAL", "REVIEW"].includes(t.status) ? "warning"
     : t.status === "IN_PROGRESS" ? "info" : "neutral"
+  // A merged PR is not "agent finished": only the founder's acceptance is left (DONE is founder-only).
+  const merged = mergedForReview(t)
   const now = t.status === "BLOCKED" ? "Stopped. It will not continue on its own"
     : t.status === "FAILED" ? "Failed. It will not retry on its own"
-    : nextLine({ status: t.status, agent: t.assigned_agent }, { paused: opts.paused })
-  const next = ({
+    : nextLine({ status: t.status, agent: t.assigned_agent }, { paused: opts.paused, merged })
+  const next = merged ? "Accept as done." : ({
     WAITING_APPROVAL: "It continues after the approval is granted in Approvals.",
     BLOCKED: "It stays blocked until the cause is fixed, then it can be re-queued.",
     FAILED: "It will not retry on its own. Reassign it or create a follow-up task.",

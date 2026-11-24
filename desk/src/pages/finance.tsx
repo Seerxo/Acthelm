@@ -1,7 +1,7 @@
 // Money with provenance only. A unit with no revenue source says so; a cost with no recorded
 // amount shows its class, never an invented figure. Data: /desk/state (revenue, portfolio, costs).
 import { pageTitle } from "@/lib/nav"
-import type { ReactNode } from "react"
+import { Children, isValidElement, type ReactElement, type ReactNode } from "react"
 import { ago, humanize, reading, REVENUE_SOURCE, usd, when } from "@/lib/format"
 import { freshLabel, isUnverified, staleSuffix } from "@/lib/freshness"
 import { cn } from "@/lib/utils"
@@ -14,10 +14,24 @@ const money = (v: number | null | undefined) => (v == null ? "—" : usd(v))
 
 export function Stat({ label, value, sub, warn }: { label: string; value: ReactNode; sub?: ReactNode; warn?: boolean }) {
   return (
-    <div className="grid content-start gap-1 bg-card px-4 py-3.5">
+    <div className="grid min-w-0 content-start gap-1 bg-card px-4 py-3.5">
       <span className="eyebrow">{label}</span>
-      <span className={cn("num text-2xl leading-8 font-semibold tracking-[-0.035em]", warn && "text-warning")}>{value}</span>
-      {sub && <span className="truncate text-xs text-muted-foreground">{sub}</span>}
+      <span className={cn("num text-2xl leading-8 font-semibold tracking-[-0.035em] [overflow-wrap:anywhere]", warn && "text-warning")}>{value}</span>
+      {sub && <span className="text-xs [overflow-wrap:anywhere] text-muted-foreground">{sub}</span>}
+    </div>
+  )
+}
+
+/** A grid of Stats where only reported figures get a cell; every "—" figure is named once on one quiet line
+ *  ("Not reported: …"), so a page of empty cards becomes one sentence. Nothing is hidden or turned into 0. */
+export function StatGroup({ children, label }: { children: ReactNode; label?: string }) {
+  const all = Children.toArray(children).filter(isValidElement) as ReactElement<{ label: string; value: ReactNode }>[]
+  const shown = all.filter(c => c.props.value !== "—"), missing = all.filter(c => c.props.value === "—").map(c => c.props.label)
+  return (
+    <div className="grid gap-2" aria-label={label}>
+      {shown.length > 0 && <div className={cn("grid grid-cols-2 gap-px overflow-hidden rounded-xl border bg-border",
+        shown.length >= 4 ? "sm:grid-cols-4" : shown.length === 3 ? "sm:grid-cols-3" : "")}>{shown}</div>}
+      {missing.length > 0 && <p className="text-xs text-muted-foreground"><span className="font-medium text-foreground">Not reported:</span> {missing.join(", ")}</p>}
     </div>
   )
 }
@@ -41,7 +55,7 @@ export function Revenue() {
   const anyStale = r.freshness === "STALE"
   return (
     <div className="grid gap-2">
-      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border bg-border sm:grid-cols-4">
+      <StatGroup>
         <Stat label="All time" value={money(r.total)} sub={age("revenue", "all_time")} warn={stale("total")} />
         <Stat label="This month" value={money(r.month)} sub={age("revenue", "mtd")} warn={stale("month")} />
         <Stat label="Today" value={money(r.today)} sub={age("revenue", "today")} warn={stale("today")} />
@@ -51,8 +65,8 @@ export function Revenue() {
         <Stat label="Cancelled this month" value={count("cancellations", "mtd") ?? "—"} sub={age("cancellations", "mtd")} warn={countStale("cancellations", "mtd")} />
         <Stat label="Source" value={<span className="text-sm font-medium">{r.source}</span>}
           sub={<span className={cn(anyStale && "text-warning")}>{anyStale && "partly stale · "}read-only · hourly</span>} />
-      </div>
-      <p className="text-xs text-muted-foreground">Seerxo via Polar, read-only, hourly. Amounts in {r.unit ?? "the source currency"}. "—" means the source did not report that value.</p>
+      </StatGroup>
+      <p className="text-xs text-muted-foreground">Amounts in {r.unit ?? "the source currency"}.</p>
     </div>
   )
 }
@@ -62,7 +76,7 @@ function ByUnit() {
   const d = useData()
   const { go } = useDesk()
   const units = d.portfolio ?? []
-  if (!units.length) return <Calm title="No business units recorded">Units appear once the company records them. Nothing is estimated while none are recorded.</Calm>
+  if (!units.length) return <Calm title="No business units recorded" />
   const money = (m: ReturnType<typeof reading>, empty: ReactNode) => !m ? empty : (
     <span className={cn(isUnverified(m) && "text-warning")}>{usd(m.value)}
       {isUnverified(m) && <span className="block text-xs">{freshLabel(m)} · {ago(m.observed_at)} ago</span>}</span>)
@@ -99,21 +113,21 @@ function Costs() {
       <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm">
         <Muted>New spend created by agents</Muted>
         <b className={cn("num text-base", c.new_autonomous_spend_usd > 0 && "text-destructive")}>{usd(c.new_autonomous_spend_usd)}</b>
-        <Muted className="text-xs">must stay $0.00: agents never create, raise or repurpose a cost</Muted>
+        <Muted className="text-xs">must stay $0.00</Muted>
       </div>
       <DataRows label="Cost items" rows={c.items} rowKey={i => i.key} titleHead="Item" title={i => humanize(i.key)}
         cols={[
           { head: "Class", className: "text-sm", cell: i => humanize(i.class) },
           { head: "Note", className: "text-sm whitespace-normal text-muted-foreground", cell: i => i.note ?? i.purpose ?? "—" },
         ]} />
-      <p className="text-xs text-muted-foreground">Amounts are not recorded in Company OS, so no profit figure is shown. Classes come from agents/cost_policy.yaml.</p>
+      <p className="text-xs text-muted-foreground">Amounts are not recorded, so no profit figure is shown.</p>
     </div>
   )
 }
 
 export function FinancePage() {
   return <>
-    <PageHeader title={pageTitle("finance")} description="Revenue and costs, each with its source." />
+    <PageHeader title={pageTitle("finance")} />
     <Section title="Revenue"><Revenue /></Section>
     <Section title="By business unit"><ByUnit /></Section>
     <Section title="Costs"><Costs /></Section>

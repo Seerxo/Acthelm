@@ -11,7 +11,7 @@ test("the stage list mirrors app/stage_c.py in order (ABANDONED is terminal and 
 })
 
 test("a mission's position and evidence come only from its own record", () => {
-  const v = deliveryView(imp({ stage: "MERGED", pr_number: 309, ci_state: "passed" }))
+  const v = deliveryView({ ...imp({ stage: "MERGED", pr_number: 309, ci_state: "passed" }), pr_verified: true })
   assert.deepEqual([v.index, v.label, v.tone, v.evidence], [8, "Merged", "success", ["PR #309", "CI passed"]])
   assert.deepEqual(deliveryView(imp({})).evidence, [])
 })
@@ -22,4 +22,10 @@ test("a failed check is danger; ready to merge waits on the founder; an unknown 
   assert.equal(deliveryView(imp({ stage: "READY_TO_MERGE" })).tone, "warning")
   const u = deliveryView(imp({ stage: "WEIRD" }))
   assert.deepEqual([u.index, u.label, u.tone], [null, "Unknown stage WEIRD", "warning"])
+})
+
+test("a PR number is shown only when the API verified it; missing or false reads unverified, with no number", () => {
+  assert.deepEqual(deliveryView(imp({ pr_number: 12 })).evidence, ["PR unverified"])
+  assert.deepEqual(deliveryView({ ...imp({ pr_number: 12 }), pr_verified: false }).evidence, ["PR unverified"])
+  assert.deepEqual(deliveryView({ ...imp({ pr_number: 12 }), pr_verified: true }).evidence, ["PR #12"])
 })

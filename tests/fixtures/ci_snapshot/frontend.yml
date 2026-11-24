@@ -33,12 +33,25 @@ jobs:
           cache-dependency-path: desk/package-lock.json
       - name: Install frontend dependencies
         run: npm ci --prefix desk
+      # The image builds the Desk from desk/ (Dockerfile `desk` stage); app/static in git is a frozen old copy that
+      # is never served. Build from an empty app/static so the check below sees only what this build produced.
       - name: Build Founder Desk
-        run: npm run build --prefix desk
-      - name: Verify committed production assets
         run: |
-          git diff --exit-code -- app/static
-          test -z "$(git ls-files --others --exclude-standard -- app/static)"
+          rm -rf app/static && mkdir app/static
+          npm run build --prefix desk
+      # This replaced the old "rebuilt assets == committed assets" diff on purpose: the committed app/static is
+      # excluded from the image build context (.dockerignore) and never served, so matching it proved nothing about
+      # what production serves. The served bundle is verified by tests/test_desk_image_bundle.py: it asserts that
+      # app/static is outside the build context and that the api stage copies app/static only from the Dockerfile
+      # `desk` stage, and python-tests.yml ("Real Desk image build serves the desk stage, not the git copy") builds
+      # the real image with an altered git desk.html and requires every served file to equal the desk stage's bytes.
+      # This step only checks that this build produced the six expected files.
+      - name: Verify the built Desk bundle
+        run: |
+          for f in desk.html manifest.webmanifest sw.js icons/apple-touch-icon.png icons/sez-192.png icons/sez-512.png; do
+            test -s "app/static/$f" || { echo "missing built asset: $f"; exit 1; }
+          done
+          test "$(find app/static -type f | wc -l)" -eq 6
       - name: Founder Desk unit tests
         run: npm test --prefix desk
       - name: Founder Desk lint

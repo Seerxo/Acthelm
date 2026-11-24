@@ -151,7 +151,7 @@ def test_frontend_tests_run_in_exactly_one_place():
     root = Path(__file__).resolve().parents[1]
     assert not (root / ".circleci").exists()            # the only CI is GitHub Actions (frontend.yml, python-tests.yml)
     frontend = (root / ".github/workflows/frontend.yml").read_text()
-    for step in ("npm ci --prefix desk", "npm run build --prefix desk", "git diff --exit-code -- app/static",
+    for step in ("npm ci --prefix desk", "npm run build --prefix desk", "Verify the built Desk bundle",
                  "npm test --prefix desk", "npm run lint --prefix desk"):
         assert step in frontend
 

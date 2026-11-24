@@ -3,6 +3,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import type { DeskState } from "./api.ts"
 import { operating } from "./operating.ts"
+import { needsYou } from "./dashboard.ts"
 
 const NOW = Date.parse("2026-10-15T12:00:00Z")
 const task = (status: string, key = status) => ({ key, title: key, status, priority: "P2", risk: "LOW", agent: "research", project: null,
@@ -115,4 +116,29 @@ test("System order: failing first, then late, then unknown; only verified checks
   assert.deepEqual(problems.map(x => x.key), ["down", "late", "unknown", "note"])
   assert.deepEqual(verified.map(x => x.key), ["ok"])
   assert.deepEqual(byUrgency([]), { problems: [], verified: [] })
+})
+
+test("Home's headline and button count the same merged list as the Decisions panel", () => {
+  const base = { stale: false, now: NOW }
+  // The demo shape: 1 critical + 1 warning API row, plus stopped, awaiting-approval and review tasks the Desk adds.
+  const d = state({ needs_you: [need("critical"), need("warning")],
+    tasks: [task("BLOCKED", "T-1"), task("WAITING_APPROVAL", "T-2"), task("REVIEW", "T-3")] })
+  const { items } = needsYou(d, null)
+  assert.equal(items.length, 5)
+  const o = operating(d, { ...base, decisions: items })
+  assert.equal(o.headline, "1 critical issue needs you")   // only critical-level items
+  assert.equal(o.primary.label, `Review ${items.length} items`)
+  assert.deepEqual(o.primary.target, { page: "needs-you" })
+  const dec = state({ needs_you: [need("warning")], tasks: [task("REVIEW", "T-3")] })
+  assert.equal(operating(dec, { ...base, decisions: needsYou(dec, null).items }).headline, "2 items need your decision")
+  // Desk-only items on an otherwise healthy company: never "operating normally".
+  const quiet = state({ tasks: [task("REVIEW", "T-3"), task("REVIEW", "T-4")] })
+  const q = operating(quiet, { ...base, decisions: needsYou(quiet, null).items })
+  assert.equal(q.headline, "2 items need you")
+  assert.equal(q.primary.label, "Review 2 items")
+  // A review item never hides a stopped worker, and the API queue still decides "not reported".
+  const down = state({ worker: { status: "STALE", heartbeat_at: "2026-10-15T11:00:00Z" }, tasks: [task("REVIEW", "T-3")] })
+  assert.equal(operating(down, { ...base, decisions: needsYou(down, null).items }).headline, "Automation has stopped")
+  const unrep = state({ needs_you: undefined, tasks: [task("REVIEW", "T-3")] })
+  assert.equal(operating(unrep, { ...base, decisions: needsYou(unrep, null).items }).headline, "Attention queue not reported")
 })

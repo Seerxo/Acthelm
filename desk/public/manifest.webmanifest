@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "SEZ Company",
-  "short_name": "SEZ",
-  "description": "Founder Desk for SEZ Company",
+  "name": "Acthelm Desk",
+  "short_name": "Acthelm",
+  "description": "Founder Desk for Acthelm",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

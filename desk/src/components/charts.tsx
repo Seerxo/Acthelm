@@ -21,7 +21,7 @@ export function RunsChart({ series, height = "h-56" }: { series: NonNullable<Des
   if (!total) return <Muted>No agent runs in the last 14 days.</Muted>
   return (
     <div className="grid gap-2">
-      <p className="text-xs text-muted-foreground"><b className="text-foreground">{total}</b> runs · <b className="text-foreground">{done ? Math.round(ok / done * 100) : 0}%</b> success</p>
+      <p className="text-xs text-muted-foreground"><b className="text-foreground">{total}</b> runs · {done ? <><b className="text-foreground">{Math.round(ok / done * 100)}%</b> success</> : "no finished runs yet"}</p>
       <ChartContainer config={runConfig} className={cn("aspect-auto w-full", height)}>
         <BarChart data={rows} margin={{ left: -20, right: 4 }}>
           <CartesianGrid vertical={false} />
@@ -61,7 +61,7 @@ export function PipelineChart() {
           <ChartTooltip content={<ChartTooltipContent nameKey="label" hideLabel />} />
           <Pie data={parts.filter(p => p.value)} dataKey="value" nameKey="label" innerRadius={48} outerRadius={68} strokeWidth={2} paddingAngle={2} isAnimationActive={false} />
           <text x="50%" y="48%" textAnchor="middle" className="fill-foreground text-2xl font-semibold">{total}</text>
-          <text x="50%" y="62%" textAnchor="middle" className="fill-muted-foreground text-[10px] tracking-wider">TASKS</text>
+          <text x="50%" y="62%" textAnchor="middle" className="fill-muted-foreground text-[10px] tracking-wider">{data!.task_counts ? "TASKS" : "RECENT TASKS"}</text>
         </PieChart>
       </ChartContainer>
       <ul className="grid flex-1 gap-1.5 text-sm">
