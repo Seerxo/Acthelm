@@ -331,6 +331,36 @@ def test_reverify(w, change):
 
 
 
+def _depend(w, status):
+    """TASK-0001 depends on TASK-0002 in production (Stage C imports no dependency records)."""
+    with Session(w.prod) as s:
+        main_task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        dep = s.scalar(select(models.Task).where(models.Task.key == "TASK-0002"))
+        if dep is None:
+            dep = models.Task(key="TASK-0002", title="prerequisite", success_criteria="done", status=status)
+            s.add(dep)
+            s.flush()
+            s.add(models.TaskDependency(task_id=main_task.id, depends_on_id=dep.id))
+        dep.status = status
+        s.commit()
+
+
+def test_open_dependencies_hold_the_handoff_back(w):
+    """R4a pre-review finding 2: the handoff dropped task dependencies, so an imported task could run while its
+    production prerequisites were unmet. Release (and renewal) refuses while any dependency is not DONE, and a
+    dependency reopened after the release refuses delivery: nothing reaches Stage C."""
+    _depend(w, enums.TaskStatus.READY)
+    r = w.release()
+    assert r.status_code == 409 and "DEPENDENCIES_OPEN" in r.text
+    assert "remote_stage_c" not in w.prod_task().context and w.calls == []
+    _depend(w, enums.TaskStatus.DONE)
+    assert w.release().status_code == 201
+    _depend(w, enums.TaskStatus.IN_PROGRESS)                      # reopened after the founder's release
+    out = w.sync()["requests"]
+    assert out[0]["outcome"] == "DEPENDENCIES_OPEN" and w.calls == [] and w.sc_tasks() == []
+    assert w.prod_task().context["remote_stage_c"]["delivery"] == "REFUSED"
+
+
 @pytest.mark.parametrize("change", ["expired", "edited"])
 def test_the_founder_renews_an_expired_or_edited_release(w, change):
     """R3 finding 4: a release refused for RELEASE_EXPIRED / TASK_CHANGED was stuck for good. The founder's own new

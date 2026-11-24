@@ -35,7 +35,7 @@ from typing import Callable, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -285,6 +285,8 @@ def _eligible_text(db: Session, task: models.Task) -> dict:
         raise HandoffError(409, "NOT_ELIGIBLE")
     if stage_c_worker.scope_refused(scope, set(stage_c_worker.SAFE_FILES)):
         raise HandoffError(422, "SCOPE_REFUSED")
+    if _open_dependencies(db, task):
+        raise HandoffError(409, "DEPENDENCIES_OPEN")
     try:
         text = PacketTask(title=" ".join((task.title or "").split()), objective=task.objective or "",
                           success_criteria=task.success_criteria or "", paths=list(scope["paths"]),
@@ -292,6 +294,15 @@ def _eligible_text(db: Session, task: models.Task) -> dict:
     except ValidationError:
         raise HandoffError(422, "TASK_INCOMPLETE")
     return text.model_dump()
+
+
+def _open_dependencies(db: Session, task: models.Task) -> bool:
+    """Stage C imports the task without its dependency records, so production holds it back until every task it
+    depends on is DONE: at release (and renewal), and again at delivery and activation (delivery_denial)."""
+    return db.scalar(select(func.count()).select_from(models.TaskDependency)
+                     .join(models.Task, models.Task.id == models.TaskDependency.depends_on_id)
+                     .where(models.TaskDependency.task_id == task.id,
+                            models.Task.status != enums.TaskStatus.DONE)) > 0
 
 
 def release(db: Session, task: models.Task, *, founder: str, now: datetime | None = None) -> dict:
@@ -385,6 +396,8 @@ def delivery_denial(db: Session, task: models.Task, now: datetime) -> str | None
         return "RELEASE_WITHDRAWN"
     if source_digest(task) != remote.get("source_sha256"):
         return "TASK_CHANGED"
+    if _open_dependencies(db, task):
+        return "DEPENDENCIES_OPEN"
     expires = _utc(packet.get("expires_at"))
     if expires is None or now >= expires:
         return "RELEASE_EXPIRED"
