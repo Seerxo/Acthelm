@@ -727,7 +727,13 @@ def _cancel(db: Session, task_id: int, transport: Transport, now: datetime) -> d
     remote = _remote(task) if task is not None else None
     if remote is None:
         return {"task_id": task_id, "kind": "cancel", "outcome": "SKIPPED"}
-    hid, sha = remote["id"], remote["payload_sha256"]
+    # A renewal keeps aside the record that reached Stage C (release); that import may be live there (its activation
+    # reply was lost). It is withdrawn first, by its own id, and the task's cancellation is ACKNOWLEDGED only after
+    # both: cancelling only the new id would leave the old task and its grant active on Stage C.
+    old = remote.get("superseded")
+    old = old if isinstance(old, dict) and old.get("remote_task_key") and old.get("cancellation") != "ACKNOWLEDGED" \
+        else None
+    hid, sha = (old["id"], old["payload_sha256"]) if old else (remote["id"], remote["payload_sha256"])
     db.commit()
     path = f"{API_PREFIX}{hid}/cancel"
     status, body, sig = transport("POST", path, canonical({"payload_sha256": sha, "reason": "PRODUCTION_CANCELLED"}))
@@ -745,6 +751,14 @@ def _cancel(db: Session, task_id: int, transport: Transport, now: datetime) -> d
                     next_attempt_at=(now + _backoff(failures)).isoformat())
         db.commit()
         return {"task": task.key, "kind": "cancel", "outcome": code}   # "remote stop unconfirmed" until acknowledged
+    if old:
+        _set_remote(task, superseded={**remote["superseded"], "cancellation": "ACKNOWLEDGED"}, last_error_code=None,
+                    last_attempt_at=now.isoformat(), next_attempt_at=None)
+        audit.record(db, actor="company-worker", action="handoff.cancel_acknowledged", entity_type="task",
+                     entity_key=task.key, task_id=task.id,
+                     after={"id": hid, "remote_task_key": ack.task_key, "superseded": True})
+        db.commit()
+        return {"task": task.key, "kind": "cancel", "outcome": "ACKNOWLEDGED_SUPERSEDED"}
     _set_remote(task, cancellation="ACKNOWLEDGED", last_error_code=None, last_attempt_at=now.isoformat())
     audit.record(db, actor="company-worker", action="handoff.cancel_acknowledged", entity_type="task",
                  entity_key=task.key, task_id=task.id, after={"id": hid, "remote_task_key": ack.task_key})

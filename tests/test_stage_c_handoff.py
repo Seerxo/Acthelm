@@ -508,6 +508,28 @@ def test_renew_lost_activation_ack(w):
     assert w.calls[-1] == ("POST", f"{h.API_PREFIX}{old['id']}/cancel") and _open_sc(w) == []
 
 
+def test_cancel_before_renewal_delivery_withdraws_the_live_import(w):
+    """R4a pre-review finding 1: Stage C activated the old import (its ack lost), the founder renewed, then cancelled
+    before the renewed packet was delivered. The cancellation must withdraw the live old import by its own id, not
+    only tombstone the new id; the task's cancellation is acknowledged only after both."""
+    old = w.release().json()
+    w.sync()
+    assert _sc_activate(w, old["id"], old["payload_sha256"])["activation"] == "ACTIVATED"
+    w.sync(now=datetime.now(timezone.utc) + timedelta(hours=25))
+    new = w.release().json()
+    assert new["id"] != old["id"] and len(_open_sc(w)) == 1
+    with w.on("prod"):
+        assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
+                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 200
+    assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED_SUPERSEDED"
+    assert w.calls[-1] == ("POST", f"{h.API_PREFIX}{old['id']}/cancel") and _open_sc(w) == []
+    assert w.prod_task().context["remote_stage_c"]["cancellation"] != "ACKNOWLEDGED"
+    assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED"
+    assert w.calls[-1] == ("POST", f"{h.API_PREFIX}{new['id']}/cancel")
+    assert w.prod_task().context["remote_stage_c"]["cancellation"] == "ACKNOWLEDGED"
+    assert w.sync()["requests"] == []
+
+
 def test_renew_twice_keeps_live_id(w):
     """A renewal that itself expired before delivery is renewed again: the record that reached Stage C is carried
     forward, so the live import is the one restored."""
