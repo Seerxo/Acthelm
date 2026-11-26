@@ -307,8 +307,15 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
   otherwise the tick logs `DISARM_FAILED` and exits 1 (the override is removed either way). Any read error, and any
   Docker call that fails or times out (even after printing an answer), disarms. A tick that already matches changes
   nothing; a worker already armed for the task is kept only while it runs the pinned worker image and source SHA.
-  A worker verified as stopped is never started by ARM (`ARM_SKIPPED worker_stopped`); restarting it is the operator's
-  step.
+  A worker verified as stopped is never started by ARM (`ARM_SKIPPED worker_stopped`). The supported restart is
+  `flock /run/stage-c-arm.lock /opt/company-os/scripts/stage-c-arm --recreate`: it recreates the worker from the
+  pinned images without the override (unarmed) and deletes the override; the next tick arms it only on an ARM
+  decision. Never `docker start company-worker`: a stopped container keeps the environment it last ran with, so a
+  formerly armed one would start armed. Documentation cannot prevent that manual command; what bounds it is the next
+  tick (it disarms or re-arms against the current decision) and the worker's own checks below, which refuse a write
+  without the armed task's valid one-task grant (revoked, expired or consumed grants authorize nothing).
+  An override path that is a symlink is never written through: the worker is disarmed (`override_symlink`), even when
+  it is already armed for the requested task, and only the link is removed.
 - Each arm/disarm logs one journal line (`journalctl -t stage-c-arm`): time, action, reason code, task key.
   `scripts/stage-c-arm --dry-run` prints the decision and the worker state and changes nothing.
 - Stop Pilot takes effect on the next tick, normally within one or two timer periods (roughly 20 to 40 seconds,

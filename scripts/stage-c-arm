@@ -8,17 +8,21 @@
 # This script only performs the Compose action, exactly as the manual pilot did. It is idempotent: when the
 # worker already matches the decision it changes nothing. Every arm/disarm logs one line to syslog/journal.
 #
-# Usage: stage-c-arm [--dry-run]     (--dry-run prints the decision and the worker state, changes nothing)
+# Usage: stage-c-arm [--dry-run|--recreate]
+#   --dry-run   prints the decision and the worker state, changes nothing
+#   --recreate  the supported way to start a stopped worker again: recreates it from the pinned images WITHOUT the
+#               override (unarmed), deletes the override; the next tick arms it only if the decision is ARM
 set -euo pipefail
 export LC_ALL=C
 
 DIR=${STAGE_C_ARM_DIR:-/opt/company-os}
 OVERRIDE=${STAGE_C_ARM_OVERRIDE:-/root/stage-c-pilot.compose.yml}
-DRY=0
+DRY=0; RECREATE=0
 case "${1:-}" in
   "") ;;
   --dry-run) DRY=1 ;;
-  *) echo "usage: stage-c-arm [--dry-run]" >&2; exit 2 ;;
+  --recreate) RECREATE=1 ;;
+  *) echo "usage: stage-c-arm [--dry-run|--recreate]" >&2; exit 2 ;;
 esac
 cd "$DIR"
 
@@ -95,6 +99,7 @@ compose() {  # the manual pilot command; extra -f files come first
 disarm() {
   if [ "$INPUTS_OK" = 1 ] && compose >/dev/null 2>&1; then
     rm -f -- "$OVERRIDE"
+    RECREATED=1
     log DISARM "$REASON" "$TASK"
   else
     # Cannot recreate it safely (unreadable image pins or a Compose failure): stop it. A stopped worker
@@ -113,6 +118,15 @@ disarm() {
   fi
 }
 
+# Operator restart: never `docker start` (a stopped container keeps the environment it was armed with). disarm() is
+# the override-free recreate from the pinned images; if that fails the worker is stopped and read back as usual.
+if [ "$RECREATE" = 1 ]; then
+  REASON=operator_recreate; TASK=-; RECREATED=0
+  disarm
+  [ "$RECREATED" = 1 ] || exit 1      # not recreated: the worker was stopped (or DISARM_FAILED), never left armed
+  exit 0
+fi
+
 # An unreadable flag or container inspection never proves the worker is safely off. A worker verified as not
 # running is off (printenv fails on a stopped container): leave it stopped, the founder may have stopped it.
 if [[ "$RUNNING" != false && ( "$ARMED" != true && "$ARMED" != false || "$RUNNING" != true ) ]]; then
@@ -124,11 +138,19 @@ fi
 
 if [ "$ACTION" = ARM ]; then
   # A worker verified as stopped stays stopped: the operator stopped it on purpose, and ARM never restarts it. No
-  # override is left behind; starting the worker again is the operator's own step (`docker start company-worker`).
+  # override is left behind. Starting it again is the operator's `stage-c-arm --recreate` (unarmed, see above).
   if [ "$RUNNING" = false ]; then
     rm -f -- "$OVERRIDE"
     log ARM_SKIPPED worker_stopped "$TASK"
     exit 0
+  fi
+  # An override path that is a symlink is never written through, and is checked before the already-armed shortcut:
+  # whatever this worker is armed for, it is recreated unarmed (or stopped and read back; DISARM_FAILED otherwise).
+  # rm -f in disarm() removes the link itself, never its target.
+  if [ -L "$OVERRIDE" ]; then
+    REASON=override_symlink
+    disarm
+    exit 1
   fi
   # The pause fence is re-checked on every ARM tick, also for a worker already armed: the API can be recreated with
   # the fence off while the worker stays armed.
@@ -145,7 +167,6 @@ if [ "$ACTION" = ARM ]; then
   WSHA=$(docker exec company-worker printenv COMPANY_OS_GIT_SHA 2>/dev/null) || WSHA=-
   EXP_WIMG=$(printf '%s\n' "${IMAGES[@]}" | sed -n 's/^COMPANY_OS_IMAGE_WORKER=//p')
   [ "$ARMED" = true ] && [ "$ARMED_TASK" = "$TASK" ] && [ "$WIMG" = "$EXP_WIMG" ] && [ "$WSHA" = "$SHA" ] && exit 0
-  if [ -L "$OVERRIDE" ]; then log ARM_REFUSED override_symlink "$TASK"; exit 1; fi
   tmp=$(umask 077 && mktemp "$(dirname "$OVERRIDE")/.stage-c-pilot.XXXXXX")
   printf '%s\n' "$OVERRIDE_JSON" > "$tmp"
   chmod 600 "$tmp"

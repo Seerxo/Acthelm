@@ -464,3 +464,24 @@ def test_denied_authorization_with_capacity_output_never_claims_or_refunds(L, mo
     assert results == [] and refunds == [] and standing(db).value["used"]["count"] == 0
     assert "stage-c.standing.consume" not in audit_actions(db)
     assert "stage-c.standing.refund" not in audit_actions(db)
+
+
+@pytest.mark.parametrize("how", ["revoked", "expired"])
+def test_a_restarted_armed_worker_cannot_write_on_a_revoked_or_expired_grant(monkeypatch, tmp_path, how):
+    """R4a-1v4 review finding 2: a stopped armed worker that is `docker start`ed keeps STAGE_C_ARMED_TASK and the
+    write flag until the next tick. Its own checks still refuse the armed task once its one-task grant is revoked or
+    expired, whatever standing grant exists, and spend nothing."""
+    db, x, ps = armed(monkeypatch, tmp_path)
+    control.issue_standing(db, [PATH], SHA_A, founder=FOUNDER_ID, max_per_day=3)
+    control.authorize_pilot(db, x.key, SHA_A, founder=FOUNDER_ID)
+    monkeypatch.setenv(control.ARMED_TASK_ENV, x.key)
+    now = datetime.now(timezone.utc)
+    if how == "revoked":
+        control.revoke_pilot_authorization(db, actor=FOUNDER_ID)
+    else:
+        now += timedelta(minutes=31)
+    denial = control.write_authorization_denial(db, x, SHA_A, now)
+    assert denial is not None and denial.startswith("stage_c_authorization_")
+    assert control.consume_write_authorization(db, x, SHA_A, 9, now) == denial
+    assert standing(db).value["used"]["count"] == 0
+    assert "stage-c.standing.consume" not in audit_actions(db)

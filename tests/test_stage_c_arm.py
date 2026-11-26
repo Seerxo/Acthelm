@@ -154,7 +154,9 @@ def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop=""
     env = {"PATH": f"{bin_}:/usr/bin:/bin", "STAGE_C_ARM_DIR": str(host),
            "STAGE_C_ARM_OVERRIDE": str(root / "stage-c-pilot.compose.yml"), "FAKE_LOG": str(tmp_path / "log"),
            "FAKE_STATE": str(tmp_path / "state"), "FAKE_DECISION": decision,
-           "FAKE_ERROR": error, "FAKE_COMPOSE_FAIL": str(int(compose_fail)), "FAKE_STOP": stop, "FAKE_FENCE": fence, "FAKE_HANG": hang, "STAGE_C_ARM_DOCKER_TIMEOUT": "1", **(extra or {}),
+           "FAKE_ERROR": error, "FAKE_COMPOSE_FAIL": str(int(compose_fail)), "FAKE_STOP": stop, "FAKE_FENCE": fence, "FAKE_HANG": hang,
+           # 1 s only where a call is meant to hang: under load a healthy fake call can take longer than that
+           "STAGE_C_ARM_DOCKER_TIMEOUT": "1" if hang else "10", **(extra or {}),
            "FAKE_SNIPPET": str(tmp_path / "snippet.py")}
     out = subprocess.run(["bash", str(ROOT / "scripts/stage-c-arm"), *args], env=env, capture_output=True,
                          text=True, timeout=30)
@@ -341,3 +343,65 @@ def test_sh_stopped(tmp_path):
     out, log, ovr = _run(tmp_path, "DISARM stage_c_authorization_missing", "true", error="stopped")
     assert out.returncode == 0, out.stderr
     assert not ovr.exists() and "compose" not in log and "docker stop" not in log
+
+
+@pytest.mark.parametrize("case", ["same", "other", "unarmed", "unverified"])
+def test_sh_symlink_override_disarms_before_the_shortcut(tmp_path, case):
+    """R4a-1v4 review finding 1: an override path that is a symlink disarms the worker, also when it is already armed
+    for the very task, image and SHA the decision names (the shortcut runs after this check). Only the link goes."""
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false")
+    assert out.returncode == 0 and ovr.exists()
+    if case == "other":
+        (tmp_path / "state.task").write_text("TASK-0200\n")
+    target = tmp_path / "target.yml"
+    target.write_text("keep me\n")
+    ovr.unlink()
+    ovr.symlink_to(target)
+    out, log2, ovr = _run(tmp_path, "ARM TASK-0100", "false" if case == "unarmed" else "true",
+                          compose_fail=case == "unverified", stop="ignored" if case == "unverified" else "")
+    tail = log2[len(log):]
+    assert out.returncode == 1 and "action=ARM " not in tail and "stage-c-pilot" not in tail
+    assert not ovr.is_symlink() and not ovr.exists() and target.read_text() == "keep me\n"
+    if case == "unverified":
+        assert "action=DISARM_FAILED reason=override_symlink" in tail
+    else:
+        assert "action=DISARM reason=override_symlink task=TASK-0100" in tail
+        assert (tmp_path / "state").read_text().strip() == "false"           # recreated unarmed
+
+
+def test_sh_symlink_override_keeps_a_stopped_worker_stopped(tmp_path):
+    (tmp_path / "root").mkdir()
+    target = tmp_path / "target.yml"
+    target.write_text("keep me\n")
+    (tmp_path / "root/stage-c-pilot.compose.yml").symlink_to(target)
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "true", error="stopped")
+    assert out.returncode == 0 and "compose" not in log and "docker stop" not in log
+    assert not ovr.is_symlink() and target.read_text() == "keep me\n"
+
+
+def test_sh_recreate_starts_a_stopped_armed_worker_unarmed(tmp_path):
+    """R4a-1v4 review finding 2: `docker start` would resume a stopped worker with the environment it was armed with.
+    The supported restart, `stage-c-arm --recreate`, recreates it from the pinned images without the override, and
+    only a later ARM decision arms it again; a revoked authorization leaves it unarmed."""
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false")
+    assert out.returncode == 0 and ovr.exists()
+    (tmp_path / "state.stopped").write_text("false\n")                       # stopped while armed
+    out, log2, ovr = _run(tmp_path, "DISARM stage_c_authorization_missing", "true", "--recreate")
+    tail = log2[len(log):]
+    assert out.returncode == 0, out.stderr
+    assert ("docker compose -p company-os --env-file .env -f docker-compose.yml "
+            "up -d --no-deps --no-build --pull never company-worker") in tail and "stage-c-pilot" not in tail
+    assert "action=DISARM reason=operator_recreate task=-" in tail and not ovr.exists()
+    assert (tmp_path / "state").read_text().strip() == "false" and not (tmp_path / "state.task").exists()
+    assert (tmp_path / "state.image").read_text().strip() == IMAGES["COMPANY_OS_IMAGE_WORKER"]
+    assert (tmp_path / "state.sha").read_text().strip() == SHA_A
+    out, log3, ovr = _run(tmp_path, "DISARM stage_c_authorization_missing", "false")   # next tick: stays unarmed
+    assert out.returncode == 0 and "compose" not in log3[len(log2):] and not ovr.exists()
+
+
+def test_sh_recreate_that_cannot_recreate_fails_and_stops(tmp_path):
+    (tmp_path / "root").mkdir()
+    (tmp_path / "root/stage-c-pilot.compose.yml").write_text(OVERRIDE_JSON)
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "true", "--recreate", compose_fail=True)
+    assert out.returncode == 1 and "action=DISARM_STOP reason=operator_recreate" in log and not ovr.exists()
+    assert f"-f {ovr}" not in log and "docker stop company-worker" in log
