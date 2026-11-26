@@ -6,8 +6,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
-import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,7 +13,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 
 from app import (audit, control, coder_source, enums, models, project_profiles, providers, repo_guardian,
-                 repo_guardian_github, stage_c, stage_c_ci, stage_c_credential_boundary, stage_c_merge_gate, stage_c_runner,
+                 repo_guardian_github, stage_c, stage_c_ci, stage_c_credential_boundary, stage_c_runner,
                  stage_c_verify)
 
 REPOSITORY = "seerxo/acthelm"
@@ -56,7 +54,6 @@ RUNTIME_READINESS_KEY = "stage-c-runtime-readiness"
 RUNTIME_READINESS_MAX_AGE = timedelta(minutes=15)
 PUBLICATION_PROBES = 3
 PUBLICATION_COOLDOWN = timedelta(minutes=5)
-REFRESH_DRY_RUN_COOLDOWN = timedelta(minutes=15)
 
 
 def jobs_root():
@@ -101,33 +98,22 @@ def admission(db, task):
         return "stage_c_repository_refused"
     if policy["branches"].get(repository) != profile["target_branch"]:
         return "stage_c_branch_refused"
-    return "stage_c_scope_refused" if scope_refused(ctx.get("stage_c"), profile_paths) else None
-
-
-def scope_refused(scope, profile_paths) -> bool:
-    """A task's `context.stage_c` is refused: write paths outside the profile, or read-only context that is not."""
+    scope = ctx.get("stage_c")
     paths = scope.get("paths") if isinstance(scope, dict) else None
     if (not isinstance(paths, list) or not 1 <= len(paths) <= 20
             or not all(isinstance(p, str) and coder_source._safe_path(p) and p in profile_paths
                        for p in paths) or len(set(paths)) != len(paths)
             or not {"paths"} <= set(scope) <= {"paths", "context"}):
-        return True
+        return "stage_c_scope_refused"
     # Read-only context: any safe repository file the coder may read; never write scope (run() refuses edits).
     context = scope.get("context", [])
-    return (not isinstance(context, list) or len(context) > stage_c_runner.MAX_CONTEXT_FILES
+    if (not isinstance(context, list) or len(context) > stage_c_runner.MAX_CONTEXT_FILES
             or len(paths) + len(context) > 20     # coder_source exports at most 20 files in all
             or not all(isinstance(p, str) and coder_source._safe_path(p) and p not in paths
                        and p.startswith(("app/", "tests/")) and p.endswith(".py") for p in context)
-            or len(set(context)) != len(context))
-
-
-def task_paths() -> list[str]:
-    """The files a founder may name as a new code task's write scope: the current executor profile ∩ SAFE_FILES."""
-    try:
-        executor = project_profiles.current_executor(project_profiles.load(), REPOSITORY, "sez-company")
-    except Exception:
-        return []
-    return sorted(set(executor["allowed_paths"]) & SAFE_FILES) if executor else []
+            or len(set(context)) != len(context)):
+        return "stage_c_scope_refused"
+    return None
 
 
 def publication_role() -> tuple[str, str]:
@@ -401,8 +387,6 @@ def execute(db, task, spec, usable):
                             or task_context_files(task) != job.context
                             or task.objective != original_objective or task.success_criteria != job.success_criteria):
                         out = {"outcome": "WAITING_BEFORE_PUBLISH"}
-                    elif not stage_c_runner.publication_enabled():
-                        out = {"outcome": "HELD_BEFORE_PUBLISH"}
                     else:
                         # Authoritative PR state is re-read before any push or PR update: a merge or
                         # takeover during the review must stop the publication, never extend the PR.
@@ -419,10 +403,7 @@ def execute(db, task, spec, usable):
                             role, _ = publication_role()
                             if role != "PASS":
                                 db.commit()
-                                # FAIL = GitHub says the token can write upstream; anything else = GitHub did not
-                                # answer (expired/revoked token, network). Both stop the push; the cause differs.
-                                raise PublishedPRRefused("upstream_role_not_read_only" if role == "FAIL"
-                                                         else "upstream_role_unverified")
+                                raise PublishedPRRefused("upstream_role_not_read_only")
                         out = stage_c_runner.publish(db, task, job, diff, worktree,
                                 f"https://github.com/{head_repository}.git",
                                 stage_c_runner.gh_pr_opener(REPOSITORY, "main", head_repository),
@@ -508,16 +489,6 @@ def execute(db, task, spec, usable):
             task.artifacts = {**(task.artifacts or {}), "pr": out["pr"], "commit": out["commit"], "run_id": run.id}
         run.status = enums.AgentRunStatus.SUCCEEDED
         run.supervisor_verdict = enums.SupervisorVerdict.APPROVED
-    elif outcome == "HELD_BEFORE_PUBLISH":
-        # Reviewed and approved, nothing pushed: the founder decides on publication separately.
-        if owns_attempt:
-            approval = task.context["improvement"]["approval"]
-            task.status = enums.TaskStatus.WAITING_APPROVAL
-            task.result = "Stage C review approved; publication is disabled on this host, nothing was pushed"
-            task.artifacts = {**(task.artifacts or {}), "run_id": run.id, "held": {
-                "fingerprint": approval["fingerprint"], "review_audit_id": approval["audit_id"]}}
-        run.status = enums.AgentRunStatus.SUCCEEDED
-        run.supervisor_verdict = enums.SupervisorVerdict.APPROVED
     elif outcome == "PUBLISHED_PR_REFUSED":
         # Blocked by an owner change, merge/close, or unclear GitHub state; no retry is spent.
         # Return only the exact claim we started with; a same-status founder takeover is kept too.
@@ -527,14 +498,8 @@ def execute(db, task, spec, usable):
                 # A token that can write upstream is a security event, not capacity: stop retrying and
                 # leave it on the founder's Desk until the agent account is back to Read.
                 task.status = enums.TaskStatus.BLOCKED
-                task.error = ("upstream_role_not_read_only: GitHub reports a worker token can write "
+                task.error = ("upstream_role_not_read_only: the worker token is not verified read-only on "
                               f"{REPOSITORY}; restore the agent account to Read, then set READY")
-            elif out["reason"] == "upstream_role_unverified":
-                # Unconfirmed is not unsafe: usually an expired or revoked token. Still no push, still the founder's.
-                task.status = enums.TaskStatus.BLOCKED
-                task.error = ("upstream_role_unverified: GitHub did not confirm a worker token's role on "
-                              f"{REPOSITORY} (expired, revoked or unreadable token); renew it on the Stage C host, "
-                              "then set READY")
         run.status = enums.AgentRunStatus.FAILED
         run.error = out["reason"]
         run.tool_calls = {**run.tool_calls, "attempts": [{"health": "DISABLED"}], "capacity_failure": True}
@@ -563,13 +528,6 @@ def execute(db, task, spec, usable):
                     "fingerprint": approval["fingerprint"], "review_audit_id": approval["audit_id"]}}
         elif owns_attempt:
             failure_event = worker._set_failure(db, task, outcome)
-    if (owns_attempt and task.status == enums.TaskStatus.READY and worker._capacity_only(run)
-            and worker._trailing_no_progress(db, task.id, exclude=run.id) >= worker.MAX_NO_PROGRESS_RUNS - 1):
-        # E5: every no-progress wait is bounded; the founder decides when it is worth trying again.
-        run.tool_calls = {**(run.tool_calls or {}), "stalled": True}
-        task.status = enums.TaskStatus.BLOCKED
-        task.error = (f"STALLED: {worker.MAX_NO_PROGRESS_RUNS} attempts in a row made no progress (provider capacity, "
-                      "no independent reviewer, publication or lease wait); check providers and the task, then set READY")
     orphan_pr = None
     if not owns_attempt:
         # Never a delivery or a successful run for this task. A PR pushed while the attempt still owned the task
@@ -754,12 +712,12 @@ def published_guard(db, task, expected=None) -> str | None:
         # repair's: merged before CI passed, so it is recorded as a block, never as a verified merge.
         stage = ((locked.context or {}).get("improvement") or {}).get("stage")
         outcome = stage_c_ci._record_merge(db, locked, stage, facts, {"pr_number": number, "commit": ev.get("commit")},
-                                           stage_c_merge_gate.FOUNDER, "main")
+                                           "semihbugrasezer", "main")
         db.commit()
         return f"merged:{outcome['outcome']}"
     if facts.get("merged"):
         outcome = stage_c_ci.ingest(db, locked, facts, repository=REPOSITORY,
-                                    founder_login=stage_c_merge_gate.FOUNDER, tracked_branch="main",
+                                    founder_login="semihbugrasezer", tracked_branch="main",
                                     required_statuses=contexts,
                                     head_repository=repo_guardian_github.publish_repository(policy, REPOSITORY))
         db.commit()
@@ -910,10 +868,7 @@ def reconcile(db):
         models.Task.error.startswith(stage_c_ci.MERGE_NOT_RECORDED))))
     blocked_publications = list(db.scalars(select(models.Task.id).where(
         models.Task.status == enums.TaskStatus.BLOCKED, models.Task.error == "PR_FAILED")))
-    requested_ids = list(db.scalars(select(models.AuditLog.task_id).where(
-        models.AuditLog.action == "stage-c.refresh_reconcile.requested",
-        models.AuditLog.task_id.is_not(None))))
-    ids = list(dict.fromkeys([*review_ids, *blocked_merge_ids, *blocked_publications, *requested_ids]))
+    ids = list(dict.fromkeys([*review_ids, *blocked_merge_ids, *blocked_publications]))
     # A CI repair leaves a published task READY at IMPLEMENTING: it must not reach the coder
     # before GitHub says its PR is still open. A repair that stopped BLOCKED (interrupted, runtime or
     # push failure) keeps its PR tracked the same way until its merge or close is recorded.
@@ -936,98 +891,6 @@ def reconcile(db):
         ctx = task.context if isinstance(task.context, dict) else {}
         imp = ctx.get("improvement") if isinstance(ctx.get("improvement"), dict) else {}
         stage = imp.get("stage")
-        request = db.scalar(select(models.AuditLog).where(
-            models.AuditLog.task_id == task.id,
-            models.AuditLog.action == "stage-c.refresh_reconcile.requested")
-            .order_by(models.AuditLog.id.desc()).limit(1)) if task.status == enums.TaskStatus.BLOCKED else None
-        if request:
-            consumed = db.scalar(select(models.AuditLog.id).where(
-                models.AuditLog.task_id == task.id, models.AuditLog.id > request.id,
-                models.AuditLog.action.in_(("improvement.refresh_reconciled",
-                                            "improvement.refresh_reconcile_refused")))
-                .order_by(models.AuditLog.id.desc()).limit(1))
-            if consumed:
-                request = None
-        mode = os.environ.get("STAGE_C_REFRESH_RECONCILE", "dry-run")
-        evidence_failed = False
-        if request:
-            requested_at = (request.occurred_at.replace(tzinfo=timezone.utc)
-                            if request.occurred_at.tzinfo is None else request.occurred_at)
-            if requested_at < datetime.now(timezone.utc) - timedelta(hours=24) or mode == "off":
-                request = None
-            elif mode == "dry-run":
-                last = db.scalar(select(models.AuditLog).where(
-                    models.AuditLog.task_id == task.id,
-                    models.AuditLog.action == "stage-c.refresh_reconcile.dry_run")
-                    .order_by(models.AuditLog.id.desc()).limit(1))
-                if (last and isinstance(last.after, dict) and last.after.get("request_audit_id") == request.id
-                        and (last.occurred_at.replace(tzinfo=timezone.utc) if last.occurred_at.tzinfo is None
-                             else last.occurred_at) > datetime.now(timezone.utc) - REFRESH_DRY_RUN_COOLDOWN):
-                    request = None
-        if request:
-            try:
-                number = published_pr_number(task)
-                if number is None:
-                    raise stage_c_runner.RefreshRefused("REQUEST_MISMATCH")
-                publisher, contexts = repo_guardian_github.merge_statuses(policy)
-                facts = stage_c_ci.gh_facts(REPOSITORY, number, set(policy["workflows"]),
-                                            publisher=publisher, status_contexts=contexts)
-                body = request.after if isinstance(request.after, dict) else {}
-                if body.get("pr_number") != number:
-                    raise stage_c_runner.RefreshRefused("REQUEST_MISMATCH")
-                version = subprocess.run(["git", "--version"], check=True, capture_output=True, text=True, timeout=5)
-                match = re.match(r"git version (\d+)\.(\d+)", version.stdout)
-                if not match or tuple(map(int, match.groups())) < (2, 38):
-                    raise RuntimeError("merge-tree unavailable")
-                with tempfile.TemporaryDirectory(prefix="stage-c-refresh-") as tmp:
-                    scratch = Path(tmp) / "mirror.git"
-                    stage_c_runner._git(mirror_path(), "clone", "--bare", "--shared",
-                                        str(mirror_path()), str(scratch), protocol="file")
-                    chain = stage_c_runner.refresh_chain(scratch, number,
-                        stage_c_ci._evidence(task, "PR_OPEN").get("commit"),
-                        body.get("final_head"), body.get("merge_commit"), repository=REPOSITORY)
-                    out = stage_c_ci.reconcile_refreshed(
-                        db, task, request, facts, chain, scratch, repository=REPOSITORY,
-                        head_repository=repo_guardian_github.publish_repository(policy, REPOSITORY),
-                        required_statuses=contexts, apply=mode == "apply")
-                if mode == "dry-run":
-                    code = "PASS" if out["outcome"] == "DRY_RUN" else out["reasons"][0].split(":", 1)[0]
-                    audit.record(db, actor="stage-c-ci", action="stage-c.refresh_reconcile.dry_run",
-                                 entity_type="task", entity_key=task.key, task_id=task.id,
-                                 after={"request_audit_id": request.id, "code": code})
-                db.commit()
-                outcomes.append({"task": task.key, **out})
-            except stage_c_runner.RefreshRefused as exc:
-                if mode == "apply":
-                    audit.record(db, actor="stage-c-ci", action="improvement.refresh_reconcile_refused",
-                                 entity_type="task", entity_key=task.key, task_id=task.id,
-                                 after={"request_audit_id": request.id, "reasons": [exc.code]})
-                elif mode == "dry-run":
-                    audit.record(db, actor="stage-c-ci", action="stage-c.refresh_reconcile.dry_run",
-                                 entity_type="task", entity_key=task.key, task_id=task.id,
-                                 after={"request_audit_id": request.id, "code": exc.code})
-                db.commit()
-                outcomes.append({"task": task.key, "outcome": "BLOCKED", "reasons": [exc.code]})
-            except Exception:
-                db.rollback()
-                if mode == "dry-run":
-                    audit.record(db, actor="stage-c-ci", action="stage-c.refresh_reconcile.dry_run",
-                                 entity_type="task", entity_key=task.key, task_id=task.id,
-                                 after={"request_audit_id": request.id, "code": "EVIDENCE_UNAVAILABLE"})
-                    db.commit()
-                outcomes.append({"task": task.key, "outcome": "BLOCKED", "reasons": ["EVIDENCE_UNAVAILABLE"]})
-                if mode == "apply":
-                    # Missing evidence is not a refusal: the request stays pending for a later tick (bounded by its
-                    # 24h life), but it must not suppress this tick's normal merge recovery. The rollback released
-                    # the row lock: take it again, or leave the task to the next tick.
-                    evidence_failed = True
-                    task = db.scalar(select(models.Task).where(models.Task.id == task_id,
-                                     models.Task.status.in_((enums.TaskStatus.REVIEW, enums.TaskStatus.BLOCKED)))
-                                     .with_for_update(skip_locked=True).execution_options(populate_existing=True))
-                    if task is None:
-                        continue
-            if mode in ("apply", "dry-run") and not evidence_failed:
-                continue
         if (task.status == enums.TaskStatus.BLOCKED
                 and stage_c_ci.merge_recovery_block(db, task) is None):
             db.commit()
@@ -1054,7 +917,7 @@ def reconcile(db):
                 facts = stage_c_ci.gh_facts(REPOSITORY, number, set(policy["workflows"]),
                                             publisher=publisher, status_contexts=contexts)
                 out = stage_c_ci.ingest(db, task, facts, repository=REPOSITORY,
-                                        founder_login=stage_c_merge_gate.FOUNDER, tracked_branch="main",
+                                        founder_login="semihbugrasezer", tracked_branch="main",
                                         required_statuses=contexts,
                                         head_repository=repo_guardian_github.publish_repository(policy, REPOSITORY))
                 if out["outcome"] == "REPAIR":

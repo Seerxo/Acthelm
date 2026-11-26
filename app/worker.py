@@ -28,7 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import (audit, context_builder, control, dispatch, enums, keys, liveness, models, notebook, registry, stage_c,
-                 stage_c_ci, stage_c_handoff, stage_c_runner, stage_c_worker, task_materializer)
+                 stage_c_ci, stage_c_runner, stage_c_worker, task_materializer)
 from app.notify import fingerprint, notifier
 from app.providers import (FALLBACK_HEALTH, RUNNABLE_HEALTH, Health, Provider,
                           ProviderResult, default_providers)
@@ -41,11 +41,6 @@ RUN_TIMEOUT_S = int(os.environ.get("WORKER_RUN_TIMEOUT_S", "600"))
 MAX_TURNS = int(os.environ.get("WORKER_MAX_TURNS", "6"))
 # §37: never retry immediately. Index = attempts already made.
 BACKOFF = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=30))
-# A run with no work result (provider capacity, no independent reviewer, publication or lease wait) spends neither a
-# retry nor the daily budget, so it gets its own backoff and bound. Both are derived from the task's AgentRun rows,
-# so they survive restarts; a run marked `stalled` (the one that blocked the task) resets the count.
-NO_PROGRESS_BACKOFF = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=15), timedelta(minutes=30))
-MAX_NO_PROGRESS_RUNS = 6
 # A run still STARTED this long after it should have been killed belongs to a dead
 # worker (container restart, OOM). Saved results resume finalization; otherwise the task is requeued.
 STALE_AFTER = timedelta(seconds=RUN_TIMEOUT_S + 300)
@@ -223,19 +218,6 @@ def _zero_cost_incident(db: Session, provider: str, why: str) -> None:
 
 # --------------------------------------------------------------------------- work-check
 
-def _trailing_no_progress(db: Session, task_id: int, exclude: int | None = None) -> int:
-    """Consecutive most recent capacity-only runs of a task, up to MAX_NO_PROGRESS_RUNS, stopping at a `stalled` one."""
-    query = select(models.AgentRun).where(models.AgentRun.task_id == task_id)
-    if exclude is not None:
-        query = query.where(models.AgentRun.id != exclude)
-    count = 0
-    for run in db.scalars(query.order_by(models.AgentRun.id.desc()).limit(MAX_NO_PROGRESS_RUNS)).all():
-        if (run.tool_calls or {}).get("stalled") or not _capacity_only(run):
-            break
-        count += 1
-    return count
-
-
 def _capacity_only(run: models.AgentRun) -> bool:
     """No work result: exclude capacity probes, including pre-marker history.
 
@@ -252,8 +234,6 @@ def _admission_gate(db: Session, task: models.Task, specs: dict, *,
                     ) -> tuple[str | None, registry.AgentSpec | None]:
     """Shared safety/dependency gate, independent of execution capacity."""
     ctx = task.context if isinstance(task.context, dict) else {}
-    if stage_c_handoff.released(task):   # B5: Stage C runs it; production never claims or releases it
-        return "handed_off_to_stage_c", None
     if ctx.get("autonomous") is not True:
         return "not_opted_in", None
     if task.risk_level != enums.RiskLevel.LOW or task.approval_required:
@@ -332,9 +312,6 @@ def _eligible(db: Session, task: models.Task, specs: dict) -> tuple[str | None, 
     wait = BACKOFF[min(task.retry_count, len(BACKOFF) - 1)]
     if task.retry_count and last and _aware(last) + wait > _now():
         return "backoff", None
-    idle = _trailing_no_progress(db, task.id) if (task.context or {}).get("write") else 0   # Stage C (E5) only
-    if idle and last and _aware(last) + NO_PROGRESS_BACKOFF[min(idle, len(NO_PROGRESS_BACKOFF)) - 1] > _now():
-        return "no_progress_backoff", None
     return None, spec
 
 
@@ -458,7 +435,7 @@ def release_dependency_waits(db: Session) -> list[str]:
             .execution_options(populate_existing=True)).all()
         for task in parked:
             ctx = task.context if isinstance(task.context, dict) else {}
-            if ctx.get("release_on_dependencies") is not True or stage_c_handoff.released(task):
+            if ctx.get("release_on_dependencies") is not True:
                 continue
             project = db.get(models.Project, task.project_id) if task.project_id else None
             if project and project.status != enums.ProjectStatus.ACTIVE:
@@ -1277,15 +1254,7 @@ def run_once(db: Session, providers: dict[str, Provider] | None = None,
                          "stage_c_foundation": list(stage_c.FOUNDATION), "auto_pr": code_ready,
                          "external_release": ENABLE_AUTOMATIC_EXTERNAL_RELEASE},
                runtime=RUNTIME)
-    paused = control.agents_paused(db)
-    # B5 handoff sender (off by default, a no-op then): cancellations and status reads continue while paused,
-    # new deliveries do not. Deterministic, model-free, bounded per tick; never fails the tick.
-    try:
-        stage_c_handoff.sync(db, paused=paused)
-    except Exception:  # noqa: BLE001
-        db.rollback()
-        log.exception("stage c handoff sync failed")
-    if paused:
+    if control.agents_paused(db):
         _heartbeat(db, last="paused")
         return {"paused": True, "model_calls": 0}
     release_external_waits(db, specs)

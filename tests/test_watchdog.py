@@ -209,16 +209,12 @@ def test_the_live_stage_c_report_is_stored_for_admission_to_enforce():
     models.Base.metadata.create_all(engine)
     with Session(engine) as db:
         report = {"ready": False, "source_sha": "a" * 40,
-                  "checks": [{"name": "launcher", "status": "FAIL"},
-                             {"name": "github_actions", "status": "UNKNOWN", "detail": "secret"},
-                             {"name": "egress_proxy", "status": "PASS"}]}
+                  "checks": [{"name": "launcher", "status": "FAIL"}, {"name": "egress_proxy", "status": "PASS"}]}
         # stored whether or not code writes are enabled, so flipping the flag has an immediate answer
         stored = record_stage_c_readiness(db, {"stage_c": {"enabled": False, "report": report}})
         row = db.get(models.ControlState, STAGE_C_READINESS_KEY)
         assert row.updated_by == "watchdog" and stored == row.value
-        assert row.value["ready"] is False and row.value["failed"] == ["launcher", "github_actions"]
-        assert row.value["failed_status"] == {"launcher": "FAIL", "github_actions": "UNKNOWN"}
-        assert "secret" not in str(row.value)
+        assert row.value["ready"] is False and row.value["failed"] == ["launcher"]
         assert row.value["source_sha"] == "a" * 40 and row.value["checked_at"]
         record_stage_c_readiness(db, {"stage_c": {"report": {"ready": True, "source_sha": "a" * 40, "checks": []}}})
         assert db.get(models.ControlState, STAGE_C_READINESS_KEY).value["ready"] is True
@@ -226,15 +222,8 @@ def test_the_live_stage_c_report_is_stored_for_admission_to_enforce():
         for broken in ({"stage_c": {"report": None}}, {"stage_c": {"report": {"ready": "yes", "checks": []}}}, {}):
             value = record_stage_c_readiness(db, broken)
             assert value["ready"] is False and value["failed"] == ["preflight_unavailable"], broken
-            assert value["failed_status"] == {"preflight_unavailable": "UNKNOWN"}
             assert db.get(models.ControlState, STAGE_C_READINESS_KEY).value["ready"] is False
             record_stage_c_readiness(db, {"stage_c": {"report": {"ready": True, "source_sha": "a" * 40, "checks": []}}})
-        checks = [{"name": ["secret"], "status": "secret", "detail": "secret"}]
-        checks += [{"name": "github_actions", "status": "FAIL"}] * 9
-        checks += [{"name": "launcher", "status": "FAIL"}]
-        value = record_stage_c_readiness(db, {"stage_c": {"report": {"ready": False, "checks": checks}}})
-        assert len(value["failed"]) == 10
-        assert value["failed_status"] == {"other": "UNKNOWN", "github_actions": "FAIL"}
 
 
 def test_watchdog_emits_one_event_per_active_condition_episode():

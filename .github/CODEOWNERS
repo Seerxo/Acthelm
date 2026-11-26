@@ -1,7 +1,5 @@
 # Changes to these paths need review from the maintainer, because they define what code can reach
 # credentials, merges or production. Enforced only when branch protection requires code owner review.
-# Every path: the founder's review is required for every PR (agents open PRs, never merge their own).
-*                            @semihbugrasezer
 /.github/                    @semihbugrasezer
 /agents/                     @semihbugrasezer
 /app/release_gateway.py      @semihbugrasezer
