@@ -42,7 +42,7 @@ from urllib.parse import quote
 
 from sqlalchemy.orm import Session
 
-from app import (audit, coder_diff, coder_source, merge_authorization, models, providers, repo_guardian,
+from app import (audit, coder_diff, coder_source, control, merge_authorization, models, providers, repo_guardian,
                  repo_guardian_github, stage_c)
 from app.redact import (_CREDENTIAL, _CREDENTIAL_SHAPES, _ENV_ASSIGN, _KV_BASE, _WITHHELD,  # noqa: F401 (re-exported)
                         _has_credential, _has_jose_header, _jwts, _must_withhold, _redact, _redact_secrets)
@@ -912,11 +912,18 @@ def _privacy_unchanged(worktree: Path, branch: str, sha: str, base: str, tree: s
             and not _git(worktree, "status", "--porcelain", "--untracked-files=all"))
 
 
-def publication_enabled() -> bool:
-    """Fail closed: only STAGE_C_PUBLISH_ENABLED=true lets an approved result push to the public fork and open a PR.
-    Anything else holds it for the founder before any GitHub call. A held result is not resumed: publishing it later
-    is a new grant and a new run (the founder's separate publication authorization)."""
-    return os.environ.get("STAGE_C_PUBLISH_ENABLED", "false") == "true"   # exactly "true": no case or space folding
+PUBLISH_ENV = "STAGE_C_PUBLISH_ENABLED"
+
+
+def publication_enabled(task_key: str | None) -> bool:
+    """Fail closed: an approved result is pushed to the public fork and opened as a PR only by a worker armed for
+    exactly this task with publication on. Both come from the Start Pilot arm alone (scripts/stage-c-arm's override sets
+    STAGE_C_PUBLISH_ENABLED=true and STAGE_C_ARMED_TASK=<task>; docker-compose.yml pins the flag to "false"), and
+    disarm recreates the worker without them. Anything else holds the result for the founder before any GitHub call.
+    A held result is not resumed: publishing it later is a new grant and a new run."""
+    armed = os.environ.get(control.ARMED_TASK_ENV)
+    return (os.environ.get(PUBLISH_ENV, "false") == "true"   # exactly "true": no case or space folding
+            and isinstance(task_key, str) and bool(task_key) and armed == task_key)
 
 
 def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Path, remote: str,
@@ -933,7 +940,7 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
     The refspec is built here from the validated task key:
     task/<KEY> is only created, or after a repair replaced at exactly the commit this task last
     published, so no one else's work, main or any other ref can be written."""
-    if not publication_enabled():  # the worker holds first; this is the last stop before any push or PR
+    if not publication_enabled(getattr(task, "key", None)):  # the worker holds first; last stop before any push or PR
         return {"outcome": "HELD_BEFORE_PUBLISH"}
     imp = dict((task.context or {}).get("improvement") or {})
     if imp.get("stage") != "INDEPENDENT_REVIEW" or task.key != job.task_key:

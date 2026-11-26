@@ -2,6 +2,9 @@
 // GET /tasks/{key}.remote_stage_c (desk_view). Everything Stage C said is "Stage C reported", never a production fact.
 // The production task of a released handoff stays WAITING_EXTERNAL, so the lane comes from the Stage C report, and
 // without a fresh report (the API's `freshness`, STALE_AFTER 180s) the lane is UNKNOWN, never the last good value.
+// MERGED, VERIFIED and DONE are three facts from three places (app/stage_c_handoff.py): MERGED is Stage C's report of
+// the founder's merge (with main CI on the merge commit), VERIFIED is production's own decision (main CI green AND
+// production itself runs the merge commit), DONE is the founder's close of the production task. Never conflated.
 // Pure functions, parsed defensively: anything missing or unrecognised is null / UNKNOWN. `npm test`.
 import type { Tone } from "./api.ts"
 import { ciView, parseStageC, reviewView, testView, type Task } from "./stage-c.ts"
@@ -34,7 +37,23 @@ export interface Handoff {
   task: Task | null
   authorization: string | null
   write_enabled: boolean | null
-  merge: { state: "NOT_OBSERVED" | "VERIFIED" | "UNKNOWN"; commit: string | null; at: string | null }
+  /** Stage C reported: the founder's merge, and main CI on that merge commit (null unless bound to it). */
+  merge: { state: "NOT_OBSERVED" | "MERGED" | "UNKNOWN"; commit: string | null; at: string | null
+           main_ci: "SUCCESS" | "FAILURE" | "PENDING" | null }
+  /** Production's own decision (never Stage C's): VERIFIED only with green main CI and production running the commit. */
+  verification: { state: "VERIFIED" | "NOT_VERIFIED" | "UNKNOWN"; reason: string | null; production_api_sha: string | null }
+}
+
+export type Delivery = "MERGED" | "VERIFIED" | "DONE"
+export const DELIVERY_LABEL: Record<Delivery, string> = {
+  MERGED: "Merged · Stage C reported", VERIFIED: "Verified · production", DONE: "Done · founder",
+}
+/** How far the change got, each step from its own source: DONE only from the production task status, VERIFIED only from
+ *  production's verification of a fresh report, MERGED only from Stage C's report. null before the founder's merge. */
+export function deliveryOf(h: Handoff): Delivery | null {
+  if (h.status === "DONE") return "DONE"
+  if (h.verification.state === "VERIFIED" && h.freshness === "FRESH") return "VERIFIED"
+  return h.merge.state === "MERGED" ? "MERGED" : null
 }
 
 type Obj = Record<string, unknown>
@@ -50,7 +69,8 @@ const oneOf = <T extends string>(v: unknown, allowed: readonly T[]): T | "UNKNOW
 /** One desk_view dict (`row` = the desk_list row around it). null when there is no handoff. */
 export function parseHandoff(view: unknown, row: unknown = null): Handoff | null {
   if (!view || typeof view !== "object" || Array.isArray(view)) return null
-  const h = obj(view), r = obj(row), snap = obj(h.snapshot), m = obj(snap.merge)
+  const h = obj(view), r = obj(row), snap = obj(h.snapshot), m = obj(snap.merge), v = obj(h.verification)
+  const ci = obj(m.main_ci), commit = sha(m.commit)
   // ponytail: the snapshot task has the /stage-c/state task shape, so the Stage C page's own parser reads it.
   const task = snap.task && typeof snap.task === "object"
     ? parseStageC({ tasks: [{ ...obj(snap.task), key: snap.task_key }] }).tasks![0] : null
@@ -66,7 +86,11 @@ export function parseHandoff(view: unknown, row: unknown = null): Handoff | null
     seq, generated_at: ts(snap.generated_at), task,
     authorization: code(obj(snap.authorization).status),
     write_enabled: typeof obj(snap.runtime).write_enabled === "boolean" ? obj(snap.runtime).write_enabled as boolean : null,
-    merge: { state: h.snapshot ? oneOf(m.state, ["NOT_OBSERVED", "VERIFIED"] as const) : "UNKNOWN", commit: sha(m.commit), at: ts(m.at) },
+    merge: { state: h.snapshot ? oneOf(m.state, ["NOT_OBSERVED", "MERGED"] as const) : "UNKNOWN", commit, at: ts(m.at),
+             main_ci: commit && sha(ci.sha) === commit && ["SUCCESS", "FAILURE", "PENDING"].includes(ci.state as string)
+               ? ci.state as "SUCCESS" | "FAILURE" | "PENDING" : null },
+    verification: { state: oneOf(v.state, ["VERIFIED", "NOT_VERIFIED"] as const), reason: str(v.reason, 300),
+                    production_api_sha: sha(v.production_api_sha) },
   }
 }
 
@@ -94,7 +118,12 @@ export function liveFreshness(server: string | null | undefined, generatedAt: st
   const at = generatedAt ? Date.parse(generatedAt) : NaN
   return server === "FRESH" && Number.isFinite(at) && now - at <= FRESH_MS ? "FRESH" : "UNKNOWN"
 }
-export const live = (h: Handoff, now: number): Handoff => ({ ...h, freshness: liveFreshness(h.freshness, h.generated_at, now) })
+export const live = (h: Handoff, now: number): Handoff => {
+  const freshness = liveFreshness(h.freshness, h.generated_at, now)
+  // Production's VERIFIED rests on a fresh report: once the report ages out, so does the verification.
+  return { ...h, freshness, verification: freshness === "FRESH" ? h.verification
+    : { ...h.verification, state: "UNKNOWN", reason: "no fresh Stage C report" } }
+}
 
 export function laneOf(h: Handoff): Lane {
   if (h.cancellation === "ACKNOWLEDGED" || h.delivery === "SUSPENDED" || h.delivery === "REFUSED") return "BLOCKED"
@@ -138,7 +167,10 @@ export function waitingReason(h: Handoff): string | null {
       if (reviewView(t).badge !== "READY") return `Independent review: ${reviewView(t).label}`
       if (ci.kind === "running") return "Waiting for CI on the PR"
       if (ci.kind !== "passed") return `CI: ${ci.label}`
-      return h.merge.state === "VERIFIED" ? "Merged; waiting for Stage C to close it" : "Ready to merge; waiting for the founder's merge"
+      if (h.merge.state !== "MERGED") return "Ready to merge; waiting for the founder's merge"
+      if (h.merge.main_ci === "FAILURE") return "Merged; main CI failed on the merge commit"
+      if (h.verification.state === "VERIFIED") return "Verified in production; waiting for your DONE"
+      return `Merged; not verified in production${h.verification.reason ? `: ${h.verification.reason}` : ""}`
     }
     case "IN_PROGRESS": case "DONE": return null
     default: return `Unrecognised Stage C status ${t.status}`

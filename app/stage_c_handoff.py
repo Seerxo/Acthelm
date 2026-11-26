@@ -19,7 +19,19 @@ What crosses the boundary and what it may do:
 - Snapshots are authenticated with an HMAC (key derived from the shared handoff secret, never the raw bearer) over
   method, path and body, validated against a strict schema, and ordered by `seq` (Stage C's newest audit id touching
   the task, its handoff or the pilot grant): a lower seq is stale and dropped, an equal one is a duplicate. A snapshot
-  never changes production's native task status; only the founder closes the task (DONE needs a fresh VERIFIED merge).
+  never changes production's native task status; only the founder closes the task (DONE needs production's own
+  VERIFIED, below).
+
+MERGED, VERIFIED and DONE are three different facts, decided in three places:
+- MERGED (Stage C reports it): the founder's merge recorded from GitHub's facts, with its merge commit M, plus main CI
+  on M as Stage C read it from GitHub (`merge.main_ci`, bound to M). Stage C never claims VERIFIED: its own host's
+  SHAs say nothing about what production runs.
+- VERIFIED (production decides it, `production_verification`): a fresh report of MERGED with main CI SUCCESS on M, AND
+  production's OWN runtime runs M: the watchdog's fresh API/worker SHAs on the production host and the worker's own
+  COMPANY_OS_GIT_SHA (stage_c_worker.live_shas, the same proof Stage C uses for its own deploy), rechecked against the
+  API process's COMPANY_OS_GIT_SHA at DONE. Production has no git history, so "runs M" is equality: a later commit
+  deployed on top of M does not verify it (fail closed; docs/runbooks/PHASEC_E2E_PILOT.md).
+- DONE (the founder alone, POST /tasks/{key}/status): refused unless production VERIFIED it.
 Every release, delivery, refusal, observation, import and cancellation is an audit row with ids, digests and codes
 only, never packet text.
 """
@@ -243,10 +255,18 @@ class _RemoteTask(_Strict):
     history: list[_Step] = Field(max_length=12)
 
 
+class _MainCI(_Strict):
+    state: Literal["SUCCESS", "FAILURE", "PENDING"]
+    sha: str = Field(pattern=_SHA40)
+
+
 class _Merge(_Strict):
-    state: Literal["NOT_OBSERVED", "VERIFIED"]
+    # What Stage C can know: the founder's recorded merge and main CI on its commit. Never "VERIFIED": that is
+    # production's own decision (production_verification). An older peer that still sends it fails validation.
+    state: Literal["NOT_OBSERVED", "MERGED"]
     commit: str | None = Field(pattern=_SHA40)
     at: datetime | None
+    main_ci: _MainCI | None
 
 
 class Snapshot(_Strict):
@@ -460,9 +480,11 @@ def status_refusal(task: models.Task, status: enums.TaskStatus, now: datetime | 
         return "a task handed to Stage C stays WAITING_EXTERNAL until it is cancelled or accepted as DONE"
     if status == enums.TaskStatus.DONE:
         view = desk_view(task, now)
-        snap = (view or {}).get("snapshot") or {}
-        if view["freshness"] != "FRESH" or (snap.get("merge") or {}).get("state") != "VERIFIED":
-            return "DONE needs a fresh Stage C report of a verified founder merge for this handoff"
+        if view["freshness"] != "FRESH" or ((view.get("snapshot") or {}).get("merge") or {}).get("state") != "MERGED":
+            return "DONE needs a fresh Stage C report of the founder's merge for this handoff"
+        if view["verification"]["state"] != "VERIFIED":
+            return ("DONE needs production to verify the merge: main CI green on the merge commit and production "
+                    f"itself running it ({view['verification']['reason']})")
     return None
 
 
@@ -729,7 +751,9 @@ def _poll(db: Session, task_id: int, transport: Transport, now: datetime) -> dic
     if (snap.id != hid or snap.payload_sha256 != remote.get("payload_sha256")
             or snap.task_key != remote.get("remote_task_key")
             or (snap.task is not None and snap.task.pr is not None and snap.task.ci is not None
-                and snap.task.ci.state == "SUCCESS" and snap.task.ci.sha != snap.task.pr.head_sha)):
+                and snap.task.ci.state == "SUCCESS" and snap.task.ci.sha != snap.task.pr.head_sha)
+            or (snap.merge.main_ci is not None and snap.merge.main_ci.sha != snap.merge.commit)
+            or (snap.merge.state == "MERGED") != (snap.merge.commit is not None)):
         return _fail(db, task, remote, "BINDING_MISMATCH", hard=False, now=now, delivery=False)
     return _observe(db, task, remote, snap, data, now)
 
@@ -740,7 +764,8 @@ def _observe(db, task, remote, snap: Snapshot, data: dict, now: datetime) -> dic
     stored = (task.artifacts or {}).get("remote_stage_c") if isinstance(task.artifacts, dict) else None
     last_seq = stored.get("seq") if isinstance(stored, dict) and type(stored.get("seq")) is int else -1
     previous = (stored.get("snapshot") or {}) if isinstance(stored, dict) else {}
-    merged = (previous.get("merge") or {}).get("state") == "VERIFIED"
+    # A stored "VERIFIED" is a report from before Stage C stopped claiming it; the new MERGED report satisfies it.
+    merged = (previous.get("merge") or {}).get("state") in ("MERGED", "VERIFIED")
     closed = (previous.get("task") or {}).get("status") in ("DONE", "CANCELLED")
     fresh = {"last_attempt_at": now.isoformat(), "poll_failures": 0, "last_error_code": None,
              "next_attempt_at": (now + POLL_EVERY).isoformat()}
@@ -750,7 +775,7 @@ def _observe(db, task, remote, snap: Snapshot, data: dict, now: datetime) -> dic
     replayed = (generated is None or generated > now + timedelta(seconds=60) or now - generated > STALE_AFTER
                 or (last_generated is not None and generated <= last_generated))
     # Latches: a verified merge or a closed remote task is never replaced by a report without it.
-    if (replayed or snap.seq < last_seq or (merged and snap.merge.state != "VERIFIED")
+    if (replayed or snap.seq < last_seq or (merged and snap.merge.state != "MERGED")
             or (closed and (snap.task is None or snap.task.status.value != previous["task"]["status"]))):
         _set_remote(task, **{**fresh, "last_error_code": "STALE_REPORT"})
         db.commit()
@@ -759,16 +784,26 @@ def _observe(db, task, remote, snap: Snapshot, data: dict, now: datetime) -> dic
     dumped = snap.model_dump(mode="json")
     same = {k: v for k, v in dumped.items() if k != "generated_at"} == {
         k: v for k, v in previous.items() if k != "generated_at"}
+    proof = _production_proof(db, snap, now)
+    old_proof = stored.get("production_verified") if isinstance(stored, dict) else None
+    if _proof_identity(proof) != _proof_identity(old_proof):
+        audit.record(db, actor="company-worker", action="handoff.production_verification", entity_type="task",
+                     entity_key=task.key, task_id=task.id,   # reason: what GET /audit lists (the pilot checker)
+                     reason=f"{'VERIFIED' if proof else 'NOT_VERIFIED'} {snap.merge.commit or '-'}",
+                     after={"id": snap.id, "state": "VERIFIED" if proof else "NOT_VERIFIED",
+                            **({k: proof[k] for k in ("commit", "api_sha", "worker_sha")} if proof else
+                               {"commit": snap.merge.commit})})
     if snap.seq == last_seq and same:
         task.artifacts = {**task.artifacts, "remote_stage_c": {**stored, "generated_at": generated.isoformat(),
-                                                                "snapshot": dumped}}   # one consistent report time
+                                                                "snapshot": dumped,   # one consistent report time
+                                                                "production_verified": proof}}
         db.commit()
         return {"task": task.key, "kind": "poll", "outcome": "UNCHANGED"}
     # An equal seq with different content is a change no audit row labels (a grant expiring by time, a runtime
     # flag): the fresh, authenticated report passed the latches above, so it replaces the stored projection.
     task.artifacts = {**(task.artifacts or {}), "remote_stage_c": {
         "seq": snap.seq, "observed_at": now.isoformat(), "generated_at": generated.isoformat(),
-        "snapshot": dumped}}
+        "snapshot": dumped, "production_verified": proof}}
     audit.record(db, actor="company-worker", action="handoff.observed", entity_type="task", entity_key=task.key,
                  task_id=task.id, after={"id": snap.id, "seq": snap.seq, "remote_task_key": snap.task_key,
                                          "remote_status": snap.task.status.value if snap.task else None,
@@ -776,6 +811,55 @@ def _observe(db, task, remote, snap: Snapshot, data: dict, now: datetime) -> dic
                                          "merge": snap.merge.state, "merge_commit": snap.merge.commit})
     db.commit()
     return {"task": task.key, "kind": "poll", "outcome": "OBSERVED", "seq": snap.seq}
+
+
+def _production_proof(db: Session, snap: Snapshot, now: datetime) -> dict | None:
+    """Production's own evidence that it runs the reported merge, or None. Read in the production worker (the poll),
+    from production's database and process only: the watchdog's fresh host report of the API and worker SHAs, which
+    must match this worker's own COMPANY_OS_GIT_SHA (stage_c_worker.live_shas). Stage C's runtime SHAs are never used.
+    Needs a reported MERGED with main CI SUCCESS bound to the same commit. No git history here, so equality only."""
+    from app import stage_c_worker   # late: stage_c_worker imports control, which imports this lazily
+    m = snap.merge
+    if (m.state != "MERGED" or m.commit is None or m.main_ci is None or m.main_ci.state != "SUCCESS"
+            or m.main_ci.sha != m.commit):
+        return None
+    try:
+        shas = stage_c_worker.live_shas(db)
+    except Exception:  # noqa: BLE001 - unreadable evidence is never proof
+        shas = None
+    if not shas or shas[0] != m.commit or shas[1] != m.commit:
+        return None
+    return {"commit": m.commit, "api_sha": shas[0], "worker_sha": shas[1], "at": now.isoformat()}
+
+
+def _proof_identity(proof) -> tuple | None:
+    return (proof.get("commit"), proof.get("api_sha"), proof.get("worker_sha")) if isinstance(proof, dict) else None
+
+
+def verification(stored: dict, snapshot: dict | None, fresh: bool, now: datetime) -> dict:
+    """VERIFIED (production's decision) for the Desk and DONE: a fresh MERGED report with main CI SUCCESS on M, a
+    production proof for M from a recent poll, and this process (the API) running M too. A reason otherwise."""
+    merge = (snapshot or {}).get("merge") or {}
+    commit = merge.get("commit") if merge.get("state") == "MERGED" else None
+    ci = merge.get("main_ci") if isinstance(merge.get("main_ci"), dict) else {}
+    proof = stored.get("production_verified") if isinstance(stored.get("production_verified"), dict) else {}
+    at = _utc(proof.get("at"))
+    api = os.environ.get("COMPANY_OS_GIT_SHA") or None
+    reason = None
+    if not fresh:
+        reason = "no fresh Stage C report"
+    elif commit is None:
+        reason = "no founder merge reported"
+    elif ci.get("sha") != commit or ci.get("state") != "SUCCESS":
+        reason = "main CI on the merge commit is " + ("failing" if ci.get("state") == "FAILURE" else "not green yet")
+    elif (proof.get("commit") != commit or at is None or not timedelta(seconds=-60) <= now - at <= STALE_AFTER):
+        reason = "production's own runtime (API and worker) is not proven to run the merge commit"
+    elif api != commit:
+        reason = "this production API does not run the merge commit"
+    return {"state": "VERIFIED" if reason is None else "NOT_VERIFIED", "reason": reason, "commit": commit,
+            "main_ci": ci.get("state") if ci.get("sha") == commit else None,
+            "production_api_sha": api if api and re.fullmatch(_SHA40[1:-1], api) else None,
+            "proof_at": at.isoformat() if at else None}
 
 
 def _cancel(db: Session, task_id: int, transport: Transport, now: datetime) -> dict:
@@ -838,6 +922,7 @@ def desk_view(task: models.Task, now: datetime | None = None) -> dict | None:
     cancel = ("ACKNOWLEDGED" if remote.get("cancellation") == "ACKNOWLEDGED"
               else "PENDING" if remote.get("cancel_requested_at") else "NONE")
     return {"id": remote.get("id"), "payload_sha256": remote.get("payload_sha256"),
+            "verification": verification(stored, stored.get("snapshot"), fresh, now),
             "delivery": remote.get("delivery"), "remote_task_key": remote.get("remote_task_key"),
             "released_at": remote.get("released_at"), "expires_at": remote.get("expires_at"),
             "last_error_code": remote.get("last_error_code"), "cancellation": cancel,
@@ -1102,7 +1187,7 @@ def _grant_view(db: Session, task: models.Task | None, hid: str, now: datetime) 
 def snapshot(db: Session, hid: str, now: datetime | None = None) -> dict:
     """The bounded, task-specific read for production. Read-only: no row is written, so a poll can never look like
     an owner change to a running attempt."""
-    from app import stage_c_state, worker
+    from app import stage_c, stage_c_state, worker
     now = now or datetime.now(timezone.utc)
     row = _row(db, hid)
     if row is None:
@@ -1126,14 +1211,15 @@ def snapshot(db: Session, hid: str, now: datetime | None = None) -> dict:
         projection = {k: p[k] for k in ("status", "stage", "test_verdict", "reviewer_verdict", "tested_fingerprint",
                                         "reviewed_fingerprint", "fingerprint_match", "pr", "ci", "failure_category",
                                         "needs_founder", "history")}
-    merge = {"state": "NOT_OBSERVED", "commit": None, "at": None}
+    merge = {"state": "NOT_OBSERVED", "commit": None, "at": None, "main_ci": None}
     if task is not None:
         _, hist, _ = stage_c_state._history(task)
         merged = next((h for h in reversed(hist) if h["stage"] == "MERGED"), None)
         commit = stage_c_state._sha(merged["evidence"].get("merge_commit")) if merged else None
-        if merged and commit and str(merged.get("actor", "")).startswith("founder") \
+        if merged and commit and stage_c.verified_merge(merged.get("actor"), merged["evidence"]) \
                 and (task.context.get("improvement") or {}).get("stage") in ("MERGED", "VERIFYING", "MEASURED"):
-            merge = {"state": "VERIFIED", "commit": commit, "at": stage_c_state._ts(merged.get("at"))}
+            merge = {"state": "MERGED", "commit": commit, "at": stage_c_state._ts(merged.get("at")),
+                     "main_ci": main_ci_report(task, commit)}
     try:
         state = worker.worker_state(db)
     except Exception:  # noqa: BLE001 - unknown runtime is null, never a guess
@@ -1148,6 +1234,35 @@ def snapshot(db: Session, hid: str, now: datetime | None = None) -> dict:
             "authorization": _grant_view(db, task, hid, now), "task": projection, "merge": merge,
             "cancellation": "ACKNOWLEDGED" if value.get("cancelled_at") else "NONE",
             "activation": value.get("state") if value.get("state") in ("IMPORTED", "ACTIVATED") else None}
+
+
+MAIN_CI_KEY = "handoff_main_ci"
+
+
+def record_main_ci(task, commit: str, result) -> None:
+    """Stage C, for an imported task at MERGED (stage_c_worker.reconcile): keep main CI on the merge commit as GitHub
+    reported it, for the snapshot. Written only when it changes, so the task revision (the report's seq) moves only
+    then. Stage C's own deploy is not judged for an imported task: production verifies its own (VERIFIED above)."""
+    state = {"success": "SUCCESS", "failure": "FAILURE"}.get(result, "PENDING")
+    arts = task.artifacts if isinstance(task.artifacts, dict) else {}
+    old = arts.get(MAIN_CI_KEY)
+    if isinstance(old, dict) and old.get("sha") == commit and old.get("state") == state:
+        return
+    task.artifacts = {**arts, MAIN_CI_KEY: {"sha": commit, "state": state}}
+
+
+def main_ci_report(task, commit: str) -> dict | None:
+    """Main CI on `commit` for the snapshot: the recorded observation, else a recorded VERIFYING (whose evidence is
+    main CI success on that merge commit). Anything else is not reported."""
+    from app import stage_c_verify
+    arts = task.artifacts if isinstance(task.artifacts, dict) else {}
+    obs = arts.get(MAIN_CI_KEY)
+    if isinstance(obs, dict) and obs.get("sha") == commit and obs.get("state") in ("SUCCESS", "FAILURE", "PENDING"):
+        return {"state": obs["state"], "sha": commit}
+    ev = stage_c_verify._evidence(task, "VERIFYING")
+    if ev.get("main_ci") == "success" and ev.get("merge_commit") == commit:
+        return {"state": "SUCCESS", "sha": commit}
+    return None
 
 
 # ---------------------------------------------------------------------------- Stage C grant binding

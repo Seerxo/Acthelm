@@ -3,7 +3,7 @@
 // Synthetic data only. `npm test`.
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { board, laneOf, liveFreshness, parseHandoff, parseHandoffs, waitingReason } from "./handoffs.ts"
+import { board, deliveryOf, laneOf, live, liveFreshness, parseHandoff, parseHandoffs, waitingReason } from "./handoffs.ts"
 
 const NOW = "2026-11-17T10:00:00+00:00", HEAD = "1".repeat(40), OTHER = "2".repeat(40), FP = "a".repeat(64)
 const remote = (over: Record<string, unknown> = {}) => ({
@@ -17,7 +17,8 @@ const view = (over: Record<string, unknown> = {}, task: unknown = remote()) => (
   released_at: NOW, expires_at: NOW, last_error_code: null, cancellation: "NONE", last_success_at: NOW,
   freshness: "FRESH", source: "Stage C reported", seq: 3, observed_at: NOW,
   snapshot: { version: 1, task_key: "TASK-9001", seq: 3, generated_at: NOW, runtime: { write_enabled: true },
-    authorization: { status: "ACTIVE" }, task, merge: { state: "NOT_OBSERVED", commit: null, at: null }, cancellation: "NONE" },
+    authorization: { status: "ACTIVE" }, task, merge: { state: "NOT_OBSERVED", commit: null, at: null, main_ci: null }, cancellation: "NONE" },
+  verification: { state: "NOT_VERIFIED", reason: "no founder merge reported", commit: null, main_ci: null, production_api_sha: null },
   ...over,
 })
 
@@ -96,4 +97,35 @@ test("freshness expires in the browser even when the server last said FRESH", ()
   assert.equal(liveFreshness("UNKNOWN", at, t0), "UNKNOWN")
   assert.equal(liveFreshness("FRESH", null, t0), "UNKNOWN")
   assert.equal(liveFreshness("FRESH", "not a date", t0), "UNKNOWN")
+})
+
+test("MERGED, VERIFIED and DONE are distinct, each from its own source (G1)", () => {
+  const M = "9".repeat(40)
+  const merged = (ci: unknown, verification: Record<string, unknown>, status = "WAITING_EXTERNAL") => {
+    const v = view({ verification }, remote({ stage: "MERGED" }))
+    v.snapshot.merge = { state: "MERGED", commit: M, at: NOW, main_ci: ci } as never
+    return parseHandoff(v, { key: "TASK-0001", title: "t", status })!
+  }
+  const notYet = merged({ state: "PENDING", sha: M }, { state: "NOT_VERIFIED", reason: "main CI on the merge commit is not green yet" })
+  assert.equal(notYet.merge.state, "MERGED")
+  assert.equal(deliveryOf(notYet), "MERGED")
+  assert.equal(waitingReason(notYet), "Merged; not verified in production: main CI on the merge commit is not green yet")
+  // A Stage C claim of VERIFIED is not a state the Desk knows: it never reads as merged or verified.
+  const claim = view({}, remote())
+  claim.snapshot.merge = { state: "VERIFIED", commit: M, at: NOW, main_ci: null } as never
+  assert.equal(parseHandoff(claim)!.merge.state, "UNKNOWN")
+  assert.equal(deliveryOf(parseHandoff(claim)!), null)
+  // Main CI bound to another commit is not reported as main CI on the merge.
+  assert.equal(merged({ state: "SUCCESS", sha: OTHER }, { state: "NOT_VERIFIED" }).merge.main_ci, null)
+  assert.equal(waitingReason(merged({ state: "FAILURE", sha: M }, { state: "NOT_VERIFIED" })), "Merged; main CI failed on the merge commit")
+  const verified = merged({ state: "SUCCESS", sha: M }, { state: "VERIFIED", reason: null, production_api_sha: M })
+  assert.equal(deliveryOf(verified), "VERIFIED")
+  assert.equal(verified.verification.production_api_sha, M)
+  assert.equal(waitingReason(verified), "Verified in production; waiting for your DONE")
+  // Verification rests on a fresh report: once it ages out, it is UNKNOWN, not VERIFIED.
+  const aged = live(verified, Date.parse(NOW) + 10 * 60_000)
+  assert.equal(aged.verification.state, "UNKNOWN")
+  assert.equal(deliveryOf(aged), "MERGED")
+  // DONE comes only from the production task status the founder set.
+  assert.equal(deliveryOf(merged({ state: "SUCCESS", sha: M }, { state: "VERIFIED" }, "DONE")), "DONE")
 })

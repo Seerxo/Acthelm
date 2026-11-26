@@ -157,6 +157,38 @@ def _pipeline(w, key, upto="MERGED"):
         s.commit()
 
 
+def _main_ci(w, key, result):
+    """Stage C's read of main CI on the merge commit (stage_c_worker.reconcile for an imported task at MERGED)."""
+    with Session(w.sc) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == key))
+        h.record_main_ci(task, MERGE, result)
+        s.commit()
+
+
+def _runs(w, engine, sha):
+    """`engine`'s own runtime runs `sha`: its watchdog host report (API + worker) and this process's SHA."""
+    from app import watchdog
+    w.mp.setenv("COMPANY_OS_GIT_SHA", sha)
+    with Session(engine) as s:
+        watchdog.record_host_metrics(s, {"cpu_used_pct": 1, "collected_at": datetime.now(timezone.utc).isoformat(),
+                                         "runtime": {"api_sha": sha, "worker_sha": sha}})
+
+
+def _poll(w):
+    """The next due status poll at the real clock (freshness is judged honestly)."""
+    with Session(w.prod) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        h._set_remote(task, next_attempt_at=None)
+        s.commit()
+    return w.sync()["requests"][0]["outcome"]
+
+
+def _done(w):
+    with w.on("prod"):
+        return w.client().post("/tasks/TASK-0001/status", headers=ASSERT, json={
+            "status": "DONE", "actor": "founder", "evidence": f"merged {MERGE}"})
+
+
 # ------------------------------------------------------------------------------------------------ off by default
 def test_off(w, monkeypatch):
     for k in (h.SENDER_FLAG, h.RECEIVER_FLAG):
@@ -266,20 +298,24 @@ def test_e2e(w):
         detail = w.client().get("/tasks/TASK-0001", headers=ASSERT).json()["remote_stage_c"]
     snap = row["handoff"]["snapshot"]
     assert row["handoff"]["freshness"] == "FRESH" and detail["snapshot"] == snap
-    assert snap["merge"] == {"state": "VERIFIED", "commit": MERGE, "at": snap["merge"]["at"]}
+    assert snap["merge"] == {"state": "MERGED", "commit": MERGE, "at": snap["merge"]["at"], "main_ci": None}
     assert snap["task"]["pr"] == {"number": 7, "head_sha": HEAD} and snap["task"]["ci"]["state"] == "SUCCESS"
     assert snap["authorization"]["status"] == "CONSUMED" and snap["task_key"] == imp.key
     assert w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL       # a report never closes production work
     with Session(w.prod) as s:
         actions = [a for (a,) in s.execute(select(models.AuditLog.action).order_by(models.AuditLog.id))]
         assert actions == ["handoff.release", "handoff.delivery", "handoff.activation", "handoff.observed"]
+    w.mp.setenv("COMPANY_OS_GIT_SHA", SHA)
 
     with w.on("prod"):
         assert w.client().post("/tasks/TASK-0001/status", json={"status": "READY", "actor": "x"},
                                headers=ASSERT).status_code == 409
-        r = w.client().post("/tasks/TASK-0001/status", headers=ASSERT, json={
-            "status": "DONE", "actor": "founder", "evidence": f"merged {MERGE}"})
-        assert r.status_code == 200, r.text
+    assert _done(w).status_code == 409                                     # merged is not verified
+    _main_ci(w, imp.key, "success")
+    _runs(w, w.prod, MERGE)                                                # production itself runs the merge
+    assert _poll(w) == "OBSERVED"
+    r = _done(w)
+    assert r.status_code == 200, r.text
     before = len(w.calls)
     assert w.sync()["requests"] == [] and len(w.calls) == before            # closed: nothing more is read or sent
 
@@ -291,6 +327,90 @@ def test_done_guard(w):
         r = w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
                             json={"status": "DONE", "actor": "founder", "evidence": "trust me"})
     assert r.status_code == 409 and w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL
+
+
+def test_verified(w):
+    """G1 + G4: MERGED, VERIFIED and DONE are distinct. Stage C reports the founder's merge and main CI on it, never
+    VERIFIED; production verifies only from its own runtime. Breaks caught: DONE accepted at merge (before main CI),
+    accepted while production does not run the merge commit although Stage C's own host does, a main-CI result
+    bound to another commit, and a Stage C report claiming VERIFIED."""
+    w.release()
+    w.sync()
+    w.sync()
+    [imp] = w.sc_tasks()
+    _pipeline(w, imp.key)
+    assert _poll(w) == "OBSERVED"
+    with w.on("prod"):
+        [row] = w.client().get("/desk/handoffs", headers=ASSERT).json()["handoffs"]
+    view = row["handoff"]
+    assert view["snapshot"]["merge"]["state"] == "MERGED" and view["verification"]["state"] == "NOT_VERIFIED"
+    r = _done(w)
+    assert r.status_code == 409 and "main CI" in r.text, r.text
+    # Main CI red on the merge commit: still not verified (Stage C blocks the task too, stage_c_verify.step).
+    _main_ci(w, imp.key, "failure")
+    assert _poll(w) == "OBSERVED" and _done(w).status_code == 409
+    with Session(w.prod) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        assert h.desk_view(task)["verification"]["reason"].endswith("failing")
+    # Main CI green; Stage C's OWN host runs the merge commit, production does not: still not verified.
+    _main_ci(w, imp.key, "success")
+    _runs(w, w.sc, MERGE)
+    w.mp.setenv("COMPANY_OS_GIT_SHA", SHA)
+    assert _poll(w) == "OBSERVED"
+    r = _done(w)
+    assert r.status_code == 409 and "production" in r.text, r.text
+    assert w.prod_task().artifacts["remote_stage_c"]["production_verified"] is None
+    # Production's watchdog reports M but this API process runs another SHA: not verified either.
+    _runs(w, w.prod, MERGE)
+    assert _poll(w) in ("OBSERVED", "UNCHANGED")
+    proof = w.prod_task().artifacts["remote_stage_c"]["production_verified"]
+    assert proof["commit"] == MERGE and proof["api_sha"] == proof["worker_sha"] == MERGE
+    w.mp.setenv("COMPANY_OS_GIT_SHA", SHA)
+    assert _done(w).status_code == 409
+    w.mp.setenv("COMPANY_OS_GIT_SHA", MERGE)
+    with w.on("prod"):
+        [row] = w.client().get("/desk/handoffs", headers=ASSERT).json()["handoffs"]
+    assert row["handoff"]["verification"]["state"] == "VERIFIED" and row["status"] == "WAITING_EXTERNAL"
+    with Session(w.prod) as s:
+        verifications = [a.after for a in s.scalars(select(models.AuditLog).where(
+            models.AuditLog.action == "handoff.production_verification"))]
+    assert [v["state"] for v in verifications] == ["VERIFIED"] and verifications[0]["commit"] == MERGE
+    assert _done(w).status_code == 200                                     # DONE: the founder, only now
+    assert w.prod_task().status == enums.TaskStatus.DONE
+
+
+def test_bound(w):
+    """A signed report whose main CI names another commit, that claims VERIFIED, or MERGED without a commit is
+    refused and changes nothing."""
+    hid = w.release().json()["id"]
+    w.sync()
+    w.sync()
+    [imp] = w.sc_tasks()
+    _pipeline(w, imp.key)
+    _main_ci(w, imp.key, "success")
+    assert _poll(w) == "OBSERVED"
+    stored = w.prod_task().artifacts["remote_stage_c"]
+    good = json.loads(w.last[1])
+    for change in ("ci", "claim", "nil"):
+        data = json.loads(json.dumps(good))
+        data["generated_at"] = datetime.now(timezone.utc).isoformat()
+        data["seq"] += 1
+        if change == "ci":
+            data["merge"]["main_ci"]["sha"] = "1" * 40
+        elif change == "claim":
+            data["merge"]["state"] = "VERIFIED"
+        else:
+            data["merge"]["commit"] = None
+            data["merge"]["main_ci"] = None
+        raw = h.canonical(data)
+        with Session(w.prod) as s:
+            task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+            h._set_remote(task, next_attempt_at=None)
+            s.commit()
+        out = w.sync(lambda m, p, b: (200, raw, h.mac("GET", h.API_PREFIX + hid, raw)))["requests"][0]
+        assert out["outcome"] == ("BAD_RESPONSE" if change == "claim" else "BINDING_MISMATCH"), (change, out)
+        after = w.prod_task().artifacts["remote_stage_c"]
+        assert after["snapshot"] == stored["snapshot"] and after["seq"] == stored["seq"], change
 
 
 # ------------------------------------------------------------------------------------------------ re-verification
@@ -720,13 +840,13 @@ def test_reports(w):
     _pipeline(w, imp.key)
     assert w.sync(now=t0 + timedelta(minutes=1))["requests"][0]["outcome"] == "OBSERVED"
     stored = w.prod_task().artifacts["remote_stage_c"]
-    assert stored["snapshot"]["merge"]["state"] == "VERIFIED"
+    assert stored["snapshot"]["merge"]["state"] == "MERGED"
 
     def fixed(resp):
         return lambda method, path, body: resp
     later = datetime.now(timezone.utc) + timedelta(minutes=2)
     status, body, sig = w.last
-    tampered = body.replace(b'"VERIFIED"', b'"NOT_OBSERVED"')
+    tampered = body.replace(b'"MERGED"', b'"NOT_OBSERVED"')
     for resp, code in (((status, tampered, sig), "BAD_MAC"), ((status, body, None), "BAD_MAC"),
                        ((status, body, h.mac("GET", h.API_PREFIX + "x", body)), "BAD_MAC"),
                        (old, "STALE"), ((500, b"", None), "HTTP_500"), ((0, b"", None), "UNREACHABLE")):
@@ -1166,3 +1286,17 @@ def test_lost_replies_are_idempotent(w):
     with Session(w.sc) as s:
         assert s.scalar(select(func.count()).select_from(models.AuditLog)
                         .where(models.AuditLog.action == "handoff.cancel")) == 1
+def test_compose_wires_the_handoff_settings():
+    """Without these the host .env never reaches the containers and the handoff can never be turned on. Defaults are
+    off; the Access service-token secret goes only to the sender worker, never to the API."""
+    import yaml
+    from pathlib import Path
+    services = yaml.safe_load((Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text())["services"]
+    api, worker = services["company-api"]["environment"], services["company-worker"]["environment"]
+    for env in (h.SENDER_FLAG, h.RECEIVER_FLAG, h.TOKEN_ENV, h.URL_ENV):
+        assert env in api, env
+    for env in (h.SENDER_FLAG, h.TOKEN_ENV, h.URL_ENV, h.ACCESS_ID_ENV, h.ACCESS_SECRET_ENV):
+        assert env in worker, env
+    assert h.ACCESS_SECRET_ENV not in api and h.RECEIVER_FLAG not in worker
+    assert api[h.SENDER_FLAG].endswith(":-false}") and api[h.RECEIVER_FLAG].endswith(":-false}")
+    assert worker[h.SENDER_FLAG].endswith(":-false}")

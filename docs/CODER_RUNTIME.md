@@ -329,7 +329,7 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
   plus the time the Docker calls of that tick take), even mid-run: the worker is recreated and the run is recovered
   as an infrastructure interruption (`stage_c_worker.recover_interrupted`). Every Docker call is time-bounded
   (10 s, 60 s per Compose run, 5 s kill grace; an override of these limits is honoured only between 1 s and the
-  default); one run's worst case is 340 s, under the unit's 400 s limit. If
+  default); one run's worst case is 355 s, under the unit's 400 s limit. If
   Docker itself does not respond, no disarm can be confirmed and no stop time is promised: each tick that reaches
   the script (the unit requires `docker.service`) logs `DISARM_FAILED`, exits 1 and removes the override, so nothing
   re-arms from it. A worker armed by this timer (`STAGE_C_ARMED_TASK` set) still refuses any write without its task's

@@ -69,6 +69,8 @@ HANDOFF = [("PUT", rf"/stage-c/handoff-api/{_HANDOFF_ID}"), ("GET", rf"/stage-c/
            ("POST", rf"/stage-c/handoff-api/{_HANDOFF_ID}/cancel"),
            ("POST", rf"/stage-c/handoff-api/{_HANDOFF_ID}/activate")]
 FOUNDER_SCOPE += [("POST", r"/tasks/[A-Za-z0-9_-]+/handoff"), ("GET", r"/desk/handoffs")]
+# Read-only open-task reconciliation (app/reconciliation.py); the handler requires the verified founder.
+FOUNDER_SCOPE += [("GET", r"/desk/reconciliation")]
 SCOPES = {"desk": DESK, "youtube": YOUTUBE, "handoff": HANDOFF}
 TOKENS = {"admin": "COMPANY_API_TOKEN_ADMIN", "desk": "COMPANY_API_TOKEN_DESK",
           "youtube": "COMPANY_API_TOKEN_YOUTUBE", "handoff": "COMPANY_API_TOKEN_HANDOFF"}
@@ -133,7 +135,8 @@ ENFORCE_ALWAYS = [("POST", r"/approvals/[A-Za-z0-9_-]+"), ("POST", r"/learnings/
                   ("POST", r"/experiments/[A-Za-z0-9_-]+/[a-z-]+"),
                   ("POST", r"/notifications/[0-9]+/retry"),
                   # B5 handoff: production's release and Desk read, Stage C's machine routes.
-                  ("POST", r"/tasks/[A-Za-z0-9_-]+/handoff"), ("GET", r"/desk/handoffs"), *HANDOFF]
+                  ("POST", r"/tasks/[A-Za-z0-9_-]+/handoff"), ("GET", r"/desk/handoffs"), *HANDOFF,
+                  ("GET", r"/desk/reconciliation")]
 
 
 def _match(routes, method: str, path: str) -> bool:
