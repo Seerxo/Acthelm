@@ -18,6 +18,14 @@ FP, FP2 = "a" * 64, "b" * 64
 NOW = datetime.now(timezone.utc)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_now():
+    """Stamp each test at its own run time: an import-time NOW goes stale in a long serial run (the gateway's
+    single-CPU checks), and a stale preflight/grant then reads NOT_VERIFIED instead of the state under test."""
+    global NOW
+    NOW = datetime.now(timezone.utc)
+
+
 def heartbeat(monkeypatch, *, sha=SHA, status="HEALTHY", flag=True, stage="C"):
     view = {"status": status, "runtime": {"git_sha": sha}, "autonomy": {"code_write_flag": flag, "stage": stage}}
     monkeypatch.setattr(main.worker, "worker_state", lambda db: view)
