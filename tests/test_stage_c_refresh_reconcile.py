@@ -604,3 +604,24 @@ def test_a_refused_refresh_leaves_the_merge_block_recoverable(blocked_scene, aft
     db.commit()
     found = stage_c_ci.merge_recovery_block(db, task)
     assert (found.id if found else None) == (block.id if after == "refused" else None)
+
+
+def test_apply_evidence_error_keeps_merge_recovery(blocked_scene, monkeypatch):
+    """R4 pre-review finding 4: in apply mode an evidence failure (GitHub or git unavailable) is not a refusal: the
+    request stays pending for a later tick, but it must not suppress the normal merge recovery of this tick (else a
+    persistent failure blocks it for the request's whole 24h life)."""
+    db, task, request, *_ = blocked_scene
+    worker_facts(monkeypatch, blocked_scene, mode="apply",
+                 chain=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("git failed")))
+    monkeypatch.setattr(stage_c_worker, "admission", lambda *args: None)
+    calls = []
+    monkeypatch.setattr(stage_c_ci, "ingest", lambda *args, **kwargs: calls.append(1) or {"outcome": "WAITING"})
+    out = stage_c_worker.reconcile(db)
+    assert out[0] == {"task": task.key, "outcome": "BLOCKED", "reasons": ["EVIDENCE_UNAVAILABLE"]}
+    assert not db.scalar(select(models.AuditLog).where(models.AuditLog.action.in_(
+        ("improvement.refresh_reconciled", "improvement.refresh_reconcile_refused"))))   # still pending, no refusal
+    assert task.status == enums.TaskStatus.BLOCKED
+    if task.error.startswith(stage_c_ci.MERGE_NOT_RECORDED):   # [merge]: the block is merge-recoverable
+        assert calls == [1] and out[1:] == [{"task": task.key, "outcome": "WAITING"}]
+    else:                                                      # [head]: a moved head is never merge-recovered
+        assert calls == [] and out[1:] == []

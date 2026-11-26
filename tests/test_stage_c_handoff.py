@@ -330,6 +330,256 @@ def test_reverify(w, change):
     assert w.sync(now=now)["requests"] == []                                 # a refusal is not retried
 
 
+
+def _depend(w, status):
+    """TASK-0001 depends on TASK-0002 in production (Stage C imports no dependency records)."""
+    with Session(w.prod) as s:
+        main_task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        dep = s.scalar(select(models.Task).where(models.Task.key == "TASK-0002"))
+        if dep is None:
+            dep = models.Task(key="TASK-0002", title="prerequisite", success_criteria="done", status=status)
+            s.add(dep)
+            s.flush()
+            s.add(models.TaskDependency(task_id=main_task.id, depends_on_id=dep.id))
+        dep.status = status
+        s.commit()
+
+
+def test_open_dependencies_hold_the_handoff_back(w):
+    """R4a pre-review finding 2: the handoff dropped task dependencies, so an imported task could run while its
+    production prerequisites were unmet. Release (and renewal) refuses while any dependency is not DONE, and a
+    dependency reopened after the release refuses delivery: nothing reaches Stage C."""
+    _depend(w, enums.TaskStatus.READY)
+    r = w.release()
+    assert r.status_code == 409 and "DEPENDENCIES_OPEN" in r.text
+    assert "remote_stage_c" not in w.prod_task().context and w.calls == []
+    _depend(w, enums.TaskStatus.DONE)
+    assert w.release().status_code == 201
+    _depend(w, enums.TaskStatus.IN_PROGRESS)                      # reopened after the founder's release
+    out = w.sync()["requests"]
+    assert out[0]["outcome"] == "DEPENDENCIES_OPEN" and w.calls == [] and w.sc_tasks() == []
+    assert w.prod_task().context["remote_stage_c"]["delivery"] == "REFUSED"
+
+
+@pytest.mark.parametrize("change", ["expired", "edited"])
+def test_the_founder_renews_an_expired_or_edited_release(w, change):
+    """R3 finding 4: a release refused for RELEASE_EXPIRED / TASK_CHANGED was stuck for good. The founder's own new
+    release (never sync) supersedes it with a new packet from the task as stored now; the old one is never sent."""
+    old = w.release().json()
+    with Session(w.prod) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        if change == "edited":
+            task.objective = "the corrected objective"
+        s.commit()
+    later = datetime.now(timezone.utc) + timedelta(hours=25)
+    out = w.sync(now=later if change == "expired" else None)["requests"]
+    assert out[0]["outcome"] == {"expired": "RELEASE_EXPIRED", "edited": "TASK_CHANGED"}[change] and w.calls == []
+    assert w.sync()["requests"] == []                                         # sync alone never renews it
+    assert w.prod_task().context["remote_stage_c"]["id"] == old["id"]
+    r = w.release()
+    assert r.status_code == 201, r.text
+    new = r.json()
+    assert new["id"] != old["id"] and new["payload_sha256"] != old["payload_sha256"] and new["delivery"] == "PENDING"
+    remote = w.prod_task().context["remote_stage_c"]
+    assert remote["packet"]["task"]["objective"] == w.prod_task().objective
+    assert w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL
+    with Session(w.prod) as s:
+        rows = s.scalars(select(models.AuditLog).where(models.AuditLog.entity_key == "TASK-0001")
+                         .order_by(models.AuditLog.id)).all()
+        actions = [r.action for r in rows]
+        assert actions.count("handoff.release") == 2 and "handoff.supersede" in actions   # history kept
+        sup = next(r for r in rows if r.action == "handoff.supersede")
+        assert sup.actor == FID and sup.before["id"] == old["id"]
+    assert w.sync()["requests"][0]["outcome"] == "IMPORTED"
+    assert [c for c in w.calls if old["id"] in c[1]] == []                    # the old packet never reached Stage C
+    assert [t.context["remote_stage_c"]["id"] for t in w.sc_tasks()] == [new["id"]]
+
+
+def test_a_superseded_release_cannot_be_put_back(w):
+    """The old packet's founder release no longer authorizes anything once a new release superseded it."""
+    w.release()
+    old_remote = dict(w.prod_task().context["remote_stage_c"])
+    w.sync(now=datetime.now(timezone.utc) + timedelta(hours=25))
+    w.release()
+    with Session(w.prod) as s:                                                # replay the old record by hand
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        task.context = {**task.context, "remote_stage_c": {**old_remote, "delivery": "PENDING"}}
+        s.commit()
+    out = w.sync()["requests"]
+    assert out[0]["outcome"] == "RELEASE_NOT_AUTHORIZED" and w.calls == []
+    assert w.sc_tasks() == []
+
+
+def _open_sc(w):
+    return [t for t in w.sc_tasks() if t.status not in (enums.TaskStatus.DONE, enums.TaskStatus.CANCELLED)]
+
+
+def _sc_activate(w, hid, sha):
+    with w.on("sc"), Session(w.sc) as s:
+        return h.activate_import(s, hid, sha)
+
+
+def _refused_after_import(w, change):
+    """Release, import on Stage C, then let the activation be refused (expired or edited) before it is ever sent."""
+    old = w.release().json()
+    assert w.sync()["requests"][0]["outcome"] == "IMPORTED"
+    if change == "edited":
+        with Session(w.prod) as s:
+            s.scalar(select(models.Task).where(models.Task.key == "TASK-0001")).objective = "the corrected objective"
+            s.commit()
+    later = datetime.now(timezone.utc) + timedelta(hours=25)
+    out = w.sync(now=later if change == "expired" else None)["requests"]
+    assert out[0]["outcome"] == {"expired": "RELEASE_EXPIRED", "edited": "TASK_CHANGED"}[change]
+    assert not [c for c in w.calls if c[1].endswith("/activate")]           # never activated
+    remote = w.prod_task().context["remote_stage_c"]
+    assert remote["delivery"] == "REFUSED" and remote["remote_task_key"]
+    return old
+
+
+@pytest.mark.parametrize("change", ["expired", "edited"])
+def test_renew_after_import(w, change):
+    """R3 review finding 4: a packet refused after IMPORT but before ACTIVATION was stranded (renewal needed
+    remote_task_key None). Only the founder's new release renews it; Stage C retires the old import when the new one
+    arrives, so there is never a second open task and the old packet can never be activated."""
+    old = _refused_after_import(w, change)
+    assert w.sync()["requests"] == [] and w.prod_task().context["remote_stage_c"]["id"] == old["id"]   # never auto
+    r = w.release()
+    assert r.status_code == 201, r.text
+    new = r.json()
+    assert new["id"] != old["id"] and new["payload_sha256"] != old["payload_sha256"]
+    with Session(w.prod) as s:
+        sup = s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.supersede"))
+        assert sup.actor == FID and sup.before["id"] == old["id"]
+    assert w.sync()["requests"][0]["outcome"] == "IMPORTED"
+    [live] = _open_sc(w)
+    assert live.context["remote_stage_c"]["id"] == new["id"] and len(w.sc_tasks()) == 2   # no duplicate open task
+    [gone] = [t for t in w.sc_tasks() if t.context["remote_stage_c"]["id"] == old["id"]]
+    assert gone.status == enums.TaskStatus.CANCELLED
+    with pytest.raises(h.HandoffError) as e:                                  # the old import never activates
+        _sc_activate(w, old["id"], old["payload_sha256"])
+    assert e.value.code == "CANCELLED"
+    assert w.sync()["requests"][0]["outcome"] == "ACTIVATED"
+    with Session(w.sc) as s:
+        assert s.scalar(select(func.count()).select_from(models.AuditLog)
+                        .where(models.AuditLog.action == "handoff.supersede")) == 1
+
+
+def test_renew_refused_if_activated(w):
+    """Once production recorded an activation, the old packet is Stage C's live work: never superseded."""
+    old = w.release().json()
+    w.sync()
+    assert w.sync()["requests"][0]["outcome"] == "ACTIVATED"
+    with Session(w.prod) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        task.context = {**task.context, "remote_stage_c": {**task.context["remote_stage_c"], "delivery": "REFUSED",
+                                                             "last_error_code": "RELEASE_EXPIRED"}}
+        s.commit()
+    assert w.release().json()["id"] == old["id"]
+    with Session(w.prod) as s:
+        assert s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.supersede")) is None
+
+
+def test_renew_lost_activation_ack(w):
+    """Stage C activated the old import but production never saw the ack. The renewal reaches Stage C, which refuses it
+    (ACTIVE_IMPORT) rather than retire live work or open a second task; production then restores the old handoff
+    record, so polling and cancellation address the live import again. Nothing is renewed automatically."""
+    old = w.release().json()
+    w.sync()
+    assert _sc_activate(w, old["id"], old["payload_sha256"])["activation"] == "ACTIVATED"
+    w.sync(now=datetime.now(timezone.utc) + timedelta(hours=25))
+    new = w.release().json()
+    assert new["id"] != old["id"]
+    out = w.sync()["requests"][0]
+    assert out["outcome"] == "RESTORED", out
+    remote = w.prod_task().context["remote_stage_c"]
+    assert remote["id"] == old["id"] and remote["delivery"] == "DELIVERED" and "superseded" not in remote
+    [only] = _open_sc(w)
+    assert only.context["remote_stage_c"]["id"] == old["id"] and len(w.sc_tasks()) == 1
+    with Session(w.prod) as s:
+        row = s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.supersede_reverted"))
+        assert row.before["id"] == new["id"] and row.after["id"] == old["id"] and row.after["code"] == "ACTIVE_IMPORT"
+    assert w.release().json()["id"] == old["id"]                              # no new founder approval is made
+    assert w.sync()["requests"][0]["outcome"] == "OBSERVED"                   # the live import is polled again
+    assert w.calls[-1] == ("GET", h.API_PREFIX + old["id"])
+    with w.on("prod"):
+        assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
+                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 200
+    assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED"               # ...and cancelled by its own id
+    assert w.calls[-1] == ("POST", f"{h.API_PREFIX}{old['id']}/cancel") and _open_sc(w) == []
+
+
+def test_cancel_before_renewal_delivery_withdraws_the_live_import(w):
+    """R4a pre-review finding 1: Stage C activated the old import (its ack lost), the founder renewed, then cancelled
+    before the renewed packet was delivered. The cancellation must withdraw the live old import by its own id, not
+    only tombstone the new id; the task's cancellation is acknowledged only after both."""
+    old = w.release().json()
+    w.sync()
+    assert _sc_activate(w, old["id"], old["payload_sha256"])["activation"] == "ACTIVATED"
+    w.sync(now=datetime.now(timezone.utc) + timedelta(hours=25))
+    new = w.release().json()
+    assert new["id"] != old["id"] and len(_open_sc(w)) == 1
+    with w.on("prod"):
+        assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
+                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 200
+    assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED_SUPERSEDED"
+    assert w.calls[-1] == ("POST", f"{h.API_PREFIX}{old['id']}/cancel") and _open_sc(w) == []
+    assert w.prod_task().context["remote_stage_c"]["cancellation"] != "ACKNOWLEDGED"
+    assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED"
+    assert w.calls[-1] == ("POST", f"{h.API_PREFIX}{new['id']}/cancel")
+    assert w.prod_task().context["remote_stage_c"]["cancellation"] == "ACKNOWLEDGED"
+    assert w.sync()["requests"] == []
+
+
+def test_renew_twice_keeps_live_id(w):
+    """A renewal that itself expired before delivery is renewed again: the record that reached Stage C is carried
+    forward, so the live import is the one restored."""
+    old = w.release().json()
+    w.sync()
+    _sc_activate(w, old["id"], old["payload_sha256"])
+    w.sync(now=datetime.now(timezone.utc) + timedelta(hours=25))
+    mid = w.release().json()
+    with Session(w.prod) as s:   # the second packet expires before it is ever delivered
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        assert task.context["remote_stage_c"]["superseded"]["id"] == old["id"]
+    assert w.sync(now=datetime.now(timezone.utc) + timedelta(hours=25))["requests"][0]["outcome"] == "RELEASE_EXPIRED"
+    last = w.release().json()
+    assert last["id"] not in (old["id"], mid["id"])
+    assert w.prod_task().context["remote_stage_c"]["superseded"]["id"] == old["id"]
+    assert w.sync()["requests"][0]["outcome"] == "RESTORED"
+    assert w.prod_task().context["remote_stage_c"]["id"] == old["id"] and len(w.sc_tasks()) == 1
+
+
+@pytest.mark.parametrize("who", ["cancel", "operator"])
+def test_renew_refused(w, who):
+    old = _refused_after_import(w, "expired")
+    if who == "cancel":
+        with Session(w.prod) as s:
+            task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+            task.context = {**task.context, "remote_stage_c": {**task.context["remote_stage_c"],
+                                                                 "cancel_requested_at": "2026-01-01T00:00:00+00:00"}}
+            s.commit()
+        assert w.release().json()["id"] == old["id"]
+    else:
+        with w.on("prod"), Session(w.prod) as s, pytest.raises(PermissionError):
+            h.release(s, s.scalar(select(models.Task).where(models.Task.key == "TASK-0001")), founder="operator:x")
+    with Session(w.prod) as s:
+        assert s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.supersede")) is None
+    assert len(_open_sc(w)) == 1
+
+
+@pytest.mark.parametrize("code", ["RELEASE_NOT_AUTHORIZED", "HTTP_409"])
+def test_other_refusals_are_never_renewed(w, code):
+    """Only an expired or changed release is renewable; any other refusal keeps its packet (a plain retry)."""
+    old = w.release().json()
+    with Session(w.prod) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+        task.context = {**task.context, "remote_stage_c": {**task.context["remote_stage_c"], "delivery": "REFUSED",
+                                                             "last_error_code": code}}
+        s.commit()
+    assert w.release().json()["id"] == old["id"]
+    with Session(w.prod) as s:
+        assert s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.supersede")) is None
+
 def test_cancel_first(w):
     """Founder cancels before delivery: Stage C gets a tombstone, and a delayed PUT can never import it."""
     hid = w.release().json()["id"]

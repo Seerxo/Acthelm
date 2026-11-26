@@ -14,7 +14,6 @@ export LC_ALL=C
 
 DIR=${STAGE_C_ARM_DIR:-/opt/company-os}
 OVERRIDE=${STAGE_C_ARM_OVERRIDE:-/root/stage-c-pilot.compose.yml}
-OVERRIDE_JSON='{"services": {"company-worker": {"environment": {"ENABLE_AUTONOMOUS_CODE_WRITE": "true"}}}}'
 DRY=0
 case "${1:-}" in
   "") ;;
@@ -58,14 +57,18 @@ ACTION=${DECISION%% *}
 DETAIL=${DECISION#* }
 TASK=-; REASON=$DETAIL
 if [ "$ACTION" = ARM ]; then TASK=$DETAIL; REASON=authorized; fi
+# The armed worker carries the one task it is armed for; the worker refuses every other task's code write
+# (control.ARMED_TASK_ENV), so one task's Start Pilot never lets another task write. TASK matched ^[A-Z]+-[0-9]+$.
+OVERRIDE_JSON='{"services": {"company-worker": {"environment": {"ENABLE_AUTONOMOUS_CODE_WRITE": "true", "STAGE_C_ARMED_TASK": "'"$TASK"'"}}}}'
 
 # ---------------------------------------------------------------- current worker state
 ARMED=$(docker exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE 2>/dev/null) || ARMED=UNKNOWN
+ARMED_TASK=$(docker exec company-worker printenv STAGE_C_ARMED_TASK 2>/dev/null) || ARMED_TASK=-
 RUNNING=$(docker inspect -f '{{.State.Running}}' company-worker 2>/dev/null) || RUNNING=UNKNOWN
 
 if [ "$DRY" = 1 ]; then
   echo "decision: $DECISION"
-  echo "worker:   ENABLE_AUTONOMOUS_CODE_WRITE=$ARMED running=$RUNNING"
+  echo "worker:   ENABLE_AUTONOMOUS_CODE_WRITE=$ARMED STAGE_C_ARMED_TASK=$ARMED_TASK running=$RUNNING"
   exit 0
 fi
 
@@ -83,7 +86,15 @@ disarm() {
     # Cannot recreate it safely (unreadable image pins or a Compose failure): stop it. A stopped worker
     # writes nothing; the next tick with good inputs starts it again, unarmed or armed as decided.
     docker stop company-worker >/dev/null 2>&1 || true
+    # The override goes either way: a running container never re-reads it, and no later Compose run may re-arm
+    # from it. Only a worker read back as not running counts as stopped; a failed, ignored or unreadable stop
+    # may leave it running armed, so this tick reports DISARM_FAILED and exits 1 (the next tick tries again).
     rm -f -- "$OVERRIDE"
+    after=$(docker inspect -f '{{.State.Running}}' company-worker 2>/dev/null) || after=UNKNOWN
+    if [ "$after" != false ]; then
+      log DISARM_FAILED "$REASON" "$TASK"
+      exit 1
+    fi
     log DISARM_STOP "$REASON" "$TASK"
   fi
 }
@@ -98,12 +109,15 @@ if [[ "$RUNNING" != false && ( "$ARMED" != true && "$ARMED" != false || "$RUNNIN
 fi
 
 if [ "$ACTION" = ARM ]; then
-  [ "$ARMED" = true ] && exit 0
+  # The pause fence is re-checked on every ARM tick, also for a worker already armed: the API can be recreated with
+  # the fence off while the worker stays armed.
   if [ "$(docker exec company-api printenv CODER_PAUSE_FENCE_ENABLED 2>/dev/null || true)" != true ]; then
     REASON=pause_fence_off
     disarm
     exit 1
   fi
+  # Already armed for this very task: nothing to do. Armed for another task: re-arm for this one.
+  [ "$ARMED" = true ] && [ "$ARMED_TASK" = "$TASK" ] && exit 0
   if [ -L "$OVERRIDE" ]; then log ARM_REFUSED override_symlink "$TASK"; exit 1; fi
   tmp=$(umask 077 && mktemp "$(dirname "$OVERRIDE")/.stage-c-pilot.XXXXXX")
   printf '%s\n' "$OVERRIDE_JSON" > "$tmp"

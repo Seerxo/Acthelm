@@ -291,17 +291,35 @@ def _standing_denial(db: Session, row, wanted, sha: str, now: datetime) -> str |
     return None
 
 
+# Set by the Stage C host timer (scripts/stage-c-arm) on the worker it arms: the one task that Start Pilot armed it
+# for. While it is set (even empty), this process grants no code write to any other task, by any authorization, and
+# the armed task itself writes only under its own one-task (pilot) grant: no standing fallback, so once that grant is
+# consumed or revoked the task cannot claim another run before the timer disarms. Unset (a worker not armed by the
+# timer) leaves the authorization checks below as they are; the global ENABLE_AUTONOMOUS_CODE_WRITE gate is unchanged
+# either way.
+ARMED_TASK_ENV = "STAGE_C_ARMED_TASK"
+
+
+def armed_task_denial(task) -> str | None:
+    armed = os.environ.get(ARMED_TASK_ENV)
+    if armed is None:
+        return None
+    return None if _TASK_KEY.match(armed) and armed == getattr(task, "key", None) else "stage_c_armed_for_other_task"
+
+
 def write_authorization_denial(db: Session, task, sha: str, now: datetime | None = None) -> str | None:
     """None when this task may claim a code write: its own one-task authorization, else the standing one."""
     from app import stage_c_handoff  # late: stage_c_handoff imports this module
     now = now or datetime.now(timezone.utc)
+    if (armed := armed_task_denial(task)) is not None:
+        return armed
     pilot = pilot_authorization_denial(db, task.key, sha, now)
     if stage_c_handoff.imported(task) is not None:
         # A handed-off task: only its own handoff-bound one-task grant, never the standing fallback.
         row = db.get(models.ControlState, PILOT_AUTHORIZATION)
         return pilot or stage_c_handoff.grant_denial(db, task, row.value if row is not None else {})
-    if pilot is None:
-        return None
+    if pilot is None or ARMED_TASK_ENV in os.environ:
+        return pilot                     # armed: the one-task grant only, never the standing fallback
     row = db.get(models.ControlState, STANDING_AUTHORIZATION)
     standing = _standing_denial(db, row, _task_paths(task), sha, now)
     if standing is None:
@@ -369,6 +387,8 @@ def consume_write_authorization(db: Session, task, sha: str, run_id: int, now: d
     """Spend the one-task authorization if it is valid, else one run of the standing one. Caller commits."""
     from app import stage_c_handoff  # late: stage_c_handoff imports this module
     now = now or datetime.now(timezone.utc)
+    if (armed := armed_task_denial(task)) is not None:
+        return armed                     # nothing spent: the armed worker belongs to another task
     if stage_c_handoff.imported(task) is not None:
         row = db.scalar(select(models.ControlState).where(models.ControlState.key == PILOT_AUTHORIZATION)
                         .with_for_update().execution_options(populate_existing=True))
@@ -378,8 +398,9 @@ def consume_write_authorization(db: Session, task, sha: str, run_id: int, now: d
         if denial is None:
             models.bump_revision(task)   # the consumed grant is part of the handoff's reported state
         return denial
-    if consume_pilot_authorization(db, task.key, sha, run_id, now) is None:
-        return None
+    pilot = consume_pilot_authorization(db, task.key, sha, run_id, now)
+    if pilot is None or ARMED_TASK_ENV in os.environ:
+        return pilot                     # armed: the one-task grant only, never the standing fallback
     row = db.scalar(select(models.ControlState).where(models.ControlState.key == STANDING_AUTHORIZATION)
                     .with_for_update().execution_options(populate_existing=True))
     denial = _standing_denial(db, row, _task_paths(task), sha, now)

@@ -91,7 +91,12 @@ def test_decide_errors(monkeypatch, tmp_path):
 
 
 # ------------------------------------------------------------------------------- the root script, fake docker
-OVERRIDE_JSON = '{"services": {"company-worker": {"environment": {"ENABLE_AUTONOMOUS_CODE_WRITE": "true"}}}}\n'
+def override_json(task="TASK-0100"):
+    return ('{"services": {"company-worker": {"environment": {"ENABLE_AUTONOMOUS_CODE_WRITE": "true", '
+            f'"STAGE_C_ARMED_TASK": "{task}"}}}}}}}}\n')
+
+
+OVERRIDE_JSON = override_json()
 IMAGES = {f"COMPANY_OS_IMAGE_{n}": "sha256:" + c * 64 for n, c in zip(("API", "WORKER", "REASONER", "EGRESS"), "1234")}
 FAKE_DOCKER = """#!/bin/sh
 echo "docker $*" >> "$FAKE_LOG"
@@ -100,16 +105,31 @@ case "$*" in
   "exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE")
     [ "$FAKE_ERROR" != flag ] && [ "$FAKE_ERROR" != stopped ] || exit 1
     cat "$FAKE_STATE" ;;
-  "exec company-api printenv CODER_PAUSE_FENCE_ENABLED") echo true ;;
-  inspect*) [ "$FAKE_ERROR" != inspect ] || exit 1; [ "$FAKE_ERROR" = stopped ] && echo false || echo true ;;
+  "exec company-worker printenv STAGE_C_ARMED_TASK") [ -s "$FAKE_STATE.task" ] || exit 1; cat "$FAKE_STATE.task" ;;
+  "exec company-api printenv CODER_PAUSE_FENCE_ENABLED") echo "${FAKE_FENCE:-true}" ;;
+  inspect*)
+    if [ -s "$FAKE_STATE.stopped" ]; then [ "$(cat "$FAKE_STATE.stopped")" = false ] || exit 1; echo false; exit 0; fi
+    [ "$FAKE_ERROR" != inspect ] || exit 1; [ "$FAKE_ERROR" = stopped ] && echo false || echo true ;;
+  stop*)
+    case "$FAKE_STOP" in
+      fail) exit 1 ;;
+      ignored) ;;
+      unreadable) echo unreadable > "$FAKE_STATE.stopped" ;;
+      *) echo false > "$FAKE_STATE.stopped" ;;
+    esac ;;
   compose*) [ "$FAKE_COMPOSE_FAIL" != 1 ] || exit 1
+    rm -f "$FAKE_STATE.stopped"
     env | grep '^COMPANY_OS_' | sort >> "$FAKE_LOG"
-    case "$*" in *stage-c-pilot*) echo true > "$FAKE_STATE" ;; *) echo false > "$FAKE_STATE" ;; esac ;;
+    case "$*" in
+      *stage-c-pilot*) echo true > "$FAKE_STATE"
+        sed -n 's/.*"STAGE_C_ARMED_TASK": "\\([^"]*\\)".*/\\1/p' "$(printf '%s\\n' "$@" | grep stage-c-pilot)" > "$FAKE_STATE.task" ;;
+      *) echo false > "$FAKE_STATE"; rm -f "$FAKE_STATE.task" ;;
+    esac ;;
 esac
 """
 
 
-def _run(tmp_path, decision, armed, *args, error="", compose_fail=False):
+def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop="", fence="true"):
     bin_, host, root = tmp_path / "bin", tmp_path / "opt", tmp_path / "root"
     for d in (bin_, host, root):
         d.mkdir(exist_ok=True)
@@ -123,7 +143,7 @@ def _run(tmp_path, decision, armed, *args, error="", compose_fail=False):
     env = {"PATH": f"{bin_}:/usr/bin:/bin", "STAGE_C_ARM_DIR": str(host),
            "STAGE_C_ARM_OVERRIDE": str(root / "stage-c-pilot.compose.yml"), "FAKE_LOG": str(tmp_path / "log"),
            "FAKE_STATE": str(tmp_path / "state"), "FAKE_DECISION": decision,
-           "FAKE_ERROR": error, "FAKE_COMPOSE_FAIL": str(int(compose_fail)),
+           "FAKE_ERROR": error, "FAKE_COMPOSE_FAIL": str(int(compose_fail)), "FAKE_STOP": stop, "FAKE_FENCE": fence,
            "FAKE_SNIPPET": str(tmp_path / "snippet.py")}
     out = subprocess.run(["bash", str(ROOT / "scripts/stage-c-arm"), *args], env=env, capture_output=True,
                          text=True, timeout=30)
@@ -151,6 +171,28 @@ def test_sh_arm(tmp_path):
     assert log2.count("compose") == log.count("compose")
 
 
+def test_sh_already_armed_rechecks_the_pause_fence(tmp_path):
+    """R4a pre-review finding 3: a worker already armed for the requested task is not left armed once the API runs
+    with the pause fence off; every ARM tick re-checks the fence before the already-armed shortcut."""
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false")
+    assert out.returncode == 0 and ovr.exists()
+    out, log2, ovr = _run(tmp_path, "ARM TASK-0100", "true", fence="false")
+    assert out.returncode == 1
+    assert "reason=pause_fence_off" in log2[len(log):] and not ovr.exists()
+
+
+def test_sh_rearms_for_a_new_task(tmp_path):
+    """Armed for one task, a Start Pilot for another re-arms the worker for that task only (R3 finding 1)."""
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false")
+    assert out.returncode == 0 and (tmp_path / "state.task").read_text().strip() == "TASK-0100"
+    out, log2, ovr = _run(tmp_path, "ARM TASK-0200", "true")
+    assert out.returncode == 0, out.stderr
+    assert log2.count("docker compose") == 2 * log.count("docker compose")    # recreated (cumulative log), not left as TASK-0100
+    assert ovr.read_text() == override_json("TASK-0200") and json.loads(ovr.read_text())
+    assert (tmp_path / "state.task").read_text().strip() == "TASK-0200"
+    assert "action=ARM reason=authorized task=TASK-0200" in log2
+
+
 @pytest.mark.parametrize("error", ["inspect", "flag"], ids=["i", "f"])
 @pytest.mark.parametrize("arm", [False, True], ids=["d", "a"])
 @pytest.mark.parametrize("fail", [False, True], ids=["ok", "stop"])
@@ -166,6 +208,24 @@ def test_sh_unknown(tmp_path, error, arm, fail, armed):
             "up -d --no-deps --no-build --pull never company-worker") in log
     assert ("docker stop company-worker" in log) == fail
     assert f"action={'DISARM_STOP' if fail else 'DISARM'} " in log
+
+
+@pytest.mark.parametrize("stop", ["fail", "ignored", "unreadable"])
+@pytest.mark.parametrize("arm", [False, True], ids=["d", "a"])
+def test_sh_stop_unverified(tmp_path, stop, arm):
+    """R3 review finding 3: when the worker cannot be recreated and `docker stop` fails, is ignored, or its result
+    cannot be read back, the worker may still be running armed. The timer must not claim a disarm: DISARM_FAILED,
+    exit 1, and the override is still removed so nothing can re-arm from it. The next tick tries again."""
+    (tmp_path / "root").mkdir()
+    (tmp_path / "root/stage-c-pilot.compose.yml").write_text(OVERRIDE_JSON)
+    decision = "ARM TASK-0100" if arm else "DISARM stage_c_authorization_missing"
+    out, log, ovr = _run(tmp_path, decision, "true", compose_fail=True, stop=stop)
+    assert out.returncode == 1, out.stderr
+    assert "docker stop company-worker" in log and "action=DISARM_FAILED " in log
+    assert "DISARM_STOP" not in log and "action=DISARM " not in log
+    assert not ovr.exists()
+    out, log2, _ = _run(tmp_path, "DISARM stage_c_authorization_missing", "true", compose_fail=True)   # stop works now
+    assert out.returncode == 0 and "action=DISARM_STOP " in log2[len(log):]
 
 
 @pytest.mark.parametrize("decision", ["DISARM stage_c_authorization_missing", "junk"], ids=["auth", "junk"])

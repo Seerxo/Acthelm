@@ -949,6 +949,7 @@ def reconcile(db):
             if consumed:
                 request = None
         mode = os.environ.get("STAGE_C_REFRESH_RECONCILE", "dry-run")
+        evidence_failed = False
         if request:
             requested_at = (request.occurred_at.replace(tzinfo=timezone.utc)
                             if request.occurred_at.tzinfo is None else request.occurred_at)
@@ -1015,7 +1016,17 @@ def reconcile(db):
                                  after={"request_audit_id": request.id, "code": "EVIDENCE_UNAVAILABLE"})
                     db.commit()
                 outcomes.append({"task": task.key, "outcome": "BLOCKED", "reasons": ["EVIDENCE_UNAVAILABLE"]})
-            if mode in ("apply", "dry-run"):
+                if mode == "apply":
+                    # Missing evidence is not a refusal: the request stays pending for a later tick (bounded by its
+                    # 24h life), but it must not suppress this tick's normal merge recovery. The rollback released
+                    # the row lock: take it again, or leave the task to the next tick.
+                    evidence_failed = True
+                    task = db.scalar(select(models.Task).where(models.Task.id == task_id,
+                                     models.Task.status.in_((enums.TaskStatus.REVIEW, enums.TaskStatus.BLOCKED)))
+                                     .with_for_update(skip_locked=True).execution_options(populate_existing=True))
+                    if task is None:
+                        continue
+            if mode in ("apply", "dry-run") and not evidence_failed:
                 continue
         if (task.status == enums.TaskStatus.BLOCKED
                 and stage_c_ci.merge_recovery_block(db, task) is None):
