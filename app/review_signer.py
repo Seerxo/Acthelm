@@ -16,8 +16,8 @@ accepted only if it comes from the reviewer provider, matches the schema and cop
 The reviewer is fixed in this reviewed code, never chosen on the host (a root-chosen reviewer was withdrawn on
 2026-10-23): the provider asked is REVIEW_PROVIDER and the identity signed is REVIEWER_ID, which must be enrolled in
 the founder-signed policy and differ from every coder identity (release_gateway.verify_review). Each verdict's
-findings are appended to FINDINGS_LOG (0600, the signer's own volume), never the prompt, diff or any key;
-if that record cannot be written, nothing is signed. Standard library only.
+findings are appended, credential-redacted (app/redact), to FINDINGS_LOG (0600, the signer's own volume), never the
+prompt, diff or any key; if that record cannot be written, nothing is signed. Standard library only.
 
 Usage (container): python -m app.review_signer
 """
@@ -34,6 +34,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 from app import release_gateway as rg
+from app.redact import redact
 
 MAX_BODY = 4_000_000
 REVIEW_TIMEOUT_S = 900
@@ -145,7 +146,9 @@ class Signer:
         prompt and keys are never written. No log configured (tests) records nothing."""
         if self.findings_log is None:
             return True
-        findings = [str(f)[:MAX_FINDING_CHARS] for f in (output.get("findings") or [])[:MAX_FINDINGS]]
+        # Redact whole, then cap: a cut first could leave a credential prefix too short to be recognised. redact()
+        # masks credential shapes and fails closed (a placeholder, never raw text); task text stays 0600-only.
+        findings = [redact(str(f))[:MAX_FINDING_CHARS] for f in (output.get("findings") or [])[:MAX_FINDINGS]]
         entry = {"at": att["issued_at"], "reviewer": att["reviewer"], "verdict": att["verdict"],
                  "base": packet["base"], "sha": packet["sha"], "nonce": packet["nonce"],
                  "fingerprint": packet["fingerprint"], "packet_sha256": att["packet_sha256"], "findings": findings,

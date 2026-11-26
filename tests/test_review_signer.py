@@ -250,7 +250,7 @@ def test_no_agent_container_can_reach_or_read_the_signer():
 def test_the_signer_image_runs_no_model_and_the_reasoner_holds_no_signing():
     signer_stage, reasoner_stage = stage("review-signer"), stage("reasoner")
     assert "npm" not in signer_stage and "claude-code" not in signer_stage and "codex" not in signer_stage
-    assert "COPY app/__init__.py app/release_gateway.py app/review_signer.py ./app/" in signer_stage
+    assert "COPY app/__init__.py app/redact.py app/release_gateway.py app/review_signer.py ./app/" in signer_stage
     assert "USER signer" in signer_stage and "--uid 10002" in signer_stage
     assert "release_gateway" not in reasoner_stage and "review_signer" not in reasoner_stage
     reasoner_src = (ROOT / "app/reasoner.py").read_text()
@@ -363,6 +363,22 @@ def test_a_log_that_is_not_a_private_single_file_is_never_used(k, tmp_path, kind
         log.write_text(""); log.chmod(0o600); os.link(log, tmp_path / "other.jsonl")
     status, answer = signer(k, Reasoner(), findings_log=str(log)).handle(request(k))
     assert status == 502 and "attestation" not in answer
+
+
+def test_recorded_findings_are_redacted_whole_before_they_are_capped(k, tmp_path):
+    """Findings may quote the diff: a credential-shaped string never reaches the log, not even a prefix the size cap
+    would cut out of one. Redaction masks credentials only; task text is protected by the log's 0600 mode."""
+    token = "ghp_" + "A1b2C3d4" * 5
+    at_cap = "x" * (rs.MAX_FINDING_CHARS - 10) + " " + token
+    findings = [f"leaks {token} here", at_cap, "plain finding"]
+    log = tmp_path / "findings.jsonl"
+    reasoner = Reasoner(output={"verdict": "REJECT", "fingerprint": packet()["fingerprint"], "findings": findings})
+    status, _ = signer(k, reasoner, findings_log=str(log)).handle(request(k))
+    assert status == 200
+    text, entry = log.read_text(), json.loads(log.read_text())
+    assert "ghp_" not in text and "A1b2C3d4" not in text
+    assert entry["findings"][0] == "leaks *** here" and entry["findings"][2] == "plain finding"
+    assert all(len(f) <= rs.MAX_FINDING_CHARS for f in entry["findings"])
 
 
 def test_the_record_names_the_model_that_answered(k, tmp_path):

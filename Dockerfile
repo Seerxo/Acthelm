@@ -99,7 +99,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends openssh-client 
     && rm -rf /var/lib/apt/lists/* \
     && useradd --no-create-home --uid 10002 signer
 WORKDIR /app
-COPY app/__init__.py app/release_gateway.py app/review_signer.py ./app/
+COPY app/__init__.py app/redact.py app/release_gateway.py app/review_signer.py ./app/
 USER signer
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 CMD ["python", "-m", "app.review_signer"]
