@@ -31,8 +31,8 @@ cd "$DIR" 2>/dev/null || CD_OK=0
 
 # Every Docker call is time-bounded (a Compose recreate gets longer): a hung daemon or Compose run must never keep an
 # armed worker past the disarm window. A timed-out call fails like any other error, so the worker state reads UNKNOWN
-# and the script disarms (fail closed). Worst case of one run: at most 14 Docker calls (13 call sites; the decision is asked twice) and 2 Compose runs, each with
-# its limit plus the 5 s kill grace, so 14*(10+5) + 2*(60+5) = 340 s, plus at most a few 2 s log lines;
+# and the script disarms (fail closed). Worst case of one run: at most 15 Docker calls (14 call sites; the decision is asked twice) and 2 Compose runs, each with
+# its limit plus the 5 s kill grace, so 15*(10+5) + 2*(60+5) = 355 s, plus at most a few 2 s log lines;
 # stage-c-arm.service allows more than that
 # (tests/test_stage_c_arm.py pins it), so systemd never kills the run before the fallback stop and its read-back.
 # A limit override is honoured only as 1..default seconds: 0 would disable `timeout`, more would break the budget.
@@ -90,7 +90,10 @@ TASK=-; REASON=$DETAIL
 if [ "$ACTION" = ARM ]; then TASK=$DETAIL; REASON=authorized; fi
 # The armed worker carries the one task it is armed for; the worker refuses every other task's code write
 # (control.ARMED_TASK_ENV), so one task's Start Pilot never lets another task write. TASK matched ^[A-Z]+-[0-9]+$.
-OVERRIDE_JSON='{"services": {"company-worker": {"environment": {"ENABLE_AUTONOMOUS_CODE_WRITE": "true", "STAGE_C_ARMED_TASK": "'"$TASK"'"}}}}'
+# Publication (push to the fork + PR) is part of the same arm: docker-compose.yml pins STAGE_C_PUBLISH_ENABLED to
+# "false", only this override turns it on, and the worker publishes only for its armed task
+# (stage_c_runner.publication_enabled). Disarm recreates without the override, so publication goes off with it.
+OVERRIDE_JSON='{"services": {"company-worker": {"environment": {"ENABLE_AUTONOMOUS_CODE_WRITE": "true", "STAGE_C_ARMED_TASK": "'"$TASK"'", "STAGE_C_PUBLISH_ENABLED": "true"}}}}'
 
 # ---------------------------------------------------------------- current worker state
 ARMED=$(docker exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE 2>/dev/null) || ARMED=UNKNOWN
@@ -98,15 +101,18 @@ ARMED=$(docker exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE 2>/dev/
 READ_FAILED=0
 ARMED_TASK=$(docker exec company-worker sh -c 'printf "%s\n" "${STAGE_C_ARMED_TASK--}"' 2>/dev/null) || {
   ARMED_TASK=-; READ_FAILED=1; }
+PUBLISH=$(docker exec company-worker sh -c 'printf "%s\n" "${STAGE_C_PUBLISH_ENABLED--}"' 2>/dev/null) || {
+  PUBLISH=-; READ_FAILED=1; }
 RUNNING=$(docker inspect -f '{{.State.Running}}' company-worker 2>/dev/null) || RUNNING=UNKNOWN
 
 if [ "$DRY" = 1 ]; then  # read-only; exit 1 when the worker may write contrary to the decision or cannot be read
   shown_task=$ARMED_TASK; [[ "$shown_task" =~ ^[A-Z]+-[0-9]{1,6}$ ]] || shown_task=-
   shown_armed=$ARMED; [[ "$shown_armed" =~ ^(true|false)$ ]] || shown_armed=UNKNOWN
   shown_running=$RUNNING; [[ "$shown_running" =~ ^(true|false)$ ]] || shown_running=UNKNOWN
+  shown_publish=$PUBLISH; [[ "$shown_publish" =~ ^(true|false)$ ]] || shown_publish=-
   echo "decision: $DECISION"
-  echo "worker:   ENABLE_AUTONOMOUS_CODE_WRITE=$shown_armed STAGE_C_ARMED_TASK=$shown_task running=$shown_running"
-  if [ "$RUNNING" = false ] || [ "$ARMED" = false ] \
+  echo "worker:   ENABLE_AUTONOMOUS_CODE_WRITE=$shown_armed STAGE_C_ARMED_TASK=$shown_task STAGE_C_PUBLISH_ENABLED=$shown_publish running=$shown_running"
+  if [ "$RUNNING" = false ] || { [ "$ARMED" = false ] && [ "$PUBLISH" != true ] && [ "$READ_FAILED" = 0 ]; } \
      || { [ "$RUNNING" = true ] && [ "$ARMED" = true ] && [ "$ACTION" = ARM ] && [ "$ARMED_TASK" = "$TASK" ] \
           && [ "$READ_FAILED" = 0 ]; }; then
     exit 0
@@ -148,7 +154,8 @@ write_override() {
 disarm() {
   local post
   if [ "$INPUTS_OK" = 1 ] && compose >/dev/null 2>&1 \
-     && post=$(docker exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE 2>/dev/null) && [ "$post" = false ]; then
+     && post=$(docker exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE STAGE_C_PUBLISH_ENABLED 2>/dev/null) \
+     && [ "$post" = "false"$'\n'"false" ]; then
     remove_override
     RECREATED=1
     log DISARM "$REASON" "$TASK"
@@ -230,7 +237,8 @@ if [ "$ACTION" = ARM ]; then
     disarm
     exit 1
   fi
-  [ "$ARMED" = true ] && [ "$ARMED_TASK" = "$TASK" ] && [ "$WIMG" = "$EXP_WIMG" ] && [ "$WSHA" = "$SHA" ] && exit 0
+  [ "$ARMED" = true ] && [ "$ARMED_TASK" = "$TASK" ] && [ "$PUBLISH" = true ] && [ "$WIMG" = "$EXP_WIMG" ] \
+    && [ "$WSHA" = "$SHA" ] && exit 0
   # A worker armed for another task or release is not left as it is when the override cannot be written.
   if ! write_override; then
     REASON=override_write_failed
@@ -241,8 +249,8 @@ if [ "$ACTION" = ARM ]; then
   # SHA, the pause fence is still on afterwards (the API may have been recreated while Compose ran), and the decision,
   # asked again, is still ARM for this task (a Stop Pilot during Compose disarms now, not on the next tick).
   if compose -f "$OVERRIDE" >/dev/null 2>&1 \
-     && post=$(docker exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE STAGE_C_ARMED_TASK COMPANY_OS_GIT_SHA \
-               2>/dev/null) && [ "$post" = "true"$'\n'"$TASK"$'\n'"$SHA" ] \
+     && post=$(docker exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE STAGE_C_ARMED_TASK \
+               STAGE_C_PUBLISH_ENABLED COMPANY_OS_GIT_SHA 2>/dev/null) && [ "$post" = "true"$'\n'"$TASK"$'\n'"true"$'\n'"$SHA" ] \
      && post=$(docker inspect -f '{{.Image}}' company-worker 2>/dev/null) && [ "$post" = "$EXP_WIMG" ] \
      && post=$(docker exec company-api printenv CODER_PAUSE_FENCE_ENABLED 2>/dev/null) && [ "$post" = true ] \
      && post=$(decide) && [ "$post" = "$DECISION" ]; then
@@ -256,7 +264,8 @@ if [ "$ACTION" = ARM ]; then
 fi
 
 # DISARM. Already off (or no running worker, which writes nothing): only make sure no override is left behind.
-if [ "$ARMED" = false ] || [ "$RUNNING" = false ]; then
+# A worker with publication on (or unreadable) is not off, even with the write flag false: recreate it without.
+if { [ "$ARMED" = false ] && [ "$PUBLISH" != true ] && [ "$READ_FAILED" = 0 ]; } || [ "$RUNNING" = false ]; then
   remove_override
   report_left
   exit 0

@@ -99,7 +99,7 @@ def test_decide_errors(monkeypatch, tmp_path):
 # ------------------------------------------------------------------------------- the root script, fake docker
 def override_json(task="TASK-0100"):
     return ('{"services": {"company-worker": {"environment": {"ENABLE_AUTONOMOUS_CODE_WRITE": "true", '
-            f'"STAGE_C_ARMED_TASK": "{task}"}}}}}}}}\n')
+            f'"STAGE_C_ARMED_TASK": "{task}", "STAGE_C_PUBLISH_ENABLED": "true"}}}}}}}}\n')
 
 
 OVERRIDE_JSON = override_json()
@@ -115,6 +115,11 @@ case "$*" in
   "exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE")
     if [ ! -e "$FAKE_STATE.recreated" ]; then [ "$FAKE_ERROR" != flag ] && [ "$FAKE_ERROR" != stopped ] || exit 1; fi
     cat "$FAKE_STATE" ;;
+  "exec company-worker sh -c "*STAGE_C_PUBLISH_ENABLED*)
+    [ "$FAKE_ERROR" != flag ] && [ "$FAKE_ERROR" != stopped ] || exit 1
+    [ -s "$FAKE_STATE.publish" ] && cat "$FAKE_STATE.publish" || echo - ;;
+  "exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE STAGE_C_PUBLISH_ENABLED")
+    cat "$FAKE_STATE"; [ -s "$FAKE_STATE.publish" ] || exit 1; cat "$FAKE_STATE.publish" ;;
   "exec company-worker sh -c "*STAGE_C_ARMED_TASK*)
     [ "$FAKE_ERROR" != task ] || exit 1                      # a Docker setup error can also exit 1
     [ "$FAKE_ERROR" != flag ] && [ "$FAKE_ERROR" != stopped ] || exit 1
@@ -122,9 +127,9 @@ case "$*" in
   "exec company-api printenv CODER_PAUSE_FENCE_ENABLED")
     if [ -e "$FAKE_STATE.recreated" ] && [ -n "${FAKE_FENCE_AFTER:-}" ]; then echo "$FAKE_FENCE_AFTER"; else echo "${FAKE_FENCE:-true}"; fi
     exit "${FAKE_FENCE_RC:-0}" ;;
-  "exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE STAGE_C_ARMED_TASK COMPANY_OS_GIT_SHA")
-    cat "$FAKE_STATE"; [ -s "$FAKE_STATE.task" ] && [ -s "$FAKE_STATE.sha" ] || exit 1
-    cat "$FAKE_STATE.task" "$FAKE_STATE.sha" ;;
+  "exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE STAGE_C_ARMED_TASK STAGE_C_PUBLISH_ENABLED COMPANY_OS_GIT_SHA")
+    cat "$FAKE_STATE"; [ -s "$FAKE_STATE.task" ] && [ -s "$FAKE_STATE.publish" ] && [ -s "$FAKE_STATE.sha" ] || exit 1
+    cat "$FAKE_STATE.task" "$FAKE_STATE.publish" "$FAKE_STATE.sha" ;;
   "inspect -f {{.Image}} company-worker") [ -s "$FAKE_STATE.image" ] && cat "$FAKE_STATE.image" || echo "sha256:$(printf 0%.0s $(seq 64))" ;;
   "exec company-worker printenv COMPANY_OS_GIT_SHA") [ -e "$FAKE_STATE.sha" ] && cat "$FAKE_STATE.sha" || echo ;;
   inspect*)
@@ -146,8 +151,9 @@ case "$*" in
     env | grep '^COMPANY_OS_' | sort >> "$FAKE_LOG"
     case "$*" in
       *stage-c-pilot*) echo true > "$FAKE_STATE"
-        sed -n 's/.*"STAGE_C_ARMED_TASK": "\\([^"]*\\)".*/\\1/p' "$(printf '%s\\n' "$@" | grep stage-c-pilot)" > "$FAKE_STATE.task" ;;
-      *) echo false > "$FAKE_STATE"; rm -f "$FAKE_STATE.task" ;;
+        sed -n 's/.*"STAGE_C_ARMED_TASK": "\\([^"]*\\)".*/\\1/p' "$(printf '%s\\n' "$@" | grep stage-c-pilot)" > "$FAKE_STATE.task"
+        sed -n 's/.*"STAGE_C_PUBLISH_ENABLED": "\\([^"]*\\)".*/\\1/p' "$(printf '%s\\n' "$@" | grep stage-c-pilot)" > "$FAKE_STATE.publish" ;;
+      *) echo false > "$FAKE_STATE"; rm -f "$FAKE_STATE.task"; echo false > "$FAKE_STATE.publish" ;;
     esac ;;
 esac
 """
@@ -243,7 +249,7 @@ def test_timeout_budget_covers_the_worst_case():
     calls = len(re.findall(r"\$\(docker |^\s*docker stop |docker exec company-api printenv", script, re.M))
     calls += script.count("post=$(decide)")                      # the decision probe runs a second time on ARM
     compose_runs = len(re.findall(r"(?:^\s*if |&& )compose ", script, re.M))   # the arm and the disarm recreate
-    assert (calls, compose_runs) == (14, 2), "update the documented worst case and this test together"
+    assert (calls, compose_runs) == (15, 2), "update the documented worst case and this test together"
     assert 'STAGE_C_ARM_DOCKER_TIMEOUT:-10' in script and 'STAGE_C_ARM_COMPOSE_TIMEOUT:-60' in script
     unit = (ROOT / "scripts/systemd/stage-c-arm.service").read_text()
     limit = int(re.search(r"^TimeoutStartSec=(\d+)$", unit, re.M).group(1))
@@ -547,3 +553,42 @@ def test_sh_stop_pilot_during_compose_disarms_at_once(tmp_path):
 def test_sh_dry_run_exit_reflects_safety(tmp_path, decision, armed, error, rc):
     out, log, ovr = _run(tmp_path, decision, armed, "--dry-run", error=error)
     assert out.returncode == rc and "compose" not in log and "logger" not in log
+
+
+# ------------------------------------------------------------------------------- G5: publication is part of the arm
+def test_pub(tmp_path):
+    """G5. Break caught: STAGE_C_PUBLISH_ENABLED interpolated from the host .env turns publication on outside Start
+    Pilot. The base worker pins it to "false" like the code-write flag; only the arm override turns it on, disarm
+    removes it, a worker armed without it (an older override) is re-armed, and a worker with publication on but the
+    write flag off (a hand-made override) is not "off": DISARM recreates it without."""
+    import yaml
+    env = yaml.safe_load((ROOT / "docker-compose.yml").read_text())["services"]["company-worker"]["environment"]
+    assert env["STAGE_C_PUBLISH_ENABLED"] == "false" and env["ENABLE_AUTONOMOUS_CODE_WRITE"] == "false"
+    assert "STAGE_C_ARMED_TASK" not in env
+    a, b, c = (tmp_path / n for n in "abc")
+    for d in (a, b, c):
+        d.mkdir()
+    out, log, ovr = _run(a, "ARM TASK-0100", "false")
+    assert out.returncode == 0, out.stderr
+    env = json.loads(ovr.read_text())["services"]["company-worker"]["environment"]
+    assert env == {"ENABLE_AUTONOMOUS_CODE_WRITE": "true", "STAGE_C_ARMED_TASK": "TASK-0100",
+                   "STAGE_C_PUBLISH_ENABLED": "true"}
+    assert (a / "state.publish").read_text().strip() == "true"
+    out, log, ovr = _run(a, "DISARM stage_c_authorization_consumed", "true")   # disarm removes it again
+    assert out.returncode == 0 and not ovr.exists()
+    assert (a / "state.publish").read_text().strip() == "false"
+    out, log, _ = _run(a, "ARM TASK-0100", "false", "--dry-run")
+    assert "STAGE_C_PUBLISH_ENABLED=false" in out.stdout
+    # re-arm a worker armed for the task without publication
+    _run(b, "ARM TASK-0100", "false")
+    (b / "state.publish").write_text("false\n")
+    out, log, ovr = _run(b, "ARM TASK-0100", "true")
+    assert out.returncode == 0, out.stderr
+    assert log.count("docker compose") == 2 and (b / "state.publish").read_text().strip() == "true"
+    # stray publication with the write flag off
+    (c / "state.publish").write_text("true\n")
+    out, log, ovr = _run(c, "DISARM stage_c_authorization_missing", "false")
+    assert out.returncode == 0, out.stderr
+    assert ("docker compose -p company-os --env-file .env -f docker-compose.yml "
+            "up -d --no-deps --no-build --pull never company-worker") in log
+    assert (c / "state.publish").read_text().strip() == "false"

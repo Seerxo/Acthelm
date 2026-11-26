@@ -6,7 +6,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { ArrowLeft, ExternalLink, RefreshCw } from "lucide-react"
 import { api, type TaskDetail } from "@/lib/api"
 import { ago, humanize, when } from "@/lib/format"
-import { board, LANE_LABEL, LANE_TONE, laneOf, live, parseHandoff, parseHandoffs, waitingReason, type Handoff } from "@/lib/handoffs"
+import { board, deliveryOf, DELIVERY_LABEL, LANE_LABEL, LANE_TONE, laneOf, live, parseHandoff, parseHandoffs, waitingReason, type Handoff } from "@/lib/handoffs"
 import { BADGE_TONE, ciView, loadError, prHref, reviewView, short, testView, type LoadError, type View } from "@/lib/stage-c"
 import { prLink } from "@/lib/accept"
 import { cn } from "@/lib/utils"
@@ -109,10 +109,11 @@ function HandoffBoard() {
                 {" · "}{agent ? `owner ${agent}` : "owner not recorded"}{h.remote_task_key ? ` · Stage C ${h.remote_task_key}` : ""}
               </>}
               tone={reason && (lane === "BLOCKED" || lane === "UNKNOWN") ? LANE_TONE[lane] : undefined}
-              trail={<><LaneStatus h={h} /><span className="num">updated <At t={h.generated_at ?? h.released_at} /></span></>} />
+              trail={<><LaneStatus h={h} />{deliveryOf(h) && <Status value={deliveryOf(h)!} label={DELIVERY_LABEL[deliveryOf(h)!]}
+                tone={deliveryOf(h) === "MERGED" ? "info" : "success"} />}<span className="num">updated <At t={h.generated_at ?? h.released_at} /></span></>} />
           })}
         </Panel>))}
-    <p className="text-xs text-muted-foreground">Lanes follow the last authenticated Stage C report; without one in the last 3 minutes a task shows as Unknown. Stage C does not report which of its agents is working; "owner" is the production assignee.</p>
+    <p className="text-xs text-muted-foreground">Lanes follow the last authenticated Stage C report; without one in the last 3 minutes a task shows as Unknown. Stage C does not report which of its agents is working; "owner" is the production assignee. Merged is what Stage C reports; Verified is production's own check (main CI green and production running the merge commit); Done is only yours.</p>
   </>
 }
 
@@ -167,7 +168,12 @@ function HandoffResult({ taskKey }: { taskKey: string }) {
           PR #{rt.pr!.number}<ExternalLink className="size-3" aria-hidden /><span className="sr-only">(opens GitHub)</span></a> : NOT_YET],
         ["PR head", <Sha key="h" s={rt.pr?.head_sha ?? null} />],
         ["CI", <Status key="c" value={ciView(rt).kind} label={ciView(rt).label} tone={ciView(rt).tone} />],
-        ["Merge", h!.merge.state === "VERIFIED" ? <span key="m">Verified · <Sha s={h!.merge.commit} /> · <At t={h!.merge.at} /></span> : h!.merge.state === "NOT_OBSERVED" ? "Not observed" : NOT_YET],
+        ["Merge · Stage C reported", h!.merge.state === "MERGED" ? <span key="m">Merged · <Sha s={h!.merge.commit} /> · <At t={h!.merge.at} /></span> : h!.merge.state === "NOT_OBSERVED" ? "Not observed" : NOT_YET],
+        ["Main CI on the merge", h!.merge.state !== "MERGED" ? NOT_YET : h!.merge.main_ci ? humanize(h!.merge.main_ci) : "Not reported"],
+        ["Verified · production", h!.verification.state === "VERIFIED"
+          ? <span key="v">Verified · production runs <Sha s={h!.verification.production_api_sha} /></span>
+          : <Muted key="v">{h!.verification.state === "UNKNOWN" ? "Unknown" : "Not verified"}{h!.verification.reason ? `: ${h!.verification.reason}` : ""}</Muted>],
+        ["Done · founder", t.status === "DONE" ? "Done" : <Muted key="d">Not yet (only you close it, after production verifies)</Muted>],
       ]} />}
     </Section>
 

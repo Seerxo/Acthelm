@@ -52,6 +52,9 @@ STALE_AFTER = timedelta(seconds=RUN_TIMEOUT_S + 300)
 # A tick that makes no progress this long is a hang: exit so docker restarts the worker (app/liveness.py).
 # Longer than the longest legitimate tick (a Stage C attempt may hold one for up to an hour).
 HANG_EXIT_S = float(os.environ.get("WORKER_HANG_EXIT_S", "7200"))
+# A heartbeat never protects a run past this: liveness exits a worker whose tick outlives HANG_EXIT_S (within one
+# 30 s probe), and the run is fenced by holds_attempt meanwhile.
+RUN_MAX_AGE = timedelta(seconds=HANG_EXIT_S)
 RESULT_CLAIM_TTL = timedelta(minutes=5)
 MAX_RESULT_FINALIZATIONS = 3
 WORKER_PROVIDERS = ("claude", "codex")
@@ -65,6 +68,17 @@ RUNTIME = {"git_sha": os.environ.get("COMPANY_OS_GIT_SHA") or None,
 ENABLE_AUTONOMOUS_CODE_WRITE = os.environ.get("ENABLE_AUTONOMOUS_CODE_WRITE", "false").lower() == "true"
 ENABLE_AUTOMATIC_EXTERNAL_RELEASE = os.environ.get("ENABLE_AUTOMATIC_EXTERNAL_RELEASE", "false").lower() == "true"
 MAX_EXTERNAL_INPUT_CHARS = 8000
+# Phase C gap 2, off by default: a BLOCKED code task goes back to READY by itself only when a later run proves its
+# blocker gone (resolution_evidence). Bounded per tick and per task; every resume is audited with its evidence.
+ENABLE_BLOCKED_AUTO_RESUME = os.environ.get("ENABLE_BLOCKED_AUTO_RESUME", "false").lower() == "true"
+AUTO_RESUME_PER_TICK = 1
+AUTO_RESUME_WINDOW = timedelta(days=1)      # at most one automatic resume per task in this window
+AUTO_RESUMED = "task.blocked.auto_resumed"
+# The only block classes (stage_c_worker.execute) whose cause a zero-model fact can prove gone. Not resumable:
+# STALLED (mixed causes), JOB_UNFINISHED and REPAIR_INTERRUPTED (founder inspection), CHECKS_REPEATED, RUNTIME_ERROR,
+# PR/PUSH/DRIFT/privacy, upstream_role_* (security), owner change, ESCALATE and result recovery (founder decisions).
+AUTO_RESUMABLE = ("CODER_CAPACITY:", "LAUNCHER_REFUSED:")
+AUTO_RESUME_PROOF_SCAN = 50
 # A provider that reported quota/rate/auth trouble is not asked again for this long, so
 # an exhausted subscription costs one probe per window, not one per tick.
 # The worker beats every tick (60 s). Ten missed ticks is a dead worker, not a slow one.
@@ -248,9 +262,11 @@ def _capacity_only(run: models.AgentRun) -> bool:
 
 
 def _admission_gate(db: Session, task: models.Task, specs: dict, *,
-                    require_ready: bool = True, allowed_statuses: tuple | None = None
-                    ) -> tuple[str | None, registry.AgentSpec | None]:
-    """Shared safety/dependency gate, independent of execution capacity."""
+                    require_ready: bool = True, allowed_statuses: tuple | None = None,
+                    code_write_flag: bool | None = None) -> tuple[str | None, registry.AgentSpec | None]:
+    """Shared safety/dependency gate, independent of execution capacity. `code_write_flag` replaces this process's
+    ENABLE_AUTONOMOUS_CODE_WRITE for a read-only caller in another container (app/reconciliation.py reads the
+    worker's own flag from its heartbeat); it can only report, never admit a claim."""
     ctx = task.context if isinstance(task.context, dict) else {}
     if stage_c_handoff.released(task):   # B5: Stage C runs it; production never claims or releases it
         return "handed_off_to_stage_c", None
@@ -259,7 +275,7 @@ def _admission_gate(db: Session, task: models.Task, specs: dict, *,
     if task.risk_level != enums.RiskLevel.LOW or task.approval_required:
         return "needs_human_gate", None
     if ctx.get("write"):
-        if not ENABLE_AUTONOMOUS_CODE_WRITE:
+        if not (ENABLE_AUTONOMOUS_CODE_WRITE if code_write_flag is None else code_write_flag):
             return "code_write_disabled", None
         reason = stage_c_worker.admission(db, task)
         if reason:
@@ -753,6 +769,19 @@ def _requeue_unstarted_claim(db: Session, task_id: int) -> bool:
     return True
 
 
+def _run_alive(db: Session, run: models.AgentRun) -> bool:
+    """A Stage C run still beating: stage_c_worker.execute's wait() stamps its agent's last_heartbeat_at on every
+    launcher poll, so a fresh beat after the run began means a live worker (another process, e.g. a deploy overlap)
+    still owns it. A dead worker's run stops beating, and RUN_MAX_AGE bounds the protection either way."""
+    if not (run.tool_calls or {}).get("stage_c") or _aware(run.started_at) <= _now() - RUN_MAX_AGE:
+        return False
+    agent = db.get(models.Agent, run.agent_id) if run.agent_id is not None else None
+    beat = _aware(agent.last_heartbeat_at) if agent is not None else None
+    # ponytail: the end of another run of the same agent also stamps last_heartbeat_at, which can keep a dead run
+    # for at most RUN_MAX_AGE; a per-run beat column if that delay ever matters.
+    return beat is not None and beat >= _aware(run.started_at) and beat > _now() - HEARTBEAT_STALE
+
+
 def recover_stale(db: Session, specs: dict | None = None) -> list[str]:
     cutoff = _now() - STALE_AFTER
     recovered = []
@@ -761,7 +790,7 @@ def recover_stale(db: Session, specs: dict | None = None) -> list[str]:
         models.AgentRun.provider.in_(WORKER_PROVIDERS))).scalars().all()
     for run in runs:
         run_cutoff = _now() - timedelta(hours=1) if (run.tool_calls or {}).get("stage_c") else cutoff
-        if _aware(run.started_at) > run_cutoff:
+        if _aware(run.started_at) > run_cutoff or _run_alive(db, run):
             continue
         if not (run.tool_calls or {}).get("stage_c") and "result_checkpoint" in (run.tool_calls or {}):
             if _resume_result(db, run.id, registry.load() if specs is None else specs) is not None:
@@ -807,6 +836,79 @@ def recover_stale(db: Session, specs: dict | None = None) -> list[str]:
             recovered.append(key)
     db.commit()
     return recovered
+
+
+def resolution_evidence(db: Session, task: models.Task) -> dict | None:
+    """Proof from AgentRun rows alone (no model call) that the blocker of a CODER_CAPACITY or LAUNCHER_REFUSED task is
+    gone: after the blocking run ended, another task's Stage C coder was started by the host launcher (model_calls >= 1)
+    and the attempt went past the coder and the launcher (not CODER_FAILED, not LAUNCHER_REFUSED, no capacity failure).
+    CODER_CAPACITY also needs that coder to be the provider that ran out. Preflight or health checks are not proof:
+    both already passed before every refused attempt."""
+    error = task.error or ""
+    blocking = db.scalar(select(models.AgentRun).where(models.AgentRun.task_id == task.id)
+                         .order_by(models.AgentRun.id.desc()).limit(1))
+    if blocking is None or blocking.ended_at is None or not error.startswith(AUTO_RESUMABLE):
+        return None
+    for run in db.scalars(select(models.AgentRun).where(
+            models.AgentRun.task_id != task.id, models.AgentRun.started_at > blocking.ended_at,
+            models.AgentRun.status != enums.AgentRunStatus.STARTED, models.AgentRun.provider.in_(WORKER_PROVIDERS))
+            .order_by(models.AgentRun.id.desc()).limit(AUTO_RESUME_PROOF_SCAN)):
+        calls = run.tool_calls or {}
+        started = calls.get("model_calls")
+        if (calls.get("stage_c") is not True or type(started) is not int or started < 1
+                or calls.get("outcome") in ("CODER_FAILED", "LAUNCHER_REFUSED") or calls.get("capacity_failure")):
+            continue
+        if error.startswith("CODER_CAPACITY:") and run.provider != blocking.provider:
+            continue
+        return {"class": error.split(":", 1)[0], "blocking_run_id": blocking.id,
+                "blocking_ended_at": _aware(blocking.ended_at).isoformat(), "proof_run_id": run.id,
+                "proof_provider": run.provider, "proof_outcome": calls.get("outcome"),
+                "proof_started_at": _aware(run.started_at).isoformat()}
+    return None
+
+
+def resume_resolved_blocks(db: Session, specs: dict) -> list[str]:
+    """ENABLE_BLOCKED_AUTO_RESUME: BLOCKED -> READY for at most AUTO_RESUME_PER_TICK code tasks whose blocker is proven
+    gone. Under the task row lock it passes everything the founder's own READY would (handoff refusal, founder-owned
+    repair, ready_refusal: pause, admission, host acceptance, authorization, owner) plus the claim's admission gate,
+    with retries left and no automatic resume in AUTO_RESUME_WINDOW. Never spends a retry or calls a model; the claim
+    re-checks budgets and authorization before any attempt."""
+    if not ENABLE_BLOCKED_AUTO_RESUME:
+        return []
+    resumed = []
+    candidates = [task_id for task_id, error, ctx in db.execute(
+        select(models.Task.id, models.Task.error, models.Task.context)
+        .where(models.Task.status == enums.TaskStatus.BLOCKED).order_by(models.Task.id))
+        if (error or "").startswith(AUTO_RESUMABLE) and isinstance(ctx, dict) and ctx.get("write") is True]
+    db.commit()
+    for task_id in candidates:
+        if len(resumed) >= AUTO_RESUME_PER_TICK:
+            break
+        task = _locked_task(db, task_id)
+        evidence = None
+        if (task is not None and task.status == enums.TaskStatus.BLOCKED
+                and (task.error or "").startswith(AUTO_RESUMABLE) and (task.context or {}).get("write") is True
+                and task.retry_count < task.max_attempts
+                and stage_c_worker.published_pr(task) is None and not stage_c_worker.blocked_repair(db, task)
+                and stage_c_handoff.status_refusal(task, enums.TaskStatus.READY) is None
+                and _admission_gate(db, task, specs, allowed_statuses=(enums.TaskStatus.BLOCKED,))[0] is None
+                and ready_refusal(db, task) is None
+                and db.scalar(select(models.AuditLog.id).where(
+                    models.AuditLog.task_id == task.id, models.AuditLog.action == AUTO_RESUMED,
+                    models.AuditLog.occurred_at >= _now() - AUTO_RESUME_WINDOW).limit(1)) is None):
+            evidence = resolution_evidence(db, task)
+        if evidence is None:
+            db.rollback()
+            continue
+        before = {"status": task.status.value, "error": task.error}
+        task.status = enums.TaskStatus.READY
+        audit.record(db, actor="company-worker", action=AUTO_RESUMED, entity_type="task", entity_key=task.key,
+                     reason=f"blocker resolved: {evidence['class']} (run {evidence['proof_run_id']})",
+                     before=before, after={"status": task.status.value, "error": task.error, "evidence": evidence},
+                     task_id=task.id)
+        db.commit()
+        resumed.append(task.key)
+    return resumed
 
 
 # --------------------------------------------------------------------------- envelope
@@ -1275,7 +1377,8 @@ def run_once(db: Session, providers: dict[str, Provider] | None = None,
                autonomy={"stage": "C" if code_ready else "B", "code_write_flag": ENABLE_AUTONOMOUS_CODE_WRITE,
                          "code_write_implemented": True,
                          "stage_c_foundation": list(stage_c.FOUNDATION), "auto_pr": code_ready,
-                         "external_release": ENABLE_AUTOMATIC_EXTERNAL_RELEASE},
+                         "external_release": ENABLE_AUTOMATIC_EXTERNAL_RELEASE,
+                         "blocked_auto_resume": ENABLE_BLOCKED_AUTO_RESUME},
                runtime=RUNTIME)
     paused = control.agents_paused(db)
     # B5 handoff sender (off by default, a no-op then): cancellations and status reads continue while paused,
@@ -1292,6 +1395,7 @@ def run_once(db: Session, providers: dict[str, Provider] | None = None,
     release_dependency_waits(db)
     tracked = stage_c_worker.reconcile(db)
     recovered = recover_stale(db, specs)
+    resumed = resume_resolved_blocks(db, specs)
     # A finite snapshot: unavailable work cannot monopolize a tick or admit an endless stream of new tasks.
     pending = set(db.scalars(select(models.Task.id).where(models.Task.status == enums.TaskStatus.READY)))
     skipped, checked, alerted = {}, {}, set()
@@ -1344,11 +1448,12 @@ def run_once(db: Session, providers: dict[str, Provider] | None = None,
         outcome = (stage_c_worker.execute(db, task, spec, usable)
                    if (task.context or {}).get("write") is True else execute(db, task, spec, usable))
         _heartbeat(db, last=outcome["verdict"], last_task=task.key)
-        return {"paused": False, "model_calls": 1, "recovered": recovered,
+        return {"paused": False, "model_calls": 1, "recovered": recovered, **({"resumed": resumed} if resumed else {}),
                 "skipped": list(skipped.values()), **outcome}
     _heartbeat(db, last=last)
     return {"paused": False, "model_calls": 0, "skipped": list(skipped.values()),
-            "recovered": recovered, "stage_c": tracked, **(waiting or {"work": None})}
+            "recovered": recovered, **({"resumed": resumed} if resumed else {}), "stage_c": tracked,
+            **(waiting or {"work": None})}
 
 
 # --------------------------------------------------------------------------- triggers

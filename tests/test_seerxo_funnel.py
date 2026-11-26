@@ -219,16 +219,20 @@ def test_legitimate_zeros_are_kept_and_an_undefined_rate_is_not_cross_checked():
     assert out["inserted"] == 13 and {float(r.value) for r in _rows(db) if r.metric == "paid_users"} == {0.0}
 
 
-@pytest.mark.parametrize("field", ["total_users", "signups_1d", "signups_7d", "signups_30d", "activation_cohort",
-                                   "activated_7d", "active_users_7d", "quota_hits_7d", "paid_users", "checkout_started_7d",
-                                   "new_signups_generated_7d", "new_signups_failed_only_7d"])
+COUNT_FIELDS = ("total_users", "signups_1d", "signups_7d", "signups_30d", "activation_cohort", "activated_7d",
+                "active_users_7d", "quota_hits_7d", "paid_users", "checkout_started_7d", "new_signups_generated_7d",
+                "new_signups_failed_only_7d")
+
+
+# Fields loop inside one test per bad value: 108 parametrized ids overran the root conftest's PASSED-lines budget.
 @pytest.mark.parametrize("bad", [-1, 2.5, float("nan"), float("inf"), "12", True, 10**15, [1], {"n": 1}])
-def test_bad_n(field, bad):
-    db = _db()
-    out = _sync(db, {"generated_at": GOOD["generated_at"], field: bad})
-    # Break caught: a negative or fractional count becomes a trusted observation.
-    assert out["inserted"] == 0 and len(out["rejected"]) == 1 and field in out["rejected"][0]
-    assert _rows(db) == []
+def test_bad_count_rejects(bad):
+    for field in COUNT_FIELDS:
+        db = _db()
+        out = _sync(db, {"generated_at": GOOD["generated_at"], field: bad})
+        # Break caught: a negative or fractional count becomes a trusted observation.
+        assert out["inserted"] == 0 and len(out["rejected"]) == 1 and field in out["rejected"][0], field
+        assert _rows(db) == [], field
 
 
 @pytest.mark.parametrize("bad", [-0.1, 1.0001, 7, float("nan"), float("-inf"), "0.5", False])

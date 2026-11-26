@@ -47,6 +47,14 @@ RESTORE_TEST_MAX_AGE_D = 10
 TASK_READY_STALE_H = 48
 TASK_BLOCKED_STALE_H = 72
 APPROVAL_STALE_H = 48
+# Time in the CURRENT status (Phase C gap 1). Above worker.HANG_EXIT_S (2h): liveness and recover_stale own a shorter
+# IN_PROGRESS; longer means recovery itself did not happen.
+TASK_IN_PROGRESS_STALL_H = 3
+TASK_REVIEW_STALL_H = 72
+TASK_WAITING_APPROVAL_STALL_H = APPROVAL_STALE_H
+TASK_WAITING_EXTERNAL_STALL_H = 72
+# Audit rows read per task to find when it entered its status.
+STATUS_AUDIT_SCAN = 200
 # youtube-auto publishes daily; 48h is a missed day plus margin.
 PRODUCTION_INACTIVE_H = 48
 # One ControlState row holding the latest host reading, overwritten every run (no history).
@@ -238,24 +246,71 @@ def _last_verified_backup(db: Session, *, restore: bool,
     return db.scalar(stmt.limit(1))
 
 
+# Rows that move a task into a status without recording it: Stage C's CI and verify reconcilers write
+# "improvement.blocked" with only their evidence. stage_c_verify writes it only from a non-BLOCKED task; stage_c_ci also
+# re-blocks an already BLOCKED merge-recovery task, so its prior status is read from the next older row.
+STATUS_ENTRY_ACTIONS = {"improvement.blocked": enums.TaskStatus.BLOCKED.value}
+
+
+def status_entered_at(db: Session, task: models.Task) -> datetime:
+    """When `task` entered its current status: the newest audit row recording a transition into it, else created_at.
+
+    Not updated_at: every row write bumps it (revision, context, Stage C history), which would hide a stall. A row
+    with before/after status counts whatever its action (task.status, task.claim, task.stage-c.interrupted, ...); a
+    STATUS_ENTRY_ACTIONS row counts unless an older row shows the task already in that status. A transition that is
+    not audited at all can still overstate the time; alerts only."""
+    current = task.status.value
+    pending = None   # a STATUS_ENTRY_ACTIONS row into `current` whose prior status is not known yet
+    # ponytail: Python scan of the newest STATUS_AUDIT_SCAN rows (portable across SQLite/Postgres JSON); a typed
+    # status_changed_at column if tasks ever carry far more audit rows than that.
+    for action, before, after, at in db.execute(
+            select(models.AuditLog.action, models.AuditLog.before, models.AuditLog.after, models.AuditLog.occurred_at)
+            .where(models.AuditLog.task_id == task.id).order_by(models.AuditLog.id.desc()).limit(STATUS_AUDIT_SCAN)):
+        if STATUS_ENTRY_ACTIONS.get(action) == current:
+            pending = at            # an older one means the newer was a re-block: the older is the candidate
+            continue
+        after_status = after.get("status") if isinstance(after, dict) else None
+        before_status = (before if isinstance(before, dict) else {}).get("status")
+        if after_status is None:
+            continue
+        if after_status != current:
+            if pending is not None:
+                return pending      # the task was elsewhere before that entry row: it is the entry
+            continue
+        if before_status != current:
+            return at               # an explicit transition into the status
+        pending = None              # the task was already in the status here: the entry is older still
+    return pending or task.created_at
+
+
 def check_stale_work(db: Session) -> list[Finding]:
     """§67 reminder rules. Deliberately one aggregated finding per class, not per task,
-    so a backlog of ten stale tasks is one message rather than ten."""
+    so a backlog of ten stale tasks is one message rather than ten. READY counts from creation; the other open
+    states count the time in the current status (status_entered_at). Alerts only: no task is changed here."""
     out: list[Finding] = []
     now = _now()
 
-    for status, hours, label in (
-        (enums.TaskStatus.READY, TASK_READY_STALE_H, "READY"),
-        (enums.TaskStatus.BLOCKED, TASK_BLOCKED_STALE_H, "BLOCKED"),
+    for status, hours, label, in_status, severity in (
+        (enums.TaskStatus.READY, TASK_READY_STALE_H, "READY", False, enums.Severity.MEDIUM),
+        (enums.TaskStatus.IN_PROGRESS, TASK_IN_PROGRESS_STALL_H, "IN_PROGRESS", True, enums.Severity.HIGH),
+        (enums.TaskStatus.REVIEW, TASK_REVIEW_STALL_H, "REVIEW", True, enums.Severity.MEDIUM),
+        (enums.TaskStatus.WAITING_APPROVAL, TASK_WAITING_APPROVAL_STALL_H, "WAITING_APPROVAL", True,
+         enums.Severity.MEDIUM),
+        (enums.TaskStatus.WAITING_EXTERNAL, TASK_WAITING_EXTERNAL_STALL_H, "WAITING_EXTERNAL", True,
+         enums.Severity.MEDIUM),
+        (enums.TaskStatus.BLOCKED, TASK_BLOCKED_STALE_H, "BLOCKED", True, enums.Severity.MEDIUM),
     ):
         cutoff = now - timedelta(hours=hours)
+        # created_at < cutoff is a sound prefilter: a task cannot have been in a status longer than it has existed.
         rows = db.execute(
             select(models.Task).where(models.Task.status == status,
-                                      models.Task.created_at < cutoff)
+                                      models.Task.created_at < cutoff).order_by(models.Task.id)
         ).scalars().all()
+        if in_status:
+            rows = [t for t in rows if _age_h(status_entered_at(db, t)) > hours]
         if rows:
             keys = ", ".join(t.key for t in rows[:6])
-            out.append(Finding("TASK_FAILED_REPEATEDLY", enums.Severity.MEDIUM,
+            out.append(Finding("TASK_FAILED_REPEATEDLY", severity,
                                f"{len(rows)} task(s) stale in {label} > {hours}h",
                                f"{keys}{' ...' if len(rows) > 6 else ''}",
                                dedupe=f"stale:{label}"))

@@ -78,7 +78,10 @@ def test_lifecycle_is_stepwise_audited_and_merge_is_founder_only():
         stage_c.advance(db, task, s, "company-worker")
     with pytest.raises(PermissionError):
         stage_c.advance(db, task, "MERGED", "company-worker")
-    stage_c.advance(db, task, "MERGED", "founder", {"pr": 60})
+    with pytest.raises(PermissionError):
+        stage_c.advance(db, task, "MERGED", "founder", {"pr": 60})  # bare, unverified: no GitHub merge proof
+    stage_c.advance(db, task, "MERGED", "founder (github:f, via founder_github)",
+                    {"pr": 60, "merged_by": "f", "merge_commit": "c" * 40})
     with pytest.raises(ValueError):
         stage_c.advance(db, task, "ABANDONED", "company-worker")  # merged work is not abandoned
     with pytest.raises(ValueError):

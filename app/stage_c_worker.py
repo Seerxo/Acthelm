@@ -15,8 +15,8 @@ from pathlib import Path
 from sqlalchemy import func, select
 
 from app import (audit, control, coder_source, enums, models, project_profiles, providers, repo_guardian,
-                 repo_guardian_github, stage_c, stage_c_ci, stage_c_credential_boundary, stage_c_merge_gate, stage_c_runner,
-                 stage_c_verify)
+                 repo_guardian_github, stage_c, stage_c_ci, stage_c_credential_boundary, stage_c_handoff,
+                 stage_c_merge_gate, stage_c_runner, stage_c_verify)
 
 REPOSITORY = "seerxo/acthelm"
 POLICY = Path(__file__).resolve().parents[1] / "agents/repository_guardian.yaml"
@@ -213,6 +213,7 @@ def recover_interrupted(db, task, run):
     imp = (task.context or {}).get("improvement") or {}
     stage = imp.get("stage")
     history = imp.get("history") or []
+    before = {"status": task.status.value, "error": task.error, "stage": stage}
     task.error = run.error
     if stage in (None, "INDEPENDENT_REVIEW"):
         task.status = enums.TaskStatus.READY
@@ -240,6 +241,12 @@ def recover_interrupted(db, task, run):
         lease = db.get(models.ControlState, stage_c.lease_key(REPOSITORY))
         if lease and (lease.value or {}).get("holder") == f"stage-c-runner:{task.key}":
             stage_c.release(db, REPOSITORY, lease.value["token"])  # the repository is free again
+    # Its own row, not "task.status": merge_recovery_block reads a "task.status" BLOCKED row as a founder decision.
+    audit.record(db, actor="company-worker", action="task.stage-c.interrupted", entity_type="task",
+                 entity_key=task.key, reason=task.error, before=before,
+                 after={"status": task.status.value, "error": task.error,
+                        "stage": ((task.context or {}).get("improvement") or {}).get("stage"), "run_id": run.id},
+                 task_id=task.id)
     worker._event(db, "TASK_FAILED", enums.Severity.MEDIUM,
                   f"{task.key} Stage C attempt interrupted at {stage}; retry not spent",
                   task=task, detail=run.error)
@@ -401,7 +408,7 @@ def execute(db, task, spec, usable):
                             or task_context_files(task) != job.context
                             or task.objective != original_objective or task.success_criteria != job.success_criteria):
                         out = {"outcome": "WAITING_BEFORE_PUBLISH"}
-                    elif not stage_c_runner.publication_enabled():
+                    elif not stage_c_runner.publication_enabled(task.key):
                         out = {"outcome": "HELD_BEFORE_PUBLISH"}
                     else:
                         # Authoritative PR state is re-read before any push or PR update: a merge or
@@ -679,6 +686,50 @@ def blocked_repair(db, task) -> bool:
     return (task.status == enums.TaskStatus.BLOCKED and stage in REPAIR_STAGES and published_pr(task) is not None
             and not error.startswith((stage_c_ci.MERGE_NOT_RECORDED, PR_CLOSED))
             and (error != "PR_FAILED" or _publication_run(db, task) is None))
+
+
+def done_refusal(db, task) -> str | None:
+    """Why the founder's status route may not set DONE on a task that went through Stage C, or None.
+
+    A task went through Stage C when its context carries an improvement record or the audit trail has an
+    improvement row (context is client-writable at task creation, so neither its presence nor its absence is proof).
+    DONE needs the founder's verified merge, read only from audit rows the server writes: the "improvement.advance"
+    to MERGED that stage_c_ci._record_merge records from GitHub facts (VERIFYING and MEASURED follow only from it),
+    or a refreshed head the founder merged that stage-c-ci reconciled and left for explicit acceptance
+    (REFRESH_CONTEXT_NOT_REVIEWED). Other tasks are not judged here."""
+    from app import stage_c_handoff   # late: stage_c_handoff imports this module lazily too
+    ctx = task.context if isinstance(task.context, dict) else {}
+    imp = ctx.get("improvement")
+    rows = list(db.scalars(select(models.AuditLog).where(
+        models.AuditLog.task_id == task.id, models.AuditLog.entity_key == task.key,
+        models.AuditLog.action.in_(("improvement.advance", "improvement.refresh_reconciled")))))
+    if imp is None and not rows:
+        # A code task handed to Stage C runs there: stage_c_handoff.status_refusal judges its DONE (a fresh report of
+        # a verified merge). A code task that never ran (context.stage_c, set only by the founder's POST /stage-c/tasks
+        # or a handoff import) has no merge to show: it is cancelled, not DONE. Anything else is not Stage C work.
+        if "stage_c" in ctx and not stage_c_handoff.released(task):
+            return ("DONE needs a verified founder merge recorded by Stage C; this code task never ran "
+                    "(cancel it instead)")
+        return None
+    stage = imp.get("stage") if isinstance(imp, dict) else None
+
+    def merge_proven(after) -> bool:
+        evidence = after.get("evidence") if isinstance(after, dict) else None
+        return (isinstance(evidence, dict) and isinstance(evidence.get("merged_by"), str) and evidence["merged_by"]
+                and re.fullmatch(r"[0-9a-f]{40}", str(evidence.get("merge_commit") or "")) is not None)
+    merged = any(r.action == "improvement.advance" and isinstance(r.after, dict) and r.after.get("stage") == "MERGED"
+                 and stage_c.verified_merge(r.actor, r.after.get("evidence")) for r in rows)
+    if merged and stage in ("MERGED", "VERIFYING", "MEASURED"):
+        return None
+    refreshed = next((r for r in sorted(rows, key=lambda r: r.id, reverse=True)
+                      if r.action == "improvement.refresh_reconciled"), None)
+    if (refreshed is not None and refreshed.actor == stage_c_ci.ACTOR and isinstance(refreshed.after, dict)
+            and refreshed.after.get("outcome") == "REFRESH_CONTEXT_NOT_REVIEWED"
+            and (task.error or "").startswith(stage_c_ci.REFRESH_CONTEXT_NOT_REVIEWED)
+            and merge_proven({"evidence": refreshed.after})):
+        return None
+    return (f"DONE needs a verified founder merge recorded by Stage C (stage MERGED, VERIFYING or MEASURED); "
+            f"this task is at {stage or 'an unreadable stage'}")
 
 
 class PublishedPRRefused(Exception):
@@ -1064,6 +1115,16 @@ def reconcile(db):
                     task.status = enums.TaskStatus.READY  # normal admission/budgets gate the repair
             elif stage == "VERIFYING":
                 out = stage_c_verify.step(db, task, {})
+            elif stage_c_handoff.imported(task) is not None:
+                # A production handoff: the deploy that matters is production's, which production verifies with its
+                # own runtime (stage_c_handoff VERIFIED). Stage C reads only main CI on the merge commit for the report
+                # (a red main still blocks here) and never judges its own host's SHAs as that task's deploy.
+                merge = stage_c_verify._evidence(task, "MERGED").get("merge_commit")
+                publisher, contexts = repo_guardian_github.merge_statuses(policy)
+                facts = stage_c_verify.gh_facts(REPOSITORY, merge, None, set(policy["workflows"]),
+                                              publisher=publisher, status_contexts=contexts)
+                stage_c_handoff.record_main_ci(task, merge, facts.get("main_ci"))
+                out = stage_c_verify.step(db, task, {"main_ci": facts.get("main_ci"), "live_contains_merge": None})
             else:
                 merge = stage_c_verify._evidence(task, "MERGED").get("merge_commit")
                 shas = live_shas(db)
