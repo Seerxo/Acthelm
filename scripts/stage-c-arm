@@ -51,13 +51,14 @@ if [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] && [ "${#IMAGES[@]}" -eq 4 ]; then INPUTS_OK=1
 DECISION="DISARM bad_inputs"
 if [ "$INPUTS_OK" = 1 ]; then
   out=$(docker exec -i -e PGOPTIONS='-c default_transaction_read_only=on' company-api python -I - "$SHA" \
-        2>/dev/null <<'PY' || true
+        2>/dev/null <<'PY' || echo "FAILED"
 import sys
 sys.path.insert(0, "/app")  # -I drops the working directory from sys.path; the image keeps the code in /app
 from app import stage_c_arm
 print(stage_c_arm.main(sys.argv[1]))
 PY
 )
+  # Only a clean exit counts: output followed by a failure or a timeout gets FAILED appended and never matches.
   if [[ "$out" =~ ^ARM\ [A-Z]+-[0-9]{1,6}$ || "$out" =~ ^DISARM\ [a-z_]{1,64}$ ]]; then
     DECISION=$out
   else
@@ -84,7 +85,9 @@ if [ "$DRY" = 1 ]; then
 fi
 
 compose() {  # the manual pilot command; extra -f files come first
-  env -u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_ENV_FILES "${IMAGES[@]}" COMPANY_OS_GIT_SHA="$SHA" \
+  # `env` runs the docker binary itself (it would bypass the docker() function), so the limit is applied here.
+  timeout --kill-after=5 "${STAGE_C_ARM_COMPOSE_TIMEOUT:-60}" \
+    env -u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_ENV_FILES "${IMAGES[@]}" COMPANY_OS_GIT_SHA="$SHA" \
     docker compose -p company-os --env-file .env -f docker-compose.yml "$@" \
     up -d --no-deps --no-build --pull never company-worker
 }
@@ -120,9 +123,17 @@ if [[ "$RUNNING" != false && ( "$ARMED" != true && "$ARMED" != false || "$RUNNIN
 fi
 
 if [ "$ACTION" = ARM ]; then
+  # A worker verified as stopped stays stopped: the operator stopped it on purpose, and ARM never restarts it. No
+  # override is left behind; starting the worker again is the operator's own step (`docker start company-worker`).
+  if [ "$RUNNING" = false ]; then
+    rm -f -- "$OVERRIDE"
+    log ARM_SKIPPED worker_stopped "$TASK"
+    exit 0
+  fi
   # The pause fence is re-checked on every ARM tick, also for a worker already armed: the API can be recreated with
   # the fence off while the worker stays armed.
-  if [ "$(docker exec company-api printenv CODER_PAUSE_FENCE_ENABLED 2>/dev/null || true)" != true ]; then
+  FENCE=$(docker exec company-api printenv CODER_PAUSE_FENCE_ENABLED 2>/dev/null) || FENCE=unreadable
+  if [ "$FENCE" != true ]; then
     REASON=pause_fence_off
     disarm
     exit 1

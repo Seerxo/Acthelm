@@ -107,13 +107,14 @@ IMAGES = {f"COMPANY_OS_IMAGE_{n}": "sha256:" + c * 64 for n, c in zip(("API", "W
 FAKE_DOCKER = """#!/bin/sh
 echo "docker $*" >> "$FAKE_LOG"
 [ -z "${FAKE_HANG:-}" ] || [ "$*" != "$FAKE_HANG" ] || exec sleep 60
+case "$*" in "${FAKE_HANG_PREFIX:-none}"*) trap '' TERM; sleep 60; exit 0 ;; esac   # ignores TERM: needs the KILL
 case "$*" in
-  "exec -i -e PGOPTIONS"*) cat > "$FAKE_SNIPPET"; echo "$FAKE_DECISION" ;;
+  "exec -i -e PGOPTIONS"*) cat > "$FAKE_SNIPPET"; echo "$FAKE_DECISION"; exit "${FAKE_DECISION_RC:-0}" ;;
   "exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE")
     [ "$FAKE_ERROR" != flag ] && [ "$FAKE_ERROR" != stopped ] || exit 1
     cat "$FAKE_STATE" ;;
   "exec company-worker printenv STAGE_C_ARMED_TASK") [ -s "$FAKE_STATE.task" ] || exit 1; cat "$FAKE_STATE.task" ;;
-  "exec company-api printenv CODER_PAUSE_FENCE_ENABLED") echo "${FAKE_FENCE:-true}" ;;
+  "exec company-api printenv CODER_PAUSE_FENCE_ENABLED") echo "${FAKE_FENCE:-true}"; exit "${FAKE_FENCE_RC:-0}" ;;
   "inspect -f {{.Image}} company-worker") [ -s "$FAKE_STATE.image" ] || exit 1; cat "$FAKE_STATE.image" ;;
   "exec company-worker printenv COMPANY_OS_GIT_SHA") [ -s "$FAKE_STATE.sha" ] || exit 1; cat "$FAKE_STATE.sha" ;;
   inspect*)
@@ -139,7 +140,7 @@ esac
 """
 
 
-def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop="", fence="true", hang=""):
+def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop="", fence="true", hang="", extra=None):
     bin_, host, root = tmp_path / "bin", tmp_path / "opt", tmp_path / "root"
     for d in (bin_, host, root):
         d.mkdir(exist_ok=True)
@@ -153,7 +154,7 @@ def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop=""
     env = {"PATH": f"{bin_}:/usr/bin:/bin", "STAGE_C_ARM_DIR": str(host),
            "STAGE_C_ARM_OVERRIDE": str(root / "stage-c-pilot.compose.yml"), "FAKE_LOG": str(tmp_path / "log"),
            "FAKE_STATE": str(tmp_path / "state"), "FAKE_DECISION": decision,
-           "FAKE_ERROR": error, "FAKE_COMPOSE_FAIL": str(int(compose_fail)), "FAKE_STOP": stop, "FAKE_FENCE": fence, "FAKE_HANG": hang, "STAGE_C_ARM_DOCKER_TIMEOUT": "1",
+           "FAKE_ERROR": error, "FAKE_COMPOSE_FAIL": str(int(compose_fail)), "FAKE_STOP": stop, "FAKE_FENCE": fence, "FAKE_HANG": hang, "STAGE_C_ARM_DOCKER_TIMEOUT": "1", **(extra or {}),
            "FAKE_SNIPPET": str(tmp_path / "snippet.py")}
     out = subprocess.run(["bash", str(ROOT / "scripts/stage-c-arm"), *args], env=env, capture_output=True,
                          text=True, timeout=30)
@@ -230,6 +231,45 @@ def test_timeout_budget_covers_the_worst_case():
     unit = (ROOT / "scripts/systemd/stage-c-arm.service").read_text()
     limit = int(re.search(r"^TimeoutStartSec=(\d+)$", unit, re.M).group(1))
     assert limit > calls * (10 + 5) + compose_runs * (60 + 5)
+
+
+def test_sh_hung_compose_is_killed_and_the_worker_stopped(tmp_path):
+    """R4a-1v3 pre-review finding 1: Compose runs through `env`, which bypassed the docker() limit. A Compose that
+    hangs and ignores SIGTERM is killed after its limit plus the kill grace, both on arm and on the disarm recreate;
+    the worker is then stopped and read back, and no ARM is ever logged."""
+    started = time.monotonic()
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false",
+                         extra={"FAKE_HANG_PREFIX": "compose", "STAGE_C_ARM_COMPOSE_TIMEOUT": "1"})
+    assert time.monotonic() - started < 25            # 2 x (1 s + 5 s kill grace) + the short calls
+    assert out.returncode == 1 and log.count("docker compose") == 2
+    assert "action=ARM " not in log and "action=DISARM_STOP reason=compose_failed" in log and not ovr.exists()
+
+
+@pytest.mark.parametrize("probe", ["decision", "fence"])
+def test_sh_answer_then_failure_never_arms(tmp_path, probe):
+    """R4a-1v3 pre-review finding 2: a probe that prints an acceptable answer and then fails (or times out) is a
+    failure. An unarmed worker is not armed; an armed one is disarmed (decision -> read_error, fence -> off)."""
+    extra = {"decision": {"FAKE_DECISION_RC": "1"}, "fence": {"FAKE_FENCE_RC": "1"}}[probe]
+    reason = {"decision": "read_error", "fence": "pause_fence_off"}[probe]
+    out, log, ovr = _run(tmp_path / "unarmed", "ARM TASK-0100", "false", extra=extra) if (tmp_path / "unarmed").mkdir() \
+        is None else None
+    assert "stage-c-pilot" not in log and "action=ARM " not in log and not ovr.exists()
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false")                     # armed normally first
+    assert out.returncode == 0 and ovr.exists()
+    out, log2, ovr = _run(tmp_path, "ARM TASK-0100", "true", extra=extra)
+    tail = log2[len(log):]
+    assert f"reason={reason}" in tail and "action=ARM " not in tail and not ovr.exists()
+    assert (tmp_path / "state").read_text().strip() == "false"                  # really recreated unarmed
+
+
+def test_sh_arm_never_starts_a_stopped_worker(tmp_path):
+    """R4a-1v3 pre-review finding 4: an operator's deliberate stop is kept on ARM too: no Compose, no start."""
+    (tmp_path / "root").mkdir()
+    (tmp_path / "root/stage-c-pilot.compose.yml").write_text(OVERRIDE_JSON)
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "true", error="stopped")
+    assert out.returncode == 0, out.stderr
+    assert "compose" not in log and "docker stop" not in log and not ovr.exists()
+    assert "action=ARM_SKIPPED reason=worker_stopped task=TASK-0100" in log
 
 
 def test_sh_rearms_for_a_new_task(tmp_path):
