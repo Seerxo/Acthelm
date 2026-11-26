@@ -22,6 +22,15 @@ case "${1:-}" in
 esac
 cd "$DIR"
 
+# Every Docker call is time-bounded (a Compose recreate gets longer): a hung daemon or Compose run must never keep an
+# armed worker past the disarm window. A timed-out call fails like any other error, so the worker state reads UNKNOWN
+# and the script disarms (fail closed). stage-c-arm.service bounds the whole run as well.
+docker() {
+  local limit=${STAGE_C_ARM_DOCKER_TIMEOUT:-20}
+  if [ "${1:-}" = compose ]; then limit=${STAGE_C_ARM_COMPOSE_TIMEOUT:-90}; fi
+  timeout --kill-after=5 "$limit" docker "$@"
+}
+
 log() {  # one line per action: timestamp, action, reason code, task key. Never secrets.
   logger -t stage-c-arm -- "$(date -u +%Y-%m-%dT%H:%M:%SZ) action=$1 reason=$2 task=${3:--}"
 }

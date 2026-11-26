@@ -9,4 +9,5 @@ Requires=docker.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/flock -n /run/stage-c-arm.lock /opt/company-os/scripts/stage-c-arm
-TimeoutStartSec=300
+# Docker calls are bounded inside the script (20 s each, 90 s per Compose run); the whole run is bounded here.
+TimeoutStartSec=150

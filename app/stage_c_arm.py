@@ -9,11 +9,14 @@ a DISARM. Output contract of main(): exactly one line, `ARM <task key>` or `DISA
 """
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select, text
 
 from app import control, enums, models, stage_c, stage_c_runner, stage_c_worker
+
+# execute() commits the consume with its STARTED run, then run() takes the repository lease within seconds.
+CONSUME_GAP = timedelta(minutes=10)
 
 
 def _in_flight(db, value: dict, now: datetime) -> bool:
@@ -32,8 +35,14 @@ def _in_flight(db, value: dict, now: datetime) -> bool:
     task = db.scalar(select(models.Task).where(models.Task.key == task_key))
     run = db.get(models.AgentRun, value.get("consumed_by_run_id")) if isinstance(
         value.get("consumed_by_run_id"), int) else None
+    started = run.started_at if run is not None else None
+    if started is not None and started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    # Only that short gap: a STARTED run older than CONSUME_GAP without the lease is not live work (an interrupted
+    # run the database never recovered), so it cannot keep the worker armed after the authorization is spent.
     return (task is not None and task.status == enums.TaskStatus.IN_PROGRESS and run is not None
-            and run.task_id == task.id and run.status == enums.AgentRunStatus.STARTED)
+            and run.task_id == task.id and run.status == enums.AgentRunStatus.STARTED
+            and started is not None and timedelta(0) <= now - started <= CONSUME_GAP)
 
 
 def decide(db, sha: str, now: datetime | None = None) -> tuple[str, str]:

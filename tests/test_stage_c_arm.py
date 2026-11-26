@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import time
 
 import pytest
 
@@ -29,7 +30,7 @@ def _consume(db, task, *, started=True, lease=False):
 
 def _setup(db, task, case):
     now = datetime.now(timezone.utc)
-    if case in ("ok", "pause", "acc", "stale", "run", "lease", "idle", "rev_run"):
+    if case in ("ok", "pause", "acc", "stale", "run", "lease", "idle", "rev_run", "old_run"):
         control.authorize_pilot(db, task.key, SHA_A, founder=FOUNDER_ID)
     if case == "rev":
         control.authorize_pilot(db, task.key, SHA_A, founder=FOUNDER_ID)
@@ -45,8 +46,12 @@ def _setup(db, task, case):
         db.commit()
     if case == "stale":
         runtime_report(db, SHA_A, age=timedelta(minutes=20))
-    if case in ("run", "idle"):
-        _consume(db, task, started=case == "run")
+    if case in ("run", "idle", "old_run"):
+        _consume(db, task, started=case != "idle")
+    if case == "old_run":   # an interrupted run never recovered: STARTED, no lease, older than the consume gap
+        run = db.query(models.AgentRun).filter_by(task_id=task.id).one()
+        run.started_at = now - stage_c_arm.CONSUME_GAP - timedelta(minutes=1)
+        db.commit()
     if case in ("lease", "rev_run"):
         _consume(db, task, started=False, lease=True)
     if case == "rev_run":
@@ -65,6 +70,7 @@ CASES = [
     ("run", ("ARM", "TASK-0100")),
     ("lease", ("ARM", "TASK-0100")),
     ("idle", ("DISARM", "stage_c_authorization_consumed")),
+    ("old_run", ("DISARM", "stage_c_authorization_consumed")),
     ("rev_run", ("DISARM", "stage_c_authorization_missing")),
 ]
 
@@ -100,6 +106,7 @@ OVERRIDE_JSON = override_json()
 IMAGES = {f"COMPANY_OS_IMAGE_{n}": "sha256:" + c * 64 for n, c in zip(("API", "WORKER", "REASONER", "EGRESS"), "1234")}
 FAKE_DOCKER = """#!/bin/sh
 echo "docker $*" >> "$FAKE_LOG"
+[ -z "${FAKE_HANG:-}" ] || [ "$*" != "$FAKE_HANG" ] || exec sleep 60
 case "$*" in
   "exec -i -e PGOPTIONS"*) cat > "$FAKE_SNIPPET"; echo "$FAKE_DECISION" ;;
   "exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE")
@@ -129,7 +136,7 @@ esac
 """
 
 
-def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop="", fence="true"):
+def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop="", fence="true", hang=""):
     bin_, host, root = tmp_path / "bin", tmp_path / "opt", tmp_path / "root"
     for d in (bin_, host, root):
         d.mkdir(exist_ok=True)
@@ -143,7 +150,7 @@ def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop=""
     env = {"PATH": f"{bin_}:/usr/bin:/bin", "STAGE_C_ARM_DIR": str(host),
            "STAGE_C_ARM_OVERRIDE": str(root / "stage-c-pilot.compose.yml"), "FAKE_LOG": str(tmp_path / "log"),
            "FAKE_STATE": str(tmp_path / "state"), "FAKE_DECISION": decision,
-           "FAKE_ERROR": error, "FAKE_COMPOSE_FAIL": str(int(compose_fail)), "FAKE_STOP": stop, "FAKE_FENCE": fence,
+           "FAKE_ERROR": error, "FAKE_COMPOSE_FAIL": str(int(compose_fail)), "FAKE_STOP": stop, "FAKE_FENCE": fence, "FAKE_HANG": hang, "STAGE_C_ARM_DOCKER_TIMEOUT": "1",
            "FAKE_SNIPPET": str(tmp_path / "snippet.py")}
     out = subprocess.run(["bash", str(ROOT / "scripts/stage-c-arm"), *args], env=env, capture_output=True,
                          text=True, timeout=30)
@@ -179,6 +186,18 @@ def test_sh_already_armed_rechecks_the_pause_fence(tmp_path):
     out, log2, ovr = _run(tmp_path, "ARM TASK-0100", "true", fence="false")
     assert out.returncode == 1
     assert "reason=pause_fence_off" in log2[len(log):] and not ovr.exists()
+
+
+def test_sh_hung_docker_is_bounded_and_disarms(tmp_path):
+    """R4a-1 review finding 1: every Docker call is time-bounded. A hung read of the worker state is killed by the
+    timeout, reads as UNKNOWN and the armed worker is disarmed: the timer never sits on an armed worker."""
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false")
+    assert out.returncode == 0 and ovr.exists()
+    started = time.monotonic()
+    out, log2, ovr = _run(tmp_path, "ARM TASK-0100", "true",
+                          hang="exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE")
+    assert time.monotonic() - started < 20
+    assert out.returncode == 1 and "reason=worker_state_unknown" in log2[len(log):] and not ovr.exists()
 
 
 def test_sh_rearms_for_a_new_task(tmp_path):
