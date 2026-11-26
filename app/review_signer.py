@@ -38,8 +38,8 @@ from app.redact import redact
 
 MAX_BODY = 4_000_000
 REVIEW_TIMEOUT_S = 900
-REVIEW_PROVIDER = "claude"            # the model CLI company-reasoner runs for the review
-REVIEWER_ID = "claude-reviewer"       # the identity signed into the attestation; never a coder identity
+REVIEW_PROVIDER = "codex"             # the model CLI company-reasoner runs for the review
+REVIEWER_ID = "codex"                 # the identity signed into the attestation; never a coder identity
 MAX_FINDINGS, MAX_FINDING_CHARS = 50, 4000
 FINDINGS_LOG = "/var/lib/review-signer/findings.jsonl"   # the signer's own volume (compose); fixed like the reviewer
 REQUEST_FIELDS = {"packet", "issued_at", "request_signature"}
