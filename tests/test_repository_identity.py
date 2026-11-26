@@ -1,7 +1,9 @@
-"""The upstream is Seerxo/Acthelm (renamed from Seerxo/seerxo-os on 2026-11-01, same repository id); Stage C still
-publishes from the fork seerxo-agent/seerxo-os. Break caught: one module keeps the old name (GitHub answers with the
-canonical name, so that check silently stops matching), the fork is renamed along with the upstream, or a grant or
-role answer that names the old repository is still accepted."""
+"""The upstream is Seerxo/Acthelm (renamed from Seerxo/seerxo-os on 2026-11-01, same repository id); Stage C
+publishes from its GitHub fork seerxo-agent/acthelm. seerxo-agent/seerxo-os left the fork network (GitHub: fork=false,
+no parent), so a PR from it to the upstream cannot open (TASK-0010 PR_FAILED, 2026-11-19). Break caught: one module
+keeps the old name (GitHub answers with the canonical name, so that check silently stops matching), the publish fork
+points at a repository outside the upstream's fork network, or a grant or role answer that names the old repository
+is still accepted."""
 import json
 import re
 from datetime import datetime, timezone
@@ -17,7 +19,7 @@ from tests.test_stage_c_founder_boundary import role_run, status
 from tests.test_stage_c_worker import FOUNDER_ID, SHA_A, armed
 
 ROOT = Path(__file__).resolve().parents[1]
-UPSTREAM, FORK, LEGACY = "seerxo/acthelm", "seerxo-agent/seerxo-os", "seerxo/seerxo-os"
+UPSTREAM, FORK, LEGACY = "seerxo/acthelm", "seerxo-agent/acthelm", "seerxo/seerxo-os"
 
 
 def test_every_upstream_identity_names_acthelm():
@@ -29,7 +31,7 @@ def test_every_upstream_identity_names_acthelm():
 def test_the_policies_track_acthelm_and_keep_the_fork():
     guardian = yaml.safe_load((ROOT / "agents/repository_guardian.yaml").read_text())
     assert guardian["repositories"] == [UPSTREAM] and set(guardian["branches"]) == {UPSTREAM}
-    assert guardian["publish_forks"] == {UPSTREAM: FORK}                         # the fork is not renamed
+    assert guardian["publish_forks"] == {UPSTREAM: FORK}                         # the upstream's real fork
     repos = {r for p in yaml.safe_load(project_profiles.PROFILE_PATH.read_text())["projects"].values()
              for r in p.get("repositories", {})}
     assert UPSTREAM in repos and LEGACY not in repos

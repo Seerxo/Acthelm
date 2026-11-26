@@ -73,6 +73,64 @@ def _text(rel: str, path: Path) -> bytes:
     return data
 
 
+def _render(base_files: dict[str, Path], work_files: dict[str, Path], changed: list[str]) -> bytes:
+    # The same scratch layout and Git argv render both coder imports and committed ranges.
+    with tempfile.TemporaryDirectory(prefix="coder-diff-") as tmp:
+        for side, src in (("a", base_files), ("b", work_files)):
+            for rel in changed:
+                if rel in src:
+                    dest = Path(tmp, side, rel)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(src[rel], dest)
+            Path(tmp, side).mkdir(exist_ok=True)
+        out = subprocess.run(["git", "--no-pager", "diff", "--no-index", "--no-color", "--no-ext-diff",
+                              "--no-textconv", "--no-renames", "--src-prefix=", "--dst-prefix=", "--", "a", "b"],
+                             cwd=tmp, env=_env(), capture_output=True, timeout=30)
+    if out.returncode not in (0, 1):
+        raise RejectedChange(f"diff failed: {out.stderr.decode(errors='replace')[:200]}")
+    return out.stdout
+
+
+def render_range(repo: Path, base: str, head: str) -> bytes:
+    """Render committed text changes with the coder import's exact bytes."""
+    def git(*args: str) -> bytes:
+        return subprocess.run(["git", "--no-pager", "-C", str(repo), *args], env=_env(),
+                              capture_output=True, timeout=30, check=True).stdout
+
+    entries = git("diff", "--name-status", "--no-renames", "-z", base, head).split(b"\0")
+    changed = []
+    total = 0
+    with tempfile.TemporaryDirectory(prefix="coder-range-") as tmp:
+        sides = ({}, {})
+        for status, name in zip(entries[::2], entries[1::2]):
+            if status not in (b"A", b"M"):
+                raise RejectedChange("committed range contains an unsupported change")
+            rel = name.decode("utf-8")
+            if not _safe_path(rel) or rel in changed:
+                raise RejectedChange("committed range contains a restricted path")
+            changed.append(rel)
+            for side, sha in enumerate((base, head)):
+                if status == b"A" and side == 0:
+                    continue
+                mode = git("ls-tree", sha, "--", rel).split(b" ", 1)[0]
+                if mode != b"100644":
+                    raise RejectedChange("committed range contains a non-regular or executable file")
+                size = int(git("cat-file", "-s", f"{sha}:{rel}"))
+                if size > MAX_FILE_BYTES:
+                    raise RejectedChange("committed range exceeds the reviewable file limit")
+                blob = git("show", f"{sha}:{rel}")
+                if side == 1:
+                    total += len(blob)
+                path = Path(tmp, str(side), rel)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(blob)
+                _text(rel, path)
+                sides[side][rel] = path
+        if not changed or len(changed) > MAX_FILES or total > MAX_TOTAL_BYTES:
+            raise RejectedChange("committed range has no reviewable changes")
+        return _render(*sides, changed)
+
+
 def import_changes(base: Path, workspace: Path, manifest: dict, allowed_new: list[str] | None = None) -> dict:
     """Diff the untrusted workspace against the control plane's pristine `base` export.
 
@@ -109,23 +167,7 @@ def import_changes(base: Path, workspace: Path, manifest: dict, allowed_new: lis
     if len(changed) > MAX_FILES or total > MAX_TOTAL_BYTES:
         raise RejectedChange(f"change exceeds {MAX_FILES} files / {MAX_TOTAL_BYTES} bytes")
 
-    # Render with git in a private scratch tree holding copies, never the workspace itself.
-    with tempfile.TemporaryDirectory(prefix="coder-diff-") as tmp:
-        for side, src in (("a", base_files), ("b", work_files)):
-            for rel in changed:
-                if rel in src:
-                    dest = Path(tmp, side, rel)
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(src[rel], dest)
-            Path(tmp, side).mkdir(exist_ok=True)
-        out = subprocess.run(["git", "--no-pager", "diff", "--no-index", "--no-color", "--no-ext-diff",
-                              "--no-textconv", "--no-renames",
-                              # Directories a/ and b/ act as the prefixes: headers read a/<path>, b/<path>.
-                              "--src-prefix=", "--dst-prefix=", "--", "a", "b"],
-                             cwd=tmp, env=_env(), capture_output=True, timeout=30)
-    if out.returncode not in (0, 1):
-        raise RejectedChange(f"diff failed: {out.stderr.decode(errors='replace')[:200]}")
-    diff = out.stdout
+    diff = _render(base_files, work_files, changed)
     return {"commit": manifest["commit"], "diff": diff, "fingerprint": diff_fingerprint(diff),
             "modified": modified, "added": added}
 

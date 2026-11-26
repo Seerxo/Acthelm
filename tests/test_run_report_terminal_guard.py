@@ -72,7 +72,7 @@ CALLERS = [("anonymous", {}, "172.18.0.5", 401), ("admin", {"authorization": f"B
 @pytest.mark.parametrize("key", ["TASK-0001", "TASK-0002"])
 @pytest.mark.parametrize("label,headers,host,code", CALLERS)
 @pytest.mark.parametrize("state", ["completed", "failed", "cancelled", "blocked"])
-def test_nobody_but_the_verified_founder_can_change_a_closed_task(engine, key, label, headers, host, code, state):
+def test_closed_task_founder_only(engine, key, label, headers, host, code, state):
     before = _snap(engine, key)
     body = {**REPORT, "herdr_state": {**REPORT["herdr_state"], "state": state, **({"checks": {"status": "failed"}} if state == "failed" else {})}}
     r = _client(host).post(f"/tasks/{key}/run-report", json=body, headers=headers)

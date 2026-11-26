@@ -241,7 +241,7 @@ def test_b5_publish_fork_is_optional_exact_and_canonical(tmp_path):
 def test_b5_repository_policy_in_git_publishes_from_the_agent_fork():
     from pathlib import Path
     policy = github.load_policy(Path(github.__file__).resolve().parents[1] / "agents/repository_guardian.yaml")
-    assert github.publish_repository(policy, "seerxo/acthelm") == "seerxo-agent/seerxo-os"
+    assert github.publish_repository(policy, "seerxo/acthelm") == "seerxo-agent/acthelm"
 
 
 @pytest.mark.parametrize("declaration", [

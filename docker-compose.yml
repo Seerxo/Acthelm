@@ -130,6 +130,9 @@ services:
       WORKER_IMAGE: ${COMPANY_OS_IMAGE_WORKER}
       # Stage C stays off until the sandbox exists and the founder enables it.
       ENABLE_AUTONOMOUS_CODE_WRITE: "false"
+      # An approved Stage C result is pushed and opened as a PR only when the Stage C host .env says "true";
+      # anything else holds it for the founder (WAITING_APPROVAL, HELD_BEFORE_PUBLISH) with nothing pushed.
+      STAGE_C_PUBLISH_ENABLED: ${STAGE_C_PUBLISH_ENABLED:-false}
       # Control-plane only: one-repository fine-grained GitHub credential. Never passed
       # to either provider CLI or the host coder/checks launcher. Absent = no Stage C writes.
       GH_TOKEN: ${COMPANY_STAGE_C_GITHUB_TOKEN:-}

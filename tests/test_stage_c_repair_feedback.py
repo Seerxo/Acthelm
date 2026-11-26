@@ -18,7 +18,7 @@ FAILURES = ["tests/test_metrics.py:2: AssertionError",
 
 
 def _setup(monkeypatch, tmp_path, coder, checks=None):
-    pipeline(monkeypatch, tmp_path, publish_repository="seerxo-agent/seerxo-os")
+    pipeline(monkeypatch, tmp_path, publish_repository="seerxo-agent/acthelm")
     monkeypatch.setattr(worker, "BACKOFF", (timedelta(0),) * 3)       # retries are judged here, not their pacing
     mirror = tmp_path / "jobs/.control/sez-company.git"
     (mirror / "app").mkdir()
@@ -76,6 +76,7 @@ def test_the_coder_reads_the_module_it_tests_and_is_told_it_is_read_only(monkeyp
     assert "return sum(values)" in seen["context"]
     assert f"reading only; never change them: {CONTEXT}" in seen["prompt"]
     assert "You may edit only: tests/test_metrics.py" in seen["prompt"]
+    assert "never copy phrases from them" in seen["prompt"]   # task text is private to the privacy gate
 
 
 def test_an_edit_to_a_read_only_file_is_refused(monkeypatch, tmp_path):
@@ -237,8 +238,16 @@ def test_consecutive_free_refusals_block_the_task_instead_of_looping(monkeypatch
         raise stage_c_runner.LauncherRefused("launcher Refused: unknown repository for checks")
     db, task = _setup(monkeypatch, tmp_path, coder)
     monkeypatch.setattr(worker, "PROVIDER_COOLDOWN", timedelta(0))
-    for _ in range(stage_c_worker.MAX_LAUNCHER_REFUSALS - 1):
+    clock = [worker._now()]
+    monkeypatch.setattr(worker, "_now", lambda: clock[0])
+    for attempt in range(stage_c_worker.MAX_LAUNCHER_REFUSALS - 1):
         assert _tick(db)["verdict"] == "LAUNCHER_REFUSED" and task.status == enums.TaskStatus.READY
+        # E5's no-progress backoff (real durations): nothing runs until it has passed, then the next attempt does.
+        wait = worker.NO_PROGRESS_BACKOFF[min(attempt + 1, len(worker.NO_PROGRESS_BACKOFF)) - 1]
+        runs = db.query(models.AgentRun).filter_by(task_id=task.id).count()
+        clock[0] += wait - timedelta(seconds=30)
+        assert "verdict" not in _tick(db) and db.query(models.AgentRun).filter_by(task_id=task.id).count() == runs
+        clock[0] += timedelta(seconds=30)
     assert _tick(db)["verdict"] == "LAUNCHER_REFUSED"
     assert task.status == enums.TaskStatus.BLOCKED and task.error.startswith("LAUNCHER_REFUSED")
     assert task.retry_count == 0

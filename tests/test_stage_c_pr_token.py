@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from app import providers, stage_c_runner, stage_c_worker
 
-FORK, UPSTREAM, COMMIT = "seerxo-agent/seerxo-os", "seerxo/acthelm", "a" * 40
+FORK, UPSTREAM, COMMIT = "seerxo-agent/acthelm", "seerxo/acthelm", "a" * 40
 
 
 def _capture(monkeypatch):
@@ -44,7 +44,7 @@ def test_pushes_keep_the_fork_token(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(stage_c_runner.subprocess, "run",
                         lambda argv, **kw: seen.append(kw.get("env")) or SimpleNamespace(stdout=b"", returncode=0))
-    stage_c_runner._git(tmp_path, "push", "https://github.com/seerxo-agent/seerxo-os.git", "x", protocol="https")
+    stage_c_runner._git(tmp_path, "push", "https://github.com/seerxo-agent/acthelm.git", "x", protocol="https")
     assert seen[0].get("GH_TOKEN") == "fork-token" and "GH_PR_TOKEN" not in seen[0]
 
 
@@ -81,7 +81,7 @@ def _first_publish_fails_after_the_push(monkeypatch, tmp_path):
     def during_open_pr(db, task):
         if failing["on"]:
             raise RuntimeError("fork-only token cannot open the upstream PR")
-    pipeline(monkeypatch, tmp_path, {"during_open_pr": during_open_pr}, publish_repository="seerxo-agent/seerxo-os")
+    pipeline(monkeypatch, tmp_path, {"during_open_pr": during_open_pr}, publish_repository="seerxo-agent/acthelm")
     monkeypatch.setattr(stage_c_runner, "gh_pr_lookup",
                         lambda *a, **k: (lambda branch, commit: (_ for _ in ()).throw(RuntimeError("no PR"))))
     db = _db()
