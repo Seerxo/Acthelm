@@ -506,6 +506,69 @@ class PushLeaseConflict(PrivacyGateError):
     """A readable remote task branch conflicts with the expected publication lease."""
 
 
+class RefreshRefused(ValueError):
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def refresh_chain(mirror: Path, number: int, published: str, final_head: str, merge_commit: str, *,
+                  repository: str = "seerxo/acthelm", remote: str | None = None,
+                  pr_commits: list[str] | None = None) -> dict:
+    """Prove every moved PR commit is a clean merge of target-branch history."""
+    if (type(number) is not int or number <= 0 or
+            any(not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha)
+                for sha in (published, final_head, merge_commit))):
+        raise RefreshRefused("REQUEST_MISMATCH")
+    remote = remote or f"https://github.com/{repository}.git"
+    protocol = "file" if Path(remote).is_absolute() else "https"
+    _git_bytes(mirror, "fetch", "--no-tags", remote,
+               f"+refs/pull/{number}/head:refs/e1/pr/{number}",
+               "+refs/heads/main:refs/e1/main", protocol=protocol)
+    git = lambda *args: _git_bytes(mirror, *args).decode().strip()
+    if git("rev-parse", f"refs/e1/pr/{number}") != final_head:
+        raise RefreshRefused("REQUEST_MISMATCH")
+    if pr_commits is None:
+        out = subprocess.run(["gh", "api", "--method", "GET",
+                              f"repos/{repository}/pulls/{number}/commits?per_page=100", "--jq", ".[].sha"],
+                             capture_output=True, text=True, timeout=20)
+        if out.returncode:
+            raise RuntimeError("PR commit list unavailable")
+        pr_commits = out.stdout.splitlines()
+    main = git("rev-list", "--first-parent", "refs/e1/main").splitlines()
+    if merge_commit not in main:
+        raise RefreshRefused("MERGE_FACTS")
+    merge_parents = git("rev-list", "--parents", "-n", "1", merge_commit).split()
+    if len(merge_parents) != 2:
+        raise RefreshRefused("MERGE_FACTS")
+    landed_base = merge_parents[1]
+    commits = git("rev-list", "--first-parent", "--reverse", f"{published}..{final_head}").splitlines()
+    if not commits or pr_commits != [published, *commits]:
+        raise RefreshRefused("EXTRA_COMMIT")
+    branch_only = set(git("rev-list", final_head, f"^{published}", f"^{landed_base}").splitlines())
+    if branch_only != set(commits):
+        raise RefreshRefused("EXTRA_COMMIT")
+    updates = []
+    previous = published
+    for sha in commits:
+        parents = git("rev-list", "--parents", "-n", "1", sha).split()
+        if len(parents) != 3 or parents[1] != previous or parents[2] not in main:
+            raise RefreshRefused("EXTRA_COMMIT")
+        expected = subprocess.run(["git", "--no-pager", "-C", str(mirror), "merge-tree", "--write-tree",
+                                   parents[1], parents[2]], env=coder_diff._env(), capture_output=True, timeout=30)
+        tree = git("rev-parse", f"{sha}^{{tree}}")
+        if expected.returncode not in (0, 1):
+            raise RuntimeError("merge-tree unavailable")
+        if expected.returncode == 1 or expected.stdout.decode().strip() != tree:
+            raise RefreshRefused("CONFLICT_RESOLVED")
+        updates.append({"sha": sha, "p1": parents[1], "p2": parents[2], "tree": tree})
+        previous = sha
+    if updates[-1]["p2"] != landed_base or git("rev-parse", f"{merge_commit}^{{tree}}") != git("rev-parse", f"{final_head}^{{tree}}"):
+        raise RefreshRefused("NOT_UP_TO_DATE")
+    return {"published_head": published, "refreshed_heads": commits, "update_merges": updates,
+            "fingerprint_base": landed_base}
+
+
 def _git_bytes(repo: Path, *args: str, protocol: str = "") -> bytes:
     """Raw stdout, undecoded: the gate classifies undecodable bytes itself instead of crashing in a decode."""
     env = coder_diff._env() | {"GIT_ALLOW_PROTOCOL": protocol, "GIT_TERMINAL_PROMPT": "0"}
@@ -804,6 +867,17 @@ def _privacy_gate(worktree: Path, base: str, sha: str, task: models.Task, public
         raise PrivacyGateError("unreadable") from None
 
 
+def _unpublished_back_to_base(worktree: Path, base: str, remote: str, branch: str, protocol: str) -> None:
+    """After a refused push: if the fork has no such branch, un-commit (the change stays staged), so the retry takes the
+    normal scanned push path instead of the recovery path, which assumes a pushed commit (TASK-0007, 2026-11-09).
+    A branch that exists, or an unreadable remote, keeps the commit: recovery then verifies it as before."""
+    try:
+        if _git(worktree, "ls-remote", remote, f"refs/heads/{branch}", protocol=protocol).strip() == "":
+            _git(worktree, "reset", "-q", "--soft", base)
+    except Exception:
+        pass
+
+
 def _privacy_stop(db: Session, worktree: Path, base: str, sha: str, task: models.Task, texts: dict[str, str],
                   remote: str | None = None, protocol: str = "", expected_remote: str | None = None) -> dict | None:
     """None when `sha` may be published; else the BLOCKED outcome, naming categories, paths and lines only."""
@@ -838,6 +912,13 @@ def _privacy_unchanged(worktree: Path, branch: str, sha: str, base: str, tree: s
             and not _git(worktree, "status", "--porcelain", "--untracked-files=all"))
 
 
+def publication_enabled() -> bool:
+    """Fail closed: only STAGE_C_PUBLISH_ENABLED=true lets an approved result push to the public fork and open a PR.
+    Anything else holds it for the founder before any GitHub call. A held result is not resumed: publishing it later
+    is a new grant and a new run (the founder's separate publication authorization)."""
+    return os.environ.get("STAGE_C_PUBLISH_ENABLED", "false") == "true"   # exactly "true": no case or space folding
+
+
 def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Path, remote: str,
             open_pr: PrOpener, ttl: timedelta = timedelta(minutes=10),
             before_publish: Callable[[], None] | None = None,
@@ -852,6 +933,8 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
     The refspec is built here from the validated task key:
     task/<KEY> is only created, or after a repair replaced at exactly the commit this task last
     published, so no one else's work, main or any other ref can be written."""
+    if not publication_enabled():  # the worker holds first; this is the last stop before any push or PR
+        return {"outcome": "HELD_BEFORE_PUBLISH"}
     imp = dict((task.context or {}).get("improvement") or {})
     if imp.get("stage") != "INDEPENDENT_REVIEW" or task.key != job.task_key:
         raise ValueError(f"{task.key}: publish needs INDEPENDENT_REVIEW for its own job")
@@ -984,6 +1067,7 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
             remote_head = _git(worktree, "ls-remote", remote, f"refs/heads/{branch}",
                                protocol=protocol).split("\t")[0]
         except subprocess.CalledProcessError as e:
+            _unpublished_back_to_base(worktree, job.base, remote, branch, protocol)
             return _stop(db, "PUSH_FAILED", _redact(e.stderr.decode(errors="replace")))
         if remote_head != commit:
             return _stop(db, "PUSH_FAILED", f"remote {branch} is {remote_head!r}, not {commit}")
@@ -1111,7 +1195,11 @@ def coder_prompt(job: Job) -> str:
             f"{read_only}"
             "Read the code you depend on before writing against it. Make the smallest correct change; do not add, "
             "rename or delete files. You cannot run anything; independent tests and a review "
-            "by another model follow.")
+            "by another model follow.\n"
+            # The pre-push privacy gate treats the task text as private: a name or comment that repeats 8+ of its
+            # words blocks publication (TASK-0006, 2026-11-09). Asking for own wording avoids that false stop.
+            "The objective and criteria are private notes: name tests and write comments in your own words; "
+            "never copy phrases from them into the files.")
 
 
 def _launch_lock(job_dir: Path, timeout_s: int = LAUNCH_LOCK_TIMEOUT) -> int:

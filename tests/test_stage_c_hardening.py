@@ -13,7 +13,7 @@ from app import enums, stage_c_runner, worker
 from tests.test_stage_c_worker import Reviewer, pipeline, write_task
 from tests.test_worker import SPECS, _db
 
-FORK = "seerxo-agent/seerxo-os"   # the repository policy publishes from the B5 fork
+FORK = "seerxo-agent/acthelm"   # the repository policy publishes from the B5 fork
 PAT = "github_pat_" + "A1b2C3" * 6
 JWT = "eyJ" + "hbGciOiJIUzI1NiJ9" + ".eyJ" + "zdWIiOiJ4In0xMjM0" + "." + "s1gnature" + "ABCDEFGH"
 REFRESH = '"refresh_token": "' + "r" * 24 + '"'
@@ -620,7 +620,7 @@ def _leaks(secret: str) -> dict[str, tuple[str | None, str, str]]:
 
 @pytest.mark.parametrize("where", list(_leaks("x" * 40)))
 @pytest.mark.parametrize("secret", [REFRESH_TOKEN, ACCESS_SIG], ids=["refresh", "access"])
-def test_codex_output_holding_a_slice_of_its_login_is_refused(tmp_path, where, secret):
+def test_login_slice(tmp_path, where, secret):
     from app import providers
     final, events, err = _leaks(secret)[where]
     p, _ = _codex(tmp_path, _answers(final, events, err))

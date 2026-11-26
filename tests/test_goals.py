@@ -77,6 +77,18 @@ def test_source_pinned_selector_remains_authoritative_when_another_source_report
     assert view["latest"]["source"] == "youtube-data-api" and view["progress"] == 0.25
 
 
+def test_pinned_source_going_quiet_is_not_replaced_by_a_fresher_source():
+    db = _db()
+    g = _goal(db, selector=schemas.GoalSelector(**SEL, source="youtube-data-api"))
+    _observe(db, 11_000, at=NOW - timedelta(days=9), source="youtube-data-api")
+    _observe(db, 19_000, at=NOW - timedelta(minutes=5), source="youtube-auto")
+    view = main.get_goal(g["id"], db)
+    # Only the pinned reporter counts, so its old reading shows as stale rather than the other feed's fresh one.
+    assert view["freshness"] == "STALE"
+    assert view["latest"]["source"] == "youtube-data-api" and view["latest"]["value"] == 11_000
+    assert view["progress"] == 0.1
+
+
 def test_future_dated_observation_is_not_goal_evidence():
     db = _db()
     g = _goal(db)

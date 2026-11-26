@@ -105,7 +105,7 @@ def test_explicit_low_risk_active_project_write_is_admitted(monkeypatch):
     "scripts/deploy-company-os.sh", "app/billing.py", "tests/test_api_auth.py",
     "../escape.py", "unknown/file.py",
 ])
-def test_protected_or_unknown_scope_never_admitted(monkeypatch, path):
+def test_scope_refused(monkeypatch, path):
     monkeypatch.setattr(worker, "ENABLE_AUTONOMOUS_CODE_WRITE", True)
     db = _db()
     task = write_task(db)
@@ -575,7 +575,7 @@ def test_saved_approval_is_bound_to_the_original_base_and_checks(saved_review, f
                                     "legacy_approval", "diff", "malformed_history", "pause", "cancel", "metered",
                                     "authorization_missing", "authorization_consumed", "authorization_expired",
                                     "authorization_sha", "write_disabled"])
-def test_saved_review_never_bypasses_current_contract_proof_or_authority(saved_review, monkeypatch, change):
+def test_review_rechecked(saved_review, monkeypatch, change):
     db, task, ps, coded = saved_review
     imp = task.context["improvement"]
     approval = dict(imp["approval"])
@@ -627,6 +627,7 @@ def test_saved_review_never_bypasses_current_contract_proof_or_authority(saved_r
 
 
 def test_a_finished_diff_waits_for_the_reviewer_without_being_recoded(monkeypatch, tmp_path):
+    monkeypatch.setattr(worker, "NO_PROGRESS_BACKOFF", (timedelta(0),) * 4)   # retries here are immediate on purpose
     """The writer never reviews itself. If Codex is out after Claude has coded, the exact diff
     waits at INDEPENDENT_REVIEW (no retry spent, no second coder run) until a reviewer is back."""
     pipeline(monkeypatch, tmp_path)
@@ -683,6 +684,7 @@ def test_coder_quota_cools_down_without_spending_task_retry(monkeypatch, tmp_pat
 
 
 def test_three_consecutive_coder_capacity_failures_block_and_refund_once_each(monkeypatch, tmp_path):
+    monkeypatch.setattr(worker, "NO_PROGRESS_BACKOFF", (timedelta(0),) * 4)   # retries here are immediate on purpose
     pipeline(monkeypatch, tmp_path, mock_authorization=False)
     monkeypatch.setenv("COMPANY_OS_GIT_SHA", SHA_A)
     monkeypatch.setattr(worker, "PROVIDER_COOLDOWN", timedelta(0))
@@ -786,6 +788,7 @@ def test_start_ack_persistence_failure_blocks_without_spending_retry(monkeypatch
 
 
 def test_review_quota_resumes_the_exact_diff_without_recoding(monkeypatch, tmp_path):
+    monkeypatch.setattr(worker, "NO_PROGRESS_BACKOFF", (timedelta(0),) * 4)   # retries here are immediate on purpose
     pipeline(monkeypatch, tmp_path)
     original = stage_c_runner.provider_reviewer
     limited = [True]
@@ -851,6 +854,43 @@ def test_pausing_during_review_prevents_publishing(monkeypatch, tmp_path):
     out = worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
     assert out["verdict"] == "WAITING_BEFORE_PUBLISH"
     assert subprocess.run(["git", "--git-dir", str(remote), "show-ref"], capture_output=True).returncode != 0
+
+
+@pytest.mark.parametrize("value", [None, "", "1", "yes", "True", "TRUE", "true ", "false", "true"])
+def test_publish_flag(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("STAGE_C_PUBLISH_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("STAGE_C_PUBLISH_ENABLED", value)
+    assert stage_c_runner.publication_enabled() is (value == "true")   # only exactly "true" publishes
+
+
+def test_held_no_push(monkeypatch, tmp_path):
+    remote = pipeline(monkeypatch, tmp_path)
+    monkeypatch.delenv("STAGE_C_PUBLISH_ENABLED")
+    calls = []
+    # The pre-coder published_guard still runs; nothing after approval may touch GitHub or the fork.
+    monkeypatch.setattr(stage_c_worker, "publication_role", lambda *a, **k: calls.append("publication_role"))
+    monkeypatch.setattr(stage_c_runner, "publish", lambda *a, **k: calls.append("publish"))
+    db = _db()
+    task = write_task(db)
+    out = worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+    assert out["verdict"] == "HELD_BEFORE_PUBLISH" and calls == []
+    assert task.status == enums.TaskStatus.WAITING_APPROVAL
+    approval = task.context["improvement"]["approval"]
+    assert task.artifacts["held"] == {"fingerprint": approval["fingerprint"], "review_audit_id": approval["audit_id"]}
+    assert "pr" not in task.artifacts
+    assert subprocess.run(["git", "--git-dir", str(remote), "show-ref"], capture_output=True).returncode != 0
+    # Held is not dispatchable: a second tick does not rerun or publish it.
+    worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+    assert task.status == enums.TaskStatus.WAITING_APPROVAL and calls == []
+
+
+def test_publish_refuses(monkeypatch):
+    monkeypatch.delenv("STAGE_C_PUBLISH_ENABLED")
+    # Defense in depth: even a caller that skipped the worker's hold gets no push, lease or GitHub call.
+    out = stage_c_runner.publish(None, None, None, b"", Path("/nonexistent"), "ext::x", None)
+    assert out == {"outcome": "HELD_BEFORE_PUBLISH"}
 
 
 def test_host_provenance_is_sha_only_and_stale_or_mismatched_evidence_waits(monkeypatch):
@@ -1239,7 +1279,7 @@ def test_an_authorization_is_for_one_task_one_sha_and_a_short_time(monkeypatch, 
                                    {"task_key": "TASK-0100", "repository": "seerxo/acthelm",
                                     "source_sha": SHA_A, "issued_by": "founder", "issued_at": "yesterday",
                                     "expires_at": "tomorrow", "consumed_at": None}])
-def test_malformed_or_unknown_authorization_is_denied(monkeypatch, tmp_path, value):
+def test_bad_authorization_denied(monkeypatch, tmp_path, value):
     db, task, ps = armed(monkeypatch, tmp_path)
     db.add(models.ControlState(key="stage-c-pilot-authorization", value=value, updated_by="founder")); db.commit()
     out, skipped = tick(db, ps)
@@ -1684,9 +1724,10 @@ def test_a_takeover_between_the_claim_and_the_coder_never_reaches_the_coder(monk
     assert task.assigned_agent_id == db.query(models.Agent).filter_by(key="ceo").one().id
 
 
-@pytest.mark.parametrize("role", [("FAIL", "the token can write seerxo/acthelm (push)"),
-                                  ("UNKNOWN", "GitHub refused or failed the role read")])
-def test_write_granted_after_admission_stops_the_push(monkeypatch, tmp_path, role):
+@pytest.mark.parametrize("role,code", [(("FAIL", "the token can write seerxo/acthelm (push)"), "upstream_role_not_read_only"),
+                                       (("UNKNOWN", "GitHub refused or failed the role read"), "upstream_role_unverified")],
+                         ids=["fail", "unknown"])
+def test_write_granted_after_admission_stops_the_push(monkeypatch, tmp_path, role, code):
     # Break caught (#192): admission trusts a preflight up to 15 min old; Write granted to the agent account in
     # that window let the attempt push upstream-capable credentials. The role is re-read at the push itself.
     hooks = {}
@@ -1700,9 +1741,9 @@ def test_write_granted_after_admission_stops_the_push(monkeypatch, tmp_path, rol
     assert pushed.returncode != 0                                                # nothing reached the remote
     attempt = db.query(models.AgentRun).filter_by(task_id=task.id).order_by(models.AgentRun.id.desc()).first()
     assert attempt.tool_calls.get("outcome") == "PUBLISHED_PR_REFUSED"
-    assert attempt.error == "upstream_role_not_read_only"
-    # A security event, not capacity: no silent READY loop; the founder sees why on the Desk.
-    assert task.status == enums.TaskStatus.BLOCKED and task.error.startswith("upstream_role_not_read_only")
+    assert attempt.error == code
+    # Not capacity: no silent READY loop; the founder sees the actual cause (unsafe token vs unreadable token).
+    assert task.status == enums.TaskStatus.BLOCKED and task.error.startswith(code)
 
 
 def test_takeover_after_the_pr_guard_but_before_publication_prevents_the_push(monkeypatch, tmp_path):
@@ -2088,7 +2129,7 @@ def test_b5_worker_publishes_to_the_configured_fork_and_opens_the_pr_from_it(mon
     "https://github.com/seerxo/acthelm/pull/abc",
     "https://github.com/seerxo/acthelm/pull/" + "9" * 5000,
 ], ids=lambda u: "url")
-def test_published_pr_identity_rejects_other_repositories_and_malformed_urls(url):
+def test_pr_identity_refused(url):
     db = _db()
     task = _published_task_for_merge_reconciliation(db)
     improvement = task.context["improvement"]
@@ -2228,7 +2269,7 @@ def test_b3_old_repository_pr_is_refused_before_github_lookup(monkeypatch):
 
 @pytest.mark.parametrize("stage", ["PR_OPEN", "CI", "READY_TO_MERGE", "MERGED", "VERIFYING"])
 @pytest.mark.parametrize("history", [None, []])
-def test_published_stage_without_history_is_unreadable(stage, history):
+def test_published_no_history(stage, history):
     # A published stage with no PR_OPEN row cannot be "unpublished": it must never reach the coder.
     imp = {"stage": stage} if history is None else {"stage": stage, "history": history}
     task = SimpleNamespace(context={"improvement": imp})
@@ -2267,3 +2308,126 @@ def test_closed_pr_without_head_data_does_not_abandon():
 def test_repair_stage_without_history_is_unreadable():
     task = SimpleNamespace(context={"improvement": {"stage": "IMPLEMENTING"}})
     assert stage_c_worker.published_pr(task) == {"pr": None, "unreadable_history": True}
+
+
+def test_retry_after_push_refused(monkeypatch, tmp_path):
+    """TASK-0007 (2026-11-09): the push was refused (403) after the commit; the retry took the recovery path, found no
+    remote branch and stopped PR_FAILED forever. An unpushed commit is undone, so the retry pushes normally."""
+    remote = pipeline(monkeypatch, tmp_path)
+    real, refused = stage_c_runner._git, []
+
+    def git(repo, *args, **kw):
+        if "push" in args and not refused:
+            refused.append(1)
+            raise subprocess.CalledProcessError(128, ["git", "push"], b"", b"403")
+        return real(repo, *args, **kw)
+    monkeypatch.setattr(stage_c_runner, "_git", git)
+    db = _db()
+    task = write_task(db)
+    ps = {n: Reviewer(n) for n in ("claude", "codex")}
+    worker.run_once(db, ps, SPECS)
+    assert refused and task.context["improvement"]["stage"] != "PR_OPEN"
+    task.status = enums.TaskStatus.READY
+    db.commit()
+    out = worker.run_once(db, ps, SPECS)
+    assert task.context["improvement"]["stage"] == "PR_OPEN", out
+    head = subprocess.run(["git", "--git-dir", str(remote), "rev-parse", f"refs/heads/task/{task.key}"],
+                          capture_output=True, text=True)
+    assert head.returncode == 0
+
+
+def _lease_busy_runs(monkeypatch, tmp_path, db=None):
+    """A Stage C task whose every attempt hits a busy lease: no model call, no retry spent (a no-progress run)."""
+    from app import stage_c
+    pipeline(monkeypatch, tmp_path)
+    clock = [datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)]
+    monkeypatch.setattr(worker, "_now", lambda: clock[0])
+    db = db or _db()
+    task = write_task(db)
+    stage_c.acquire(db, "seerxo/acthelm", "someone-else", timedelta(days=1))
+    db.commit()
+    return db, task, clock
+
+
+def _no_progress_attempt(db, clock, minutes):
+    clock[0] += timedelta(minutes=minutes)
+    return worker.run_once(db, {n: Reviewer(n) for n in ("claude", "codex")}, SPECS)
+
+
+def test_e5_backoff(monkeypatch, tmp_path):
+    db, task, clock = _lease_busy_runs(monkeypatch, tmp_path)
+    assert _no_progress_attempt(db, clock, 0)["verdict"] == "LEASE_BUSY"
+    runs = db.query(models.AgentRun).filter_by(task_id=task.id).count()
+    # 1, 5, 15, 30 minutes after the 1st, 2nd, 3rd and 4th+ consecutive no-progress run; never a run before that.
+    for idle, wait in ((1, 1), (2, 5), (3, 15), (4, 30)):
+        assert worker._eligible(db, task, SPECS)[0] == "no_progress_backoff"
+        out = _no_progress_attempt(db, clock, wait - 0.5)
+        assert "verdict" not in out and db.query(models.AgentRun).filter_by(task_id=task.id).count() == runs
+        assert _no_progress_attempt(db, clock, 0.5)["verdict"] == "LEASE_BUSY"
+        runs += 1
+        assert worker._trailing_no_progress(db, task.id) == idle + 1
+    assert task.status == enums.TaskStatus.READY and task.retry_count == 0
+
+
+def test_e5_stall(monkeypatch, tmp_path):
+    db, task, clock = _lease_busy_runs(monkeypatch, tmp_path)
+    for attempt in range(worker.MAX_NO_PROGRESS_RUNS):
+        assert _no_progress_attempt(db, clock, 30)["verdict"] == "LEASE_BUSY"
+        assert task.status == (enums.TaskStatus.BLOCKED if attempt == worker.MAX_NO_PROGRESS_RUNS - 1
+                               else enums.TaskStatus.READY)
+    assert task.error.startswith("STALLED: 6 attempts in a row made no progress")
+    assert task.retry_count == 0
+    # Blocked means blocked: hours later nothing is claimed and no run is added.
+    runs = db.query(models.AgentRun).filter_by(task_id=task.id).count()
+    out = _no_progress_attempt(db, clock, 600)
+    assert "verdict" not in out and db.query(models.AgentRun).filter_by(task_id=task.id).count() == runs
+
+
+def test_e5_restart(monkeypatch, tmp_path):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+    engine = create_engine(f"sqlite:///{tmp_path / 'restart.db'}")
+    models.Base.metadata.create_all(engine)
+    first = Session(engine)
+    for key in ("ceo", "developer", "supervisor", "research"):
+        first.add(models.Agent(key=key, role=key, enabled=True))
+    first.commit()
+    db, task, clock = _lease_busy_runs(monkeypatch, tmp_path, first)
+    for _ in range(worker.MAX_NO_PROGRESS_RUNS - 1):
+        assert _no_progress_attempt(db, clock, 30)["verdict"] == "LEASE_BUSY"
+    task_id = task.id
+    db.close()
+    engine.dispose()   # the worker process is gone; only the database remains
+    db = Session(create_engine(f"sqlite:///{tmp_path / 'restart.db'}"))
+    task = db.get(models.Task, task_id)
+    assert worker._trailing_no_progress(db, task_id) == worker.MAX_NO_PROGRESS_RUNS - 1
+    assert worker._eligible(db, task, SPECS)[0] == "no_progress_backoff"   # last run was just now
+    assert _no_progress_attempt(db, clock, 30)["verdict"] == "LEASE_BUSY"
+    assert task.status == enums.TaskStatus.BLOCKED and task.error.startswith("STALLED:")
+
+
+def test_e5_ready_resets(monkeypatch, tmp_path):
+    db, task, clock = _lease_busy_runs(monkeypatch, tmp_path)
+    for _ in range(worker.MAX_NO_PROGRESS_RUNS):
+        _no_progress_attempt(db, clock, 30)
+    assert task.status == enums.TaskStatus.BLOCKED
+    stalled = db.query(models.AgentRun).filter_by(task_id=task.id).order_by(models.AgentRun.id.desc()).first()
+    assert stalled.tool_calls["stalled"] is True
+    task.status, task.error = enums.TaskStatus.READY, None   # the founder's decision
+    db.commit()
+    assert worker._trailing_no_progress(db, task.id) == 0
+    assert worker._eligible(db, task, SPECS)[0] is None      # no inherited backoff
+    for attempt in range(worker.MAX_NO_PROGRESS_RUNS):
+        assert _no_progress_attempt(db, clock, 30)["verdict"] == "LEASE_BUSY"
+        assert task.status == (enums.TaskStatus.BLOCKED if attempt == worker.MAX_NO_PROGRESS_RUNS - 1
+                               else enums.TaskStatus.READY)
+
+
+def test_e5_progress_resets(monkeypatch, tmp_path):
+    db, task, clock = _lease_busy_runs(monkeypatch, tmp_path)
+    for _ in range(3):
+        _no_progress_attempt(db, clock, 30)
+    db.add(models.AgentRun(agent_id=task.assigned_agent_id, task_id=task.id, provider="claude",
+                           status=enums.AgentRunStatus.FAILED, tool_calls={"outcome": "CHECKS_FAILED"}))
+    db.commit()
+    assert worker._trailing_no_progress(db, task.id) == 0

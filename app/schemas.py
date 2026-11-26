@@ -323,6 +323,13 @@ class HandoffCancel(BaseModel):
     reason: Literal["PRODUCTION_CANCELLED"]
 
 
+class StageCRefreshReconcile(BaseModel):
+    task_key: str = Field(pattern=r"^[A-Z]+-\d{1,6}$")
+    pr_number: int = Field(gt=0, le=9999999999)
+    final_head: str = Field(pattern=r"^[0-9a-f]{40}$")
+    merge_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
+
+
 class StageCStanding(BaseModel):
     """Files and limits only: the SHA is the deployed source, never client-supplied."""
     paths: list[str] = Field(min_length=1, max_length=20)

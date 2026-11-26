@@ -137,6 +137,92 @@ def test_task_detail_serves_only_the_fields_the_desk_reads(env):
     assert "context_policy" not in a and a["last_error"] and a["errors"]
 
 
+def test_pr_link_mismatch(env):
+    """The task-PR link is only the verified publication: this upstream and task.artifacts agreeing with it."""
+    url = "https://github.com/seerxo/acthelm/pull/77"
+    with Session(env) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0101"))
+        history = [{"stage": "PR_OPEN", "at": "x", "evidence": {"pr": url, "commit": "b" * 40}},
+                   {"stage": "MERGED", "at": "y", "evidence": {"pr_number": 77, "commit": "b" * 40,
+                                                                "merge_commit": "e" * 40}}]
+        task.context = {**task.context, "improvement": {"stage": "MERGED", "history": history}}
+        task.artifacts = {"pr": url, "commit": "b" * 40}
+        s.commit()
+    pr = _desk().get("/tasks/TASK-0101", headers=ASSERT).json()["pull_request"]
+    assert pr == {"verified": True, "merged": True, "number": 77, "url": url, "commit": "b" * 40, "merge_commit": "e" * 40}
+    assert _desk().get("/desk/state", headers=ASSERT).json()["improvements"][0]["pr_verified"] is True
+    for art in ({"pr": url.replace("77", "78"), "commit": "b" * 40}, {"pr": url, "commit": "c" * 40}):
+        with Session(env) as s:
+            s.scalar(select(models.Task).where(models.Task.key == "TASK-0101")).artifacts = art
+            s.commit()
+        pr = _desk().get("/tasks/TASK-0101", headers=ASSERT).json()["pull_request"]
+        assert pr["verified"] is False and "url" not in pr and "number" not in pr, art
+        assert _desk().get("/desk/state", headers=ASSERT).json()["improvements"][0]["pr_verified"] is False
+    # The fixture's mixed-case URL is not this deployment's upstream (published_pr_number): never a link.
+    with Session(env) as s:
+        s.scalar(select(models.Task).where(models.Task.key == "TASK-0101")).context = {
+            "improvement": {"stage": "PR_OPEN", "history": [{"stage": "PR_OPEN", "evidence": {"pr": PR}}]}}
+        s.commit()
+    assert _desk().get("/tasks/TASK-0101", headers=ASSERT).json()["pull_request"]["verified"] is False
+
+
+@pytest.mark.parametrize("case", ["ok", "open", "old", "head", "short", "hex", "type", "art", "pr", "sha",
+                                 "merge", "nohead", "number"], ids=str)
+def test_pr_id(env, case):
+    url, sha = "https://github.com/seerxo/acthelm/pull/77", "b" * 40
+    pub = {"stage": "PR_OPEN", "at": "2026-11-09T10:00:00+00:00", "evidence": {"pr": url, "commit": sha}}
+    merge = {"stage": "MERGED", "at": "2026-11-09T10:01:00+00:00", "evidence": {"pr_number": 77, "commit": sha}}
+    history, art = [pub, merge], {"pr": url, "commit": sha}
+    if case == "open":
+        history = [pub]
+    elif case == "old":
+        history = [dict(pub), merge, pub]
+    elif case in ("head", "short", "hex", "type"):
+        pub["evidence"]["commit"] = {"head": None, "short": "b" * 39, "hex": "g" * 40, "type": []}[case]
+        art["commit"] = pub["evidence"]["commit"]
+        history = [pub]
+    elif case == "art":
+        art = None
+    elif case in ("pr", "sha"):
+        art.pop("pr" if case == "pr" else "commit")
+    elif case == "merge":
+        merge["evidence"]["commit"] = "a" * 40
+    elif case == "nohead":
+        merge["evidence"].pop("commit")
+    elif case == "number":
+        merge["evidence"]["pr_number"] = 88
+    with Session(env) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0101"))
+        task.context = {"improvement": {"stage": history[-1]["stage"], "history": history}}
+        task.artifacts = art
+        s.commit()
+    pr = _desk().get("/tasks/TASK-0101", headers=ASSERT).json()["pull_request"]
+    assert pr["verified"] is (case in ("ok", "open", "old"))
+    assert pr["merged"] is (case == "ok")
+    if pr["verified"]:
+        assert (pr["number"], pr["url"]) == (77, url)
+    else:
+        assert "number" not in pr and "url" not in pr
+
+
+@pytest.mark.parametrize("later", [{}, {"pr_number": 88}, {"repository": "Other/repo"},
+                                  {"pr_number": 88, "repository": "Other/repo"}, {"pr_number": None}],
+                         ids=["ok", "num", "repo", "both", "null"])
+def test_row_id(env, later):
+    url, sha = "https://github.com/seerxo/acthelm/pull/77", "b" * 40
+    with Session(env) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == "TASK-0101"))
+        task.context = {"improvement": {"stage": "VERIFYING", "history": [
+            {"stage": "PR_OPEN", "evidence": {"pr": url, "commit": sha}},
+            {"stage": "MERGED", "evidence": {"pr_number": 77, "commit": sha}},
+            {"stage": "VERIFYING", "at": "2026-11-09T10:00:00+00:00", "evidence": later}]}}
+        task.artifacts = {"pr": url, "commit": sha}
+        s.commit()
+    row = _desk().get("/desk/state", headers=ASSERT).json()["improvements"][0]
+    assert row["pr_verified"] is (not later)
+    assert (row["pr_number"], row["repository"]) == (77, "seerxo/acthelm")
+
+
 def test_provider_error_is_redacted_before_it_is_bounded():
     # The URL's `@` falls past the 500-character cut: truncating first would keep the password unmatched.
     stderr = "x" * 475 + f" https://u:{PASSWORD}@git.example " + "y" * 40
@@ -186,7 +272,8 @@ def test_quota_reset_text_is_redacted_before_extraction_and_truncation():
 def test_improvement_evidence_drops_containers_but_keeps_scalars(env):
     improvement = _desk().get("/desk/state", headers=ASSERT).json()["improvements"][0]
     assert improvement["risk"] is None and improvement["expected_effect"] is None
-    assert improvement["pr_number"] == 7 and improvement["ci_state"] == "failed"
+    assert improvement["pr_number"] is None and improvement["ci_state"] == "failed"
+    assert improvement["pr_verified"] is False   # the fixture's mixed-case URL is not this upstream
 
 
 def test_legacy_learning_lessons_are_redacted_on_both_desk_reads(env):
