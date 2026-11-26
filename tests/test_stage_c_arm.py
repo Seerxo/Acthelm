@@ -114,6 +114,8 @@ case "$*" in
     cat "$FAKE_STATE" ;;
   "exec company-worker printenv STAGE_C_ARMED_TASK") [ -s "$FAKE_STATE.task" ] || exit 1; cat "$FAKE_STATE.task" ;;
   "exec company-api printenv CODER_PAUSE_FENCE_ENABLED") echo "${FAKE_FENCE:-true}" ;;
+  "inspect -f {{.Image}} company-worker") [ -s "$FAKE_STATE.image" ] || exit 1; cat "$FAKE_STATE.image" ;;
+  "exec company-worker printenv COMPANY_OS_GIT_SHA") [ -s "$FAKE_STATE.sha" ] || exit 1; cat "$FAKE_STATE.sha" ;;
   inspect*)
     if [ -s "$FAKE_STATE.stopped" ]; then [ "$(cat "$FAKE_STATE.stopped")" = false ] || exit 1; echo false; exit 0; fi
     [ "$FAKE_ERROR" != inspect ] || exit 1; [ "$FAKE_ERROR" = stopped ] && echo false || echo true ;;
@@ -126,6 +128,7 @@ case "$*" in
     esac ;;
   compose*) [ "$FAKE_COMPOSE_FAIL" != 1 ] || exit 1
     rm -f "$FAKE_STATE.stopped"
+    echo "$COMPANY_OS_IMAGE_WORKER" > "$FAKE_STATE.image"; echo "$COMPANY_OS_GIT_SHA" > "$FAKE_STATE.sha"
     env | grep '^COMPANY_OS_' | sort >> "$FAKE_LOG"
     case "$*" in
       *stage-c-pilot*) echo true > "$FAKE_STATE"
@@ -198,6 +201,35 @@ def test_sh_hung_docker_is_bounded_and_disarms(tmp_path):
                           hang="exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE")
     assert time.monotonic() - started < 20
     assert out.returncode == 1 and "reason=worker_state_unknown" in log2[len(log):] and not ovr.exists()
+
+
+@pytest.mark.parametrize("drift", ["image", "sha"])
+def test_sh_armed_on_another_release_is_rearmed(tmp_path, drift):
+    """R4a-1v2 review finding 2: the already-armed shortcut also requires the pinned worker image and the source SHA
+    the decision was validated against; a worker armed for the same task on other code is re-armed, not kept."""
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false")
+    assert out.returncode == 0 and ovr.exists()
+    other = {"image": "sha256:" + "9" * 64, "sha": "f" * 40}[drift]
+    (tmp_path / f"state.{drift}").write_text(other + "\n")
+    out, log2, ovr = _run(tmp_path, "ARM TASK-0100", "true")
+    assert out.returncode == 0, out.stderr
+    assert log2.count("docker compose") == 2 * log.count("docker compose")        # recreated from the pinned images
+    assert (tmp_path / "state.image").read_text().strip() == IMAGES["COMPANY_OS_IMAGE_WORKER"]
+    assert (tmp_path / "state.sha").read_text().strip() == SHA_A
+
+
+def test_timeout_budget_covers_the_worst_case():
+    """R4a-1v2 review finding 1: systemd must never kill a run before the fallback stop and its read-back. The unit's
+    limit covers every bounded Docker call site (10 s + 5 s grace) and both Compose runs (60 s + 5 s grace)."""
+    import re
+    script = (ROOT / "scripts/stage-c-arm").read_text()
+    calls = len(re.findall(r"\$\(docker |^\s*docker stop |docker exec company-api printenv", script, re.M))
+    compose_runs = len(re.findall(r"(?:^\s*if |&& )compose ", script, re.M))   # the arm and the disarm recreate
+    assert (calls, compose_runs) == (9, 2), "update the documented worst case and this test together"
+    assert 'STAGE_C_ARM_DOCKER_TIMEOUT:-10' in script and 'STAGE_C_ARM_COMPOSE_TIMEOUT:-60' in script
+    unit = (ROOT / "scripts/systemd/stage-c-arm.service").read_text()
+    limit = int(re.search(r"^TimeoutStartSec=(\d+)$", unit, re.M).group(1))
+    assert limit > calls * (10 + 5) + compose_runs * (60 + 5)
 
 
 def test_sh_rearms_for_a_new_task(tmp_path):

@@ -24,10 +24,12 @@ cd "$DIR"
 
 # Every Docker call is time-bounded (a Compose recreate gets longer): a hung daemon or Compose run must never keep an
 # armed worker past the disarm window. A timed-out call fails like any other error, so the worker state reads UNKNOWN
-# and the script disarms (fail closed). stage-c-arm.service bounds the whole run as well.
+# and the script disarms (fail closed). Worst case of one run: at most 9 Docker calls and 2 Compose runs, each with
+# its limit plus the 5 s kill grace, so 9*(10+5) + 2*(60+5) = 265 s; stage-c-arm.service allows more than that
+# (tests/test_stage_c_arm.py pins it), so systemd never kills the run before the fallback stop and its read-back.
 docker() {
-  local limit=${STAGE_C_ARM_DOCKER_TIMEOUT:-20}
-  if [ "${1:-}" = compose ]; then limit=${STAGE_C_ARM_COMPOSE_TIMEOUT:-90}; fi
+  local limit=${STAGE_C_ARM_DOCKER_TIMEOUT:-10}
+  if [ "${1:-}" = compose ]; then limit=${STAGE_C_ARM_COMPOSE_TIMEOUT:-60}; fi
   timeout --kill-after=5 "$limit" docker "$@"
 }
 
@@ -125,8 +127,13 @@ if [ "$ACTION" = ARM ]; then
     disarm
     exit 1
   fi
-  # Already armed for this very task: nothing to do. Armed for another task: re-arm for this one.
-  [ "$ARMED" = true ] && [ "$ARMED_TASK" = "$TASK" ] && exit 0
+  # Already armed for this very task AND running the decided release (the pinned worker image and the source SHA the
+  # decision was validated against): nothing to do. Anything else (another task, an older or different worker image
+  # or SHA, or an unreadable one) is re-armed from the pinned images, never left armed as it is.
+  WIMG=$(docker inspect -f '{{.Image}}' company-worker 2>/dev/null) || WIMG=-
+  WSHA=$(docker exec company-worker printenv COMPANY_OS_GIT_SHA 2>/dev/null) || WSHA=-
+  EXP_WIMG=$(printf '%s\n' "${IMAGES[@]}" | sed -n 's/^COMPANY_OS_IMAGE_WORKER=//p')
+  [ "$ARMED" = true ] && [ "$ARMED_TASK" = "$TASK" ] && [ "$WIMG" = "$EXP_WIMG" ] && [ "$WSHA" = "$SHA" ] && exit 0
   if [ -L "$OVERRIDE" ]; then log ARM_REFUSED override_symlink "$TASK"; exit 1; fi
   tmp=$(umask 077 && mktemp "$(dirname "$OVERRIDE")/.stage-c-pilot.XXXXXX")
   printf '%s\n' "$OVERRIDE_JSON" > "$tmp"
