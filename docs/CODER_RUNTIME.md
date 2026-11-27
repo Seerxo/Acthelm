@@ -326,7 +326,7 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
   ledger exists (`/var/lib/release-host/ledger/ledger.json`, the production host) and with exit 4 unless the
   root-owned, not group/world-writable marker `/etc/acthelm/stage-c-host` exists (`action=REFUSED`).
 - Stopping the unit (or any unexpected exit) between writing the override and logging `ARM` runs one verified disarm
-  (`reason=interrupted`) and ends the run non-zero; `TimeoutStopSec=240` covers that disarm (181 s worst case). The
+  (`reason=interrupted`) and ends the run non-zero; `TimeoutStopSec=240` covers that disarm (190 s worst case). The
   unit is then left failed, which persists in `systemctl --failed` until reset, so an interrupted arm is visible even
   with the timer stopped; an unverifiable disarm still logs `DISARM_FAILED`. SIGKILL cannot be trapped: after a
   `kill -9` run `stage-c-arm` (or `--recreate`) by hand before leaving the timer stopped.

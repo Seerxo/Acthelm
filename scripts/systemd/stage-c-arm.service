@@ -14,5 +14,5 @@ ExecStart=/usr/bin/flock -n /run/stage-c-arm.lock /opt/company-os/scripts/stage-
 TimeoutStartSec=400
 # Stopping the unit mid-arm runs one verified disarm (scripts/stage-c-arm on_interrupt). Worst case: the bounded call in
 # progress (a Compose run, 60 s + 5 s kill grace) plus the disarm (Compose 65 s, read-back 15 s, fallback stop 15 s and
-# read-back 15 s, three 2 s log lines) = 65 + 116 = 181 s. 240 s leaves room; systemd's default 90 s would SIGKILL it.
+# read-back 15 s, three 5 s log lines) = 65 + 125 = 190 s. 240 s leaves room; systemd's default 90 s would SIGKILL it.
 TimeoutStopSec=240

@@ -51,7 +51,7 @@ cd "$DIR" 2>/dev/null || CD_OK=0
 # Every Docker call is time-bounded (a Compose recreate gets longer): a hung daemon or Compose run must never keep an
 # armed worker past the disarm window. A timed-out call fails like any other error, so the worker state reads UNKNOWN
 # and the script disarms (fail closed). Worst case of one run: at most 15 Docker calls (14 call sites; the decision is asked twice) and 2 Compose runs, each with
-# its limit plus the 5 s kill grace, so 15*(10+5) + 2*(60+5) = 355 s, plus at most a few 2 s log lines;
+# its limit plus the 5 s kill grace, so 15*(10+5) + 2*(60+5) = 355 s, plus at most a few 5 s log lines;
 # stage-c-arm.service allows more than that
 # (tests/test_stage_c_arm.py pins it), so systemd never kills the run before the fallback stop and its read-back.
 # A limit override is honoured only as 1..default seconds: 0 would disable `timeout`, more would break the budget.
@@ -68,8 +68,8 @@ log() {  # one line per action: timestamp, action, reason code, task key. Never 
   local ts line
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || ts=time_unknown
   line="$ts action=$1 reason=$2 task=${3:--}"
-  # Bounded: a syslog that stops draining must not hold the tick (2 s per line, a few lines per run).
-  timeout 2 logger -t stage-c-arm -- "$line" 2>/dev/null || echo "stage-c-arm: $line" >&2 || true
+  # Bounded: a syslog that stops draining must not hold the tick (5 s per line, a few lines per run).
+  timeout 5 logger -t stage-c-arm -- "$line" 2>/dev/null || echo "stage-c-arm: $line" >&2 || true
 }
 
 # ---------------------------------------------------------------- inputs (validated, never sourced)
@@ -204,7 +204,7 @@ disarm() {
 # armed with no tick to follow (`systemctl disable --now` stops the timer too). A stop signal or an unexpected exit
 # there runs one verified disarm and ends the run non-zero; a disarm that cannot be verified is DISARM_FAILED, as
 # always. Bash runs the trap once the current bounded call returns: systemd's stop SIGTERMs the whole unit, so that is
-# at most one Compose limit (65 s) before the disarm itself; see TimeoutStopSec in stage-c-arm.service.
+# at most one Compose limit (65 s) before the disarm itself (125 s); see TimeoutStopSec in stage-c-arm.service.
 on_interrupt() {
   local rc=${1:-$?}
   trap - EXIT TERM INT HUP
