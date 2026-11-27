@@ -143,6 +143,7 @@ case "$*" in
       *) echo false > "$FAKE_STATE.stopped" ;;
     esac ;;
   compose*) [ "$FAKE_COMPOSE_FAIL" != 1 ] || exit 1
+    case "$*" in *stage-c-pilot*) [ "${FAKE_HANG_ARM:-}" != 1 ] || { echo "arming" >> "$FAKE_LOG"; exec sleep 60; } ;; esac
     [ "${FAKE_COMPOSE_NOOP:-}" != 1 ] || exit 0          # reports success, changes nothing
     : > "$FAKE_STATE.recreated"                           # this run's errors were about the old container
     rm -f "$FAKE_STATE.stopped"
@@ -159,7 +160,21 @@ esac
 """
 
 
-def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop="", fence="true", hang="", extra=None, pins_extra=""):
+def _script(tmp_path, marker=True):
+    """The script with its Stage C host marker pointed at a test file owned by this user (the real one is root's)."""
+    m = tmp_path / "stage-c-host"
+    if marker and not m.exists():
+        m.write_text("")
+        m.chmod(0o644)
+    text = (ROOT / "scripts/stage-c-arm").read_text()
+    assert text.count("MARKER=/etc/acthelm/stage-c-host\n") == 1 and text.count("-user 0 ") == 1
+    p = tmp_path / "stage-c-arm"
+    p.write_text(text.replace("MARKER=/etc/acthelm/stage-c-host\n", f"MARKER={m}\n")
+                 .replace("-user 0 ", f"-user {os.getuid()} "))
+    return p
+
+
+def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop="", fence="true", hang="", extra=None, pins_extra="", interrupt_on=None, marker=True):
     bin_, host, root = tmp_path / "bin", tmp_path / "opt", tmp_path / "root"
     for d in (bin_, host, root):
         d.mkdir(exist_ok=True)
@@ -178,8 +193,31 @@ def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop=""
            # 1 s only where a call is meant to hang: under load a healthy fake call can take longer than that
            "STAGE_C_ARM_DOCKER_TIMEOUT": "1" if hang else "10", **(extra or {}),
            "FAKE_SNIPPET": str(tmp_path / "snippet.py")}
-    out = subprocess.run(["bash", str(ROOT / "scripts/stage-c-arm"), *args], env=env, capture_output=True,
-                         text=True, timeout=30)
+    argv = ["bash", str(_script(tmp_path, marker)), *args]
+    if interrupt_on is None:
+        out = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=30)
+    else:  # systemd's stop: SIGTERM to the whole unit once the log shows `interrupt_on`
+        import signal
+        proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                start_new_session=True)
+        log_file, deadline = tmp_path / "log", time.monotonic() + 20
+        while interrupt_on not in (log_file.read_text() if log_file.exists() else "") and time.monotonic() < deadline:
+            time.sleep(0.05)
+        # every process of the run, as systemd's cgroup kill does (timeout(1) puts its child in its own group)
+        table = [ln.split() for ln in subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True,
+                                                      text=True).stdout.splitlines()]
+        tree, todo = set(), [proc.pid]
+        while todo:
+            pid = todo.pop()
+            tree.add(pid)
+            todo += [int(c) for c, pp in table if int(pp) == pid and int(c) not in tree]
+        for pid in tree:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        stdout, stderr = proc.communicate(timeout=30)
+        out = subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
     log = (tmp_path / "log").read_text() if (tmp_path / "log").exists() else ""
     return out, log, root / "stage-c-pilot.compose.yml"
 
@@ -592,3 +630,41 @@ def test_pub(tmp_path):
     assert ("docker compose -p company-os --env-file .env -f docker-compose.yml "
             "up -d --no-deps --no-build --pull never company-worker") in log
     assert (c / "state.publish").read_text().strip() == "false"
+
+
+# ----------------------------------------------- G3: Stage C host only; an interrupted arm is disarmed (F1, F2)
+@pytest.mark.parametrize("case", ["ledger", "marker"])
+def test_sh_refuses_off_the_stage_c_host(tmp_path, case):
+    """Before any read or Docker call: a release ledger (the production host) refuses with exit 3, a missing Stage C
+    host marker with exit 4. Neither runs the decision nor touches the worker."""
+    ledger = tmp_path / "ledger.json"
+    if case == "ledger":
+        ledger.write_text("{}")
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "true", marker=case != "marker",
+                         extra={"STAGE_C_ARM_EXTRA_LEDGER": str(ledger)})
+    assert out.returncode == {"ledger": 3, "marker": 4}[case]
+    assert "docker" not in log and "action=REFUSED reason=" + {"ledger": "production_ledger",
+                                                               "marker": "not_stage_c_host"}[case] in log
+
+
+def test_sh_marker_must_be_a_plain_root_file(tmp_path):
+    m = tmp_path / "stage-c-host"
+    m.write_text("")
+    m.chmod(0o666)                                                                # world-writable: refused
+    out, log, _ = _run(tmp_path, "ARM TASK-0100", "true")
+    assert out.returncode == 4 and "docker" not in log
+
+
+def test_sh_stop_during_the_arm_disarms(tmp_path):
+    """`systemctl stop` (SIGTERM to the unit) while the arming Compose runs: one verified disarm, exit 143, no ARM."""
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false", extra={"FAKE_HANG_ARM": "1"}, interrupt_on="arming")
+    assert out.returncode == 143, out.stderr
+    assert "action=ARM " not in log and "action=DISARM reason=interrupted" in log and not ovr.exists()
+    assert (tmp_path / "state").read_text().strip() == "false"
+
+
+def test_stop_timeout_covers_the_interrupted_disarm():
+    import re
+    unit = (ROOT / "scripts/systemd/stage-c-arm.service").read_text()
+    stop = int(re.search(r"^TimeoutStopSec=(\d+)$", unit, re.M).group(1))
+    assert stop > (60 + 5) + (60 + 5) + 3 * (10 + 5) + 3 * 2       # call in progress + the whole disarm

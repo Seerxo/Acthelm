@@ -322,6 +322,14 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
   An override path that is a symlink or not a regular file is never written through: the worker is disarmed
   (`override_symlink`), even when it is already armed for the requested task; a link is removed (never its target),
   anything else is left in place and refused on every ARM tick.
+- The script runs on the Stage C host only: before any read or Docker call it refuses with exit 3 where a release
+  ledger exists (`/var/lib/release-host/ledger/ledger.json`, the production host) and with exit 4 unless the
+  root-owned, not group/world-writable marker `/etc/acthelm/stage-c-host` exists (`action=REFUSED`).
+- Stopping the unit (or any unexpected exit) between writing the override and logging `ARM` runs one verified disarm
+  (`reason=interrupted`) and ends the run non-zero; `TimeoutStopSec=240` covers that disarm (181 s worst case). The
+  unit is then left failed, which persists in `systemctl --failed` until reset, so an interrupted arm is visible even
+  with the timer stopped; an unverifiable disarm still logs `DISARM_FAILED`. SIGKILL cannot be trapped: after a
+  `kill -9` run `stage-c-arm` (or `--recreate`) by hand before leaving the timer stopped.
 - Each arm/disarm logs one journal line (`journalctl -t stage-c-arm`): time, action, reason code, task key.
   `scripts/stage-c-arm --dry-run` prints the decision and the worker state and changes nothing; it exits 1 when the
   worker is unreadable or may write contrary to the decision.

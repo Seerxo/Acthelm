@@ -24,6 +24,25 @@ case "${1:-}" in
   --recreate) RECREATE=1 ;;
   *) echo "usage: stage-c-arm [--dry-run|--recreate]" >&2; exit 2 ;;
 esac
+# Stage C host only, before any read or Docker call: never on the production host (a release ledger exists there) and
+# only where the root-owned Stage C host marker exists. The fixed ledger path is always checked; the variable can only
+# add a path (tests), never replace it.
+for ledger in /var/lib/release-host/ledger/ledger.json ${STAGE_C_ARM_EXTRA_LEDGER:+"$STAGE_C_ARM_EXTRA_LEDGER"}; do
+  if [ -e "$ledger" ] || [ -L "$ledger" ]; then
+    timeout 2 logger -t stage-c-arm -- "$(date -u +%Y-%m-%dT%H:%M:%SZ) action=REFUSED reason=production_ledger task=-" \
+      2>/dev/null || true
+    echo "stage-c-arm: refusing: production release ledger present ($ledger); this runs on the Stage C host only" >&2
+    exit 3
+  fi
+done
+MARKER=/etc/acthelm/stage-c-host
+if [ -L "$MARKER" ] || [ -z "$(find "$MARKER" -maxdepth 0 -type f -user 0 ! -perm -020 ! -perm -002 2>/dev/null)" ]; then
+  timeout 2 logger -t stage-c-arm -- "$(date -u +%Y-%m-%dT%H:%M:%SZ) action=REFUSED reason=not_stage_c_host task=-" \
+    2>/dev/null || true
+  echo "stage-c-arm: refusing: no root-owned Stage C host marker at $MARKER; this runs on the Stage C host only" >&2
+  exit 4
+fi
+
 # A missing directory is not a reason to leave an armed worker as it is: the inputs then count as unreadable (below),
 # which disarms by the fallback stop. set -e never ends a run before the worker state is acted on.
 CD_OK=1
@@ -153,6 +172,7 @@ write_override() {
 # running. Anything else is DISARM_FAILED and exit 1.
 disarm() {
   local post
+  trap - EXIT TERM INT HUP             # a disarm is already the cleanup; never re-entered from a trap
   if [ "$INPUTS_OK" = 1 ] && compose >/dev/null 2>&1 \
      && post=$(docker exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE STAGE_C_PUBLISH_ENABLED 2>/dev/null) \
      && [ "$post" = "false"$'\n'"false" ]; then
@@ -178,6 +198,20 @@ disarm() {
     log DISARM_STOP "$REASON" "$TASK"
     report_left
   fi
+}
+
+# The arm transition (override written .. ARM logged) is the one stretch where an interruption could leave a worker
+# armed with no tick to follow (`systemctl disable --now` stops the timer too). A stop signal or an unexpected exit
+# there runs one verified disarm and ends the run non-zero; a disarm that cannot be verified is DISARM_FAILED, as
+# always. Bash runs the trap once the current bounded call returns: systemd's stop SIGTERMs the whole unit, so that is
+# at most one Compose limit (65 s) before the disarm itself; see TimeoutStopSec in stage-c-arm.service.
+on_interrupt() {
+  local rc=${1:-$?}
+  trap - EXIT TERM INT HUP
+  set +e
+  REASON=interrupted
+  disarm
+  exit "$(( rc == 0 ? 1 : rc ))"
 }
 
 # Operator restart: never `docker start` (a stopped container keeps the environment it was armed with). disarm() is
@@ -239,6 +273,10 @@ if [ "$ACTION" = ARM ]; then
   fi
   [ "$ARMED" = true ] && [ "$ARMED_TASK" = "$TASK" ] && [ "$PUBLISH" = true ] && [ "$WIMG" = "$EXP_WIMG" ] \
     && [ "$WSHA" = "$SHA" ] && exit 0
+  trap 'on_interrupt' EXIT
+  trap 'on_interrupt 143' TERM
+  trap 'on_interrupt 130' INT
+  trap 'on_interrupt 129' HUP
   # A worker armed for another task or release is not left as it is when the override cannot be written.
   if ! write_override; then
     REASON=override_write_failed
@@ -254,6 +292,7 @@ if [ "$ACTION" = ARM ]; then
      && post=$(docker inspect -f '{{.Image}}' company-worker 2>/dev/null) && [ "$post" = "$EXP_WIMG" ] \
      && post=$(docker exec company-api printenv CODER_PAUSE_FENCE_ENABLED 2>/dev/null) && [ "$post" = true ] \
      && post=$(decide) && [ "$post" = "$DECISION" ]; then
+    trap - EXIT TERM INT HUP
     log ARM "$REASON" "$TASK"
   else
     REASON=compose_failed
