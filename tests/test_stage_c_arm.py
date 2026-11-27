@@ -109,14 +109,24 @@ echo "docker $*" >> "$FAKE_LOG"
 [ -z "${FAKE_HANG:-}" ] || [ "$*" != "$FAKE_HANG" ] || exec sleep 60
 case "$*" in "${FAKE_HANG_PREFIX:-none}"*) trap '' TERM; sleep 60; exit 0 ;; esac   # ignores TERM: needs the KILL
 case "$*" in
-  "exec -i -e PGOPTIONS"*) cat > "$FAKE_SNIPPET"; echo "$FAKE_DECISION"; exit "${FAKE_DECISION_RC:-0}" ;;
+  "exec -i -e PGOPTIONS"*) cat > "$FAKE_SNIPPET"
+    if [ -e "$FAKE_STATE.recreated" ] && [ -n "${FAKE_DECISION_AFTER:-}" ]; then echo "$FAKE_DECISION_AFTER"; else echo "$FAKE_DECISION"; fi
+    exit "${FAKE_DECISION_RC:-0}" ;;
   "exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE")
-    [ "$FAKE_ERROR" != flag ] && [ "$FAKE_ERROR" != stopped ] || exit 1
+    if [ ! -e "$FAKE_STATE.recreated" ]; then [ "$FAKE_ERROR" != flag ] && [ "$FAKE_ERROR" != stopped ] || exit 1; fi
     cat "$FAKE_STATE" ;;
-  "exec company-worker printenv STAGE_C_ARMED_TASK") [ -s "$FAKE_STATE.task" ] || exit 1; cat "$FAKE_STATE.task" ;;
-  "exec company-api printenv CODER_PAUSE_FENCE_ENABLED") echo "${FAKE_FENCE:-true}"; exit "${FAKE_FENCE_RC:-0}" ;;
-  "inspect -f {{.Image}} company-worker") [ -s "$FAKE_STATE.image" ] || exit 1; cat "$FAKE_STATE.image" ;;
-  "exec company-worker printenv COMPANY_OS_GIT_SHA") [ -s "$FAKE_STATE.sha" ] || exit 1; cat "$FAKE_STATE.sha" ;;
+  "exec company-worker sh -c "*STAGE_C_ARMED_TASK*)
+    [ "$FAKE_ERROR" != task ] || exit 1                      # a Docker setup error can also exit 1
+    [ "$FAKE_ERROR" != flag ] && [ "$FAKE_ERROR" != stopped ] || exit 1
+    [ -s "$FAKE_STATE.task" ] && cat "$FAKE_STATE.task" || echo - ;;
+  "exec company-api printenv CODER_PAUSE_FENCE_ENABLED")
+    if [ -e "$FAKE_STATE.recreated" ] && [ -n "${FAKE_FENCE_AFTER:-}" ]; then echo "$FAKE_FENCE_AFTER"; else echo "${FAKE_FENCE:-true}"; fi
+    exit "${FAKE_FENCE_RC:-0}" ;;
+  "exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE STAGE_C_ARMED_TASK COMPANY_OS_GIT_SHA")
+    cat "$FAKE_STATE"; [ -s "$FAKE_STATE.task" ] && [ -s "$FAKE_STATE.sha" ] || exit 1
+    cat "$FAKE_STATE.task" "$FAKE_STATE.sha" ;;
+  "inspect -f {{.Image}} company-worker") [ -s "$FAKE_STATE.image" ] && cat "$FAKE_STATE.image" || echo "sha256:$(printf 0%.0s $(seq 64))" ;;
+  "exec company-worker printenv COMPANY_OS_GIT_SHA") [ -e "$FAKE_STATE.sha" ] && cat "$FAKE_STATE.sha" || echo ;;
   inspect*)
     if [ -s "$FAKE_STATE.stopped" ]; then [ "$(cat "$FAKE_STATE.stopped")" = false ] || exit 1; echo false; exit 0; fi
     [ "$FAKE_ERROR" != inspect ] || exit 1; [ "$FAKE_ERROR" = stopped ] && echo false || echo true ;;
@@ -128,8 +138,11 @@ case "$*" in
       *) echo false > "$FAKE_STATE.stopped" ;;
     esac ;;
   compose*) [ "$FAKE_COMPOSE_FAIL" != 1 ] || exit 1
+    [ "${FAKE_COMPOSE_NOOP:-}" != 1 ] || exit 0          # reports success, changes nothing
+    : > "$FAKE_STATE.recreated"                           # this run's errors were about the old container
     rm -f "$FAKE_STATE.stopped"
     echo "$COMPANY_OS_IMAGE_WORKER" > "$FAKE_STATE.image"; echo "$COMPANY_OS_GIT_SHA" > "$FAKE_STATE.sha"
+    [ "${FAKE_COMPOSE_NOSHA:-}" != 1 ] || : > "$FAKE_STATE.sha"     # a base Compose change dropped the SHA
     env | grep '^COMPANY_OS_' | sort >> "$FAKE_LOG"
     case "$*" in
       *stage-c-pilot*) echo true > "$FAKE_STATE"
@@ -140,7 +153,7 @@ esac
 """
 
 
-def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop="", fence="true", hang="", extra=None):
+def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop="", fence="true", hang="", extra=None, pins_extra=""):
     bin_, host, root = tmp_path / "bin", tmp_path / "opt", tmp_path / "root"
     for d in (bin_, host, root):
         d.mkdir(exist_ok=True)
@@ -149,8 +162,9 @@ def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop=""
     for f in ("docker", "logger"):
         (bin_ / f).chmod(0o755)
     (host / ".pilot-source-sha").write_text(SHA_A + "\n")
-    (host / "pilot-images.env").write_text("".join(f"{k}={v}\n" for k, v in IMAGES.items()))
+    (host / "pilot-images.env").write_text("".join(f"{k}={v}\n" for k, v in IMAGES.items()) + pins_extra)
     (tmp_path / "state").write_text(armed + "\n")
+    (tmp_path / "state.recreated").unlink(missing_ok=True)
     env = {"PATH": f"{bin_}:/usr/bin:/bin", "STAGE_C_ARM_DIR": str(host),
            "STAGE_C_ARM_OVERRIDE": str(root / "stage-c-pilot.compose.yml"), "FAKE_LOG": str(tmp_path / "log"),
            "FAKE_STATE": str(tmp_path / "state"), "FAKE_DECISION": decision,
@@ -227,8 +241,9 @@ def test_timeout_budget_covers_the_worst_case():
     import re
     script = (ROOT / "scripts/stage-c-arm").read_text()
     calls = len(re.findall(r"\$\(docker |^\s*docker stop |docker exec company-api printenv", script, re.M))
+    calls += script.count("post=$(decide)")                      # the decision probe runs a second time on ARM
     compose_runs = len(re.findall(r"(?:^\s*if |&& )compose ", script, re.M))   # the arm and the disarm recreate
-    assert (calls, compose_runs) == (9, 2), "update the documented worst case and this test together"
+    assert (calls, compose_runs) == (14, 2), "update the documented worst case and this test together"
     assert 'STAGE_C_ARM_DOCKER_TIMEOUT:-10' in script and 'STAGE_C_ARM_COMPOSE_TIMEOUT:-60' in script
     unit = (ROOT / "scripts/systemd/stage-c-arm.service").read_text()
     limit = int(re.search(r"^TimeoutStartSec=(\d+)$", unit, re.M).group(1))
@@ -299,7 +314,7 @@ def test_sh_unknown(tmp_path, error, arm, fail, armed):
     assert not ovr.exists()
     assert ("docker compose -p company-os --env-file .env -f docker-compose.yml "
             "up -d --no-deps --no-build --pull never company-worker") in log
-    assert ("docker stop company-worker" in log) == fail
+    assert ("docker stop -t 5 company-worker" in log) == fail
     assert f"action={'DISARM_STOP' if fail else 'DISARM'} " in log
 
 
@@ -314,7 +329,7 @@ def test_sh_stop_unverified(tmp_path, stop, arm):
     decision = "ARM TASK-0100" if arm else "DISARM stage_c_authorization_missing"
     out, log, ovr = _run(tmp_path, decision, "true", compose_fail=True, stop=stop)
     assert out.returncode == 1, out.stderr
-    assert "docker stop company-worker" in log and "action=DISARM_FAILED " in log
+    assert "docker stop -t 5 company-worker" in log and "action=DISARM_FAILED " in log
     assert "DISARM_STOP" not in log and "action=DISARM " not in log
     assert not ovr.exists()
     out, log2, _ = _run(tmp_path, "DISARM stage_c_authorization_missing", "true", compose_fail=True)   # stop works now
@@ -390,7 +405,7 @@ def test_sh_recreate_starts_a_stopped_armed_worker_unarmed(tmp_path):
     tail = log2[len(log):]
     assert out.returncode == 0, out.stderr
     assert ("docker compose -p company-os --env-file .env -f docker-compose.yml "
-            "up -d --no-deps --no-build --pull never company-worker") in tail and "stage-c-pilot" not in tail
+            "up -d --force-recreate --no-deps --no-build --pull never company-worker") in tail and "stage-c-pilot" not in tail
     assert "action=DISARM reason=operator_recreate task=-" in tail and not ovr.exists()
     assert (tmp_path / "state").read_text().strip() == "false" and not (tmp_path / "state.task").exists()
     assert (tmp_path / "state.image").read_text().strip() == IMAGES["COMPANY_OS_IMAGE_WORKER"]
@@ -404,4 +419,131 @@ def test_sh_recreate_that_cannot_recreate_fails_and_stops(tmp_path):
     (tmp_path / "root/stage-c-pilot.compose.yml").write_text(OVERRIDE_JSON)
     out, log, ovr = _run(tmp_path, "ARM TASK-0100", "true", "--recreate", compose_fail=True)
     assert out.returncode == 1 and "action=DISARM_STOP reason=operator_recreate" in log and not ovr.exists()
-    assert f"-f {ovr}" not in log and "docker stop company-worker" in log
+    assert f"-f {ovr}" not in log and "docker stop -t 5 company-worker" in log
+
+
+# ------------------------------------------------- R4a-1v5: every exit path acts on the worker (state matrix)
+def _armed_first(tmp_path):
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false")
+    assert out.returncode == 0 and ovr.exists()
+    return log
+
+
+def test_sh_override_dir_is_refused_and_disarms(tmp_path):
+    """An override path that is not a regular file (here a directory) is treated like a symlink: disarm, never arm."""
+    log = _armed_first(tmp_path)
+    (tmp_path / "state.task").write_text("TASK-0200\n")                       # armed for another task
+    ovr = tmp_path / "root/stage-c-pilot.compose.yml"
+    ovr.unlink()
+    ovr.mkdir()
+    out, log2, _ = _run(tmp_path, "ARM TASK-0100", "true")
+    tail = log2[len(log):]
+    assert out.returncode == 1 and "action=ARM " not in tail and "stage-c-pilot" not in tail
+    assert "action=DISARM reason=override_symlink" in tail and (tmp_path / "state").read_text().strip() == "false"
+    assert "action=OVERRIDE_LEFT reason=override_symlink" in tail                # reported, the tick fails
+    assert ovr.is_dir()                                                        # never removed recursively
+    out, log3, _ = _run(tmp_path, "DISARM stage_c_authorization_missing", "false")   # already off: still reported
+    assert out.returncode == 1 and "action=OVERRIDE_LEFT" in log3[len(log2):]
+
+
+def test_sh_override_write_failure_disarms_a_worker_armed_elsewhere(tmp_path):
+    """set -e must not end the run with a worker still armed for another task: an override that cannot be written
+    (unwritable directory, full disk) disarms it, verified."""
+    log = _armed_first(tmp_path)
+    (tmp_path / "state.task").write_text("TASK-0200\n")
+    root = tmp_path / "root"
+    (root / "stage-c-pilot.compose.yml").unlink()
+    root.chmod(0o500)
+    try:
+        out, log2, _ = _run(tmp_path, "ARM TASK-0100", "true")
+    finally:
+        root.chmod(0o700)
+    tail = log2[len(log):]
+    assert out.returncode == 1 and "action=ARM " not in tail
+    assert "action=DISARM reason=override_write_failed" in tail and (tmp_path / "state").read_text().strip() == "false"
+    assert not [p for p in root.iterdir() if p.name.startswith(".stage-c-pilot.")]   # no temp file left
+
+
+def test_sh_missing_dir_stops_an_armed_worker(tmp_path):
+    """A missing /opt/company-os used to end the run (set -e) before anything was done. Now the inputs are unreadable:
+    the armed worker is stopped and read back."""
+    log = _armed_first(tmp_path)
+    out, log2, ovr = _run(tmp_path, "ARM TASK-0100", "true", extra={"STAGE_C_ARM_DIR": str(tmp_path / "missing")})
+    tail = log2[len(log):]
+    assert out.returncode == 0 and "docker stop -t 5 company-worker" in tail and "compose" not in tail
+    assert "action=DISARM_STOP reason=bad_inputs" in tail
+    assert not ovr.exists()
+
+
+@pytest.mark.parametrize("decision", ["DISARM stage_c_authorization_revoked", "ARM TASK-0200"], ids=["rev", "oth"])
+def test_sh_disarm_is_verified_by_read_back(tmp_path, decision):
+    """A Compose run that reports success but leaves the worker armed (or, on ARM, armed for another task) is neither
+    a disarm nor an arm: the worker is stopped and read back."""
+    log = _armed_first(tmp_path)
+    out, log2, ovr = _run(tmp_path, decision, "true", extra={"FAKE_COMPOSE_NOOP": "1"})
+    tail = log2[len(log):]
+    assert "action=DISARM " not in tail and "action=ARM " not in tail
+    assert "docker stop -t 5 company-worker" in tail and "action=DISARM_STOP" in tail and not ovr.exists()
+
+
+@pytest.mark.parametrize("drift", ["fence", "sha"])
+def test_sh_arm_is_verified_after_compose(tmp_path, drift):
+    """An arm counts only when the recreated worker reads back armed for the task on the pinned SHA, and the pause
+    fence is still on after Compose (the API may be recreated meanwhile). Otherwise it is disarmed, never ARM-logged."""
+    extra = {"fence": {"FAKE_FENCE_AFTER": "false"}, "sha": {"FAKE_COMPOSE_NOSHA": "1"}}[drift]
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false", extra=extra)
+    assert out.returncode == 1 and "action=ARM " not in log and not ovr.exists()
+    assert "action=DISARM reason=compose_failed" in log and (tmp_path / "state").read_text().strip() == "false"
+
+
+def test_sh_duplicate_or_malformed_pin_is_bad_input(tmp_path):
+    """A later malformed or duplicate definition of a pin never lets an earlier valid one through."""
+    log = _armed_first(tmp_path)
+    out, log2, ovr = _run(tmp_path, "ARM TASK-0100", "true",
+                          pins_extra="COMPANY_OS_IMAGE_WORKER=sha256:" + "9" * 63 + "\n")
+    tail = log2[len(log):]
+    assert "PGOPTIONS" not in tail and "compose" not in tail                      # no decision, no Compose
+    assert "action=DISARM_STOP reason=bad_inputs" in tail and not ovr.exists()
+
+
+def test_sh_recreate_forces_a_new_container(tmp_path):
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "true", "--recreate")
+    assert out.returncode == 0 and "up -d --force-recreate --no-deps --no-build --pull never company-worker" in log
+    out, log2, ovr = _run(tmp_path, "ARM TASK-0100", "false")                  # the timer never forces it
+    assert "--force-recreate" not in log2[len(log):]
+
+
+def test_sh_zero_timeout_cannot_disable_the_bound(tmp_path):
+    """A limit of 0 would disable `timeout`; it falls back to the default bound instead."""
+    started = time.monotonic()
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "true", hang="exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE",
+                         extra={"STAGE_C_ARM_DOCKER_TIMEOUT": "0"})
+    assert time.monotonic() - started < 25 and out.returncode == 1 and "reason=worker_state_unknown" in log
+
+
+def test_sh_failed_task_read_disarms_not_rearms(tmp_path):
+    """A Docker error or timeout reading the armed task is a failed read, not an unarmed worker: verified disarm."""
+    log = _armed_first(tmp_path)
+    out, log2, ovr = _run(tmp_path, "ARM TASK-0100", "true", error="task")
+    tail = log2[len(log):]
+    assert out.returncode == 1 and "stage-c-pilot" not in tail and "action=ARM " not in tail
+    assert "action=DISARM reason=worker_state_unknown" in tail and (tmp_path / "state").read_text().strip() == "false"
+
+
+def test_sh_stop_pilot_during_compose_disarms_at_once(tmp_path):
+    """The decision is asked again after the arming Compose run: a Stop Pilot in between disarms in the same tick."""
+    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false", extra={"FAKE_DECISION_AFTER": "DISARM stage_c_authorization_missing"})
+    assert out.returncode == 1 and "action=ARM " not in log and not ovr.exists()
+    assert "action=DISARM reason=compose_failed" in log and (tmp_path / "state").read_text().strip() == "false"
+
+
+@pytest.mark.parametrize("decision,armed,error,rc", [
+    ("ARM TASK-0100", "true", "inspect", 1),                      # running state unreadable
+    ("DISARM stage_c_authorization_missing", "true", "", 1),      # armed against the decision
+    ("ARM TASK-0100", "true", "flag", 1),                         # unreadable
+    ("DISARM stage_c_authorization_missing", "false", "", 0),
+    ("ARM TASK-0100", "false", "", 0),                            # pending arm, nothing unsafe
+], ids=["norun", "armed", "unread", "off", "pending"])
+def test_sh_dry_run_exit_reflects_safety(tmp_path, decision, armed, error, rc):
+    out, log, ovr = _run(tmp_path, decision, armed, "--dry-run", error=error)
+    assert out.returncode == rc and "compose" not in log and "logger" not in log
