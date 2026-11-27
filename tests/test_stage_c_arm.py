@@ -106,7 +106,8 @@ OVERRIDE_JSON = override_json()
 IMAGES = {f"COMPANY_OS_IMAGE_{n}": "sha256:" + c * 64 for n, c in zip(("API", "WORKER", "REASONER", "EGRESS"), "1234")}
 FAKE_DOCKER = """#!/bin/sh
 echo "docker $*" >> "$FAKE_LOG"
-[ -z "${FAKE_HANG:-}" ] || [ "$*" != "$FAKE_HANG" ] || exec sleep 60
+# FAKE_HANG hangs the first matching call of a run only: a test bounds ONE hung call, not every identical read-back.
+[ -z "${FAKE_HANG:-}" ] || [ "$*" != "$FAKE_HANG" ] || [ -e "$FAKE_STATE.hung" ] || { : > "$FAKE_STATE.hung"; exec sleep 60; }
 case "$*" in "${FAKE_HANG_PREFIX:-none}"*) trap '' TERM; sleep 60; exit 0 ;; esac   # ignores TERM: needs the KILL
 case "$*" in
   "exec -i -e PGOPTIONS"*) cat > "$FAKE_SNIPPET"
@@ -165,6 +166,7 @@ def _run(tmp_path, decision, armed, *args, error="", compose_fail=False, stop=""
     (host / "pilot-images.env").write_text("".join(f"{k}={v}\n" for k, v in IMAGES.items()) + pins_extra)
     (tmp_path / "state").write_text(armed + "\n")
     (tmp_path / "state.recreated").unlink(missing_ok=True)
+    (tmp_path / "state.hung").unlink(missing_ok=True)
     env = {"PATH": f"{bin_}:/usr/bin:/bin", "STAGE_C_ARM_DIR": str(host),
            "STAGE_C_ARM_OVERRIDE": str(root / "stage-c-pilot.compose.yml"), "FAKE_LOG": str(tmp_path / "log"),
            "FAKE_STATE": str(tmp_path / "state"), "FAKE_DECISION": decision,
@@ -514,7 +516,9 @@ def test_sh_recreate_forces_a_new_container(tmp_path):
 
 
 def test_sh_zero_timeout_cannot_disable_the_bound(tmp_path):
-    """A limit of 0 would disable `timeout`; it falls back to the default bound instead."""
+    """A limit of 0 would disable `timeout`; it falls back to the default bound (10 s) instead. One hung call: the
+    fake hangs only the first matching read, so 25 s leaves 15 s for the rest of the run even on one slow CPU (the
+    production gateway's checks container); it hung the identical disarm read-back too and ran out of margin there."""
     started = time.monotonic()
     out, log, ovr = _run(tmp_path, "ARM TASK-0100", "true", hang="exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE",
                          extra={"STAGE_C_ARM_DOCKER_TIMEOUT": "0"})
