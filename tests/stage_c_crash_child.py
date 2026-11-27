@@ -70,6 +70,10 @@ def ensure_fixture() -> None:
 
 def install_fixture(p: _Patch) -> None:
     p.setenv("STAGE_C_JOBS_ROOT", str(FIXTURE / "jobs"))
+    # This process is the worker that scripts/stage-c-arm armed for the one task (Start Pilot): publication needs
+    # both the flag and the armed task (stage_c_runner.publication_enabled).
+    p.setenv("STAGE_C_PUBLISH_ENABLED", "true")
+    p.setenv("STAGE_C_ARMED_TASK", "TASK-0100")
     p.setattr(worker, "ENABLE_AUTONOMOUS_CODE_WRITE", os.environ.get("WRITES_DISABLED") != "1")
     p.setattr(stage_c_worker, "ready", lambda db: None, raising=False)
     p.setattr(stage_c_worker, "runtime_ready", lambda db, now=None: True)
