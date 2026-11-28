@@ -223,7 +223,7 @@ def test_legitimate_zeros_are_kept_and_an_undefined_rate_is_not_cross_checked():
                                    "activated_7d", "active_users_7d", "quota_hits_7d", "paid_users", "checkout_started_7d",
                                    "new_signups_generated_7d", "new_signups_failed_only_7d"])
 @pytest.mark.parametrize("bad", [-1, 2.5, float("nan"), float("inf"), "12", True, 10**15, [1], {"n": 1}])
-def test_an_invalid_count_rejects_the_whole_snapshot(field, bad):
+def test_bad_n(field, bad):
     db = _db()
     out = _sync(db, {"generated_at": GOOD["generated_at"], field: bad})
     # Break caught: a negative or fractional count becomes a trusted observation.
