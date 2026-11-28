@@ -575,7 +575,7 @@ def test_saved_approval_is_bound_to_the_original_base_and_checks(saved_review, f
                                     "legacy_approval", "diff", "malformed_history", "pause", "cancel", "metered",
                                     "authorization_missing", "authorization_consumed", "authorization_expired",
                                     "authorization_sha", "write_disabled"])
-def test_saved_review_rechecked(saved_review, monkeypatch, change):
+def test_review_rechecked(saved_review, monkeypatch, change):
     db, task, ps, coded = saved_review
     imp = task.context["improvement"]
     approval = dict(imp["approval"])
@@ -858,11 +858,33 @@ def test_pausing_during_review_prevents_publishing(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("value", [None, "", "1", "yes", "True", "TRUE", "true ", "false", "true"])
 def test_publish_flag(monkeypatch, value):
+    monkeypatch.setenv(control.ARMED_TASK_ENV, "TASK-0100")
     if value is None:
         monkeypatch.delenv("STAGE_C_PUBLISH_ENABLED", raising=False)
     else:
         monkeypatch.setenv("STAGE_C_PUBLISH_ENABLED", value)
-    assert stage_c_runner.publication_enabled() is (value == "true")   # only exactly "true" publishes
+    real = stage_c_runner.publication_enabled.real
+    assert real("TASK-0100") is (value == "true")   # only exactly "true" publishes
+
+
+def test_publish_arm(monkeypatch):
+    """G5: the publish flag alone never publishes; only a worker armed for exactly this task does (break caught: a
+    hand-set .env flag, or a worker armed for another task, pushes this task's result)."""
+    monkeypatch.setenv("STAGE_C_PUBLISH_ENABLED", "true")
+    real = stage_c_runner.publication_enabled.real
+    for armed in (None, "", "TASK-0200", "task-0100", "TASK-0100 "):
+        if armed is None:
+            monkeypatch.delenv(control.ARMED_TASK_ENV, raising=False)
+        else:
+            monkeypatch.setenv(control.ARMED_TASK_ENV, armed)
+        assert real("TASK-0100") is False and real(None) is False, armed
+    monkeypatch.setenv(control.ARMED_TASK_ENV, "TASK-0100")
+    assert real("TASK-0100") is True and real("TASK-0200") is False
+    # Defense in depth in publish() itself: armed for another task, nothing is pushed.
+    monkeypatch.setenv(control.ARMED_TASK_ENV, "TASK-0200")
+    task = SimpleNamespace(key="TASK-0100")
+    assert stage_c_runner.publish(None, task, None, b"", Path("/nonexistent"), "ext::x", None) == {
+        "outcome": "HELD_BEFORE_PUBLISH"}
 
 
 def test_held_no_push(monkeypatch, tmp_path):

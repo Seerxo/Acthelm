@@ -59,6 +59,12 @@ services:
       COMPANY_API_TOKEN_ADMIN: ${COMPANY_API_TOKEN_ADMIN:-}
       COMPANY_API_TOKEN_DESK: ${COMPANY_API_TOKEN_DESK:-}
       COMPANY_API_TOKEN_YOUTUBE: ${COMPANY_API_TOKEN_YOUTUBE:-}
+      # B5 production -> Stage C handoff (app/stage_c_handoff.py), off unless the host .env turns one role on.
+      # Production: the founder's Release route and the Desk list (sender); Stage C: the machine routes (receiver).
+      ENABLE_STAGE_C_HANDOFF: ${ENABLE_STAGE_C_HANDOFF:-false}
+      ENABLE_STAGE_C_HANDOFF_RECEIVER: ${ENABLE_STAGE_C_HANDOFF_RECEIVER:-false}
+      COMPANY_API_TOKEN_HANDOFF: ${COMPANY_API_TOKEN_HANDOFF:-}
+      STAGE_C_HANDOFF_URL: ${STAGE_C_HANDOFF_URL:-}
       # Optional direct Founder Desk Access identity; API only, no worker credentials.
       CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
       CF_ACCESS_DESK_AUD: ${CF_ACCESS_DESK_AUD:-}
@@ -130,14 +136,22 @@ services:
       WORKER_IMAGE: ${COMPANY_OS_IMAGE_WORKER}
       # Stage C stays off until the sandbox exists and the founder enables it.
       ENABLE_AUTONOMOUS_CODE_WRITE: "false"
-      # An approved Stage C result is pushed and opened as a PR only when the Stage C host .env says "true";
-      # anything else holds it for the founder (WAITING_APPROVAL, HELD_BEFORE_PUBLISH) with nothing pushed.
-      STAGE_C_PUBLISH_ENABLED: ${STAGE_C_PUBLISH_ENABLED:-false}
+      # Publication (push + PR) is armed with the code write, never from .env: only the scripts/stage-c-arm override
+      # sets it "true", for the one armed task, and disarm recreates without it. Anything else holds an approved
+      # result for the founder (WAITING_APPROVAL, HELD_BEFORE_PUBLISH) with nothing pushed.
+      STAGE_C_PUBLISH_ENABLED: "false"
       # Control-plane only: one-repository fine-grained GitHub credential. Never passed
       # to either provider CLI or the host coder/checks launcher. Absent = no Stage C writes.
       GH_TOKEN: ${COMPANY_STAGE_C_GITHUB_TOKEN:-}
       # Optional PR-only token (fine-grained, upstream Pull requests: write, no Contents): used only by gh pr create.
       GH_PR_TOKEN: ${COMPANY_STAGE_C_PR_TOKEN:-}
+      # B5 handoff sender (production worker tick: delivery, activation, polls, cancels). Off unless the host .env
+      # turns it on; the Access service token is sent only to the Stage C handoff URL.
+      ENABLE_STAGE_C_HANDOFF: ${ENABLE_STAGE_C_HANDOFF:-false}
+      COMPANY_API_TOKEN_HANDOFF: ${COMPANY_API_TOKEN_HANDOFF:-}
+      STAGE_C_HANDOFF_URL: ${STAGE_C_HANDOFF_URL:-}
+      STAGE_C_HANDOFF_ACCESS_CLIENT_ID: ${STAGE_C_HANDOFF_ACCESS_CLIENT_ID:-}
+      STAGE_C_HANDOFF_ACCESS_CLIENT_SECRET: ${STAGE_C_HANDOFF_ACCESS_CLIENT_SECRET:-}
       # Only explicitly configured, low-risk external waits may be released.
       ENABLE_AUTOMATIC_EXTERNAL_RELEASE: ${ENABLE_AUTOMATIC_EXTERNAL_RELEASE:-false}
       # Founder decision 2026-10-06: read-only research/analysis proposals start on their own

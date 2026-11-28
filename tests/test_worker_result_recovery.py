@@ -129,7 +129,12 @@ def saved_result(tmp_path, monkeypatch):
                     worker.run_once(db, {"claude": FakeProvider("claude", [_good(task.key, **output)])}, SPECS)
             db.rollback()
             run_id = db.scalar(select(models.AgentRun.id))
-        clock[0] += worker.STALE_AFTER + timedelta(seconds=5)
+            started = db.get(models.AgentRun, run_id).started_at
+        # Stale by exactly STALE_AFTER + 5 s from the run's own recorded start, however long the setup above took (a
+        # slow single-CPU host once spent more than 5 s in it, leaving the run not yet stale).
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=clock[0].tzinfo)
+        clock[0] = max(clock[0], started) + worker.STALE_AFTER + timedelta(seconds=5)
         return engine, task_id, run_id, clock
 
     return prepare

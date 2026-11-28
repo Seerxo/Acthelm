@@ -59,3 +59,9 @@ export function approvalState(h: HandoffView | null): { release: [string, Tone];
  *  every screen calls approvalState on this, never on the server's cached value. */
 export const liveView = (h: HandoffView, now: number): HandoffView =>
   ({ ...h, freshness: liveFreshness(h.freshness, h.snapshot?.generated_at, now) })
+
+/** The task the Handoff screen shows and releases: only the answer for the key it currently has open. A read for a
+ *  task opened earlier (a 30s poll in flight across "Start another" or opening another key) is dropped, so the shown
+ *  status, the release check and the POST all name the same task. */
+export const shownTask = <T extends { key: string }>(key: string | null, task: T | null): T | null =>
+  key !== null && task !== null && task.key === key ? task : null

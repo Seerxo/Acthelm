@@ -19,11 +19,19 @@ def snapshot(obj: Any) -> dict:
             continue
         out[k] = v.isoformat() if hasattr(v, "isoformat") else (v.value if hasattr(v, "value") else v)
     ctx = out.get("context")
-    remote = ctx.get("remote_stage_c") if isinstance(ctx, dict) else None
-    if isinstance(remote, dict) and "packet" in remote:
-        # B5: the released transfer text is bound by its digest; audit rows never copy it (app/stage_c_handoff.py).
-        out["context"] = {**ctx, "remote_stage_c": {k: v for k, v in remote.items() if k != "packet"}}
+    if isinstance(ctx, dict) and "remote_stage_c" in ctx:
+        # B5: the released transfer text is bound by its digest; audit rows never copy it, at any depth (a renewal
+        # keeps the superseded record nested under it) (app/stage_c_handoff.py).
+        out["context"] = {**ctx, "remote_stage_c": _without_packets(ctx["remote_stage_c"])}
     return out
+
+
+def _without_packets(value):
+    if isinstance(value, dict):
+        return {k: _without_packets(v) for k, v in value.items() if k != "packet"}
+    if isinstance(value, list):
+        return [_without_packets(v) for v in value]
+    return value
 
 
 def record(

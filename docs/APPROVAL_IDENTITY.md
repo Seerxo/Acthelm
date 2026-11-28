@@ -51,7 +51,7 @@ The Access founder can reach the two routes through `api_auth.FOUNDER_SCOPE`; th
 
 | Route | Class | Rule |
 |---|---|---|
-| `POST /tasks/{key}/status` -> DONE/CANCELLED/FAILED/REVIEW | Founder-only | `require_founder`; DONE requires evidence |
+| `POST /tasks/{key}/status` -> DONE/CANCELLED/FAILED/REVIEW | Founder-only | `require_founder`; DONE requires evidence; a Stage C code task (improvement record or `context.stage_c`) is DONE only with a verified founder merge recorded by Stage C (`stage_c_worker.done_refusal`, 409), a handed-off one only with a fresh verified-merge report (`stage_c_handoff.status_refusal`) |
 | `POST /tasks/{key}/status` from existing DONE/CANCELLED/FAILED/REVIEW | Founder-only | `require_founder`; includes same-status result changes |
 | `POST /tasks/{key}/run-report` -> REVIEW or from existing DONE/CANCELLED/FAILED/REVIEW | Founder-only | `require_founder`; caller-supplied Herdr state is not independent proof |
 | `POST /phases/{n}` -> COMPLETE | Founder-only | `require_founder` |
@@ -59,6 +59,7 @@ The Access founder can reach the two routes through `api_auth.FOUNDER_SCOPE`; th
 | `POST /learnings/{id}/approve` | Founder-only, enforce-always | `require_founder`; locks the row; audit actor = `Principal.id` |
 | `POST /stage-c/authorization` | Founder-only, enforce-always | `require_founder`; SHA is the deployed SHA (API and worker must agree); task, repository, action, TTL <= 60 min bound and audited |
 | `POST /stage-c/tasks` | Founder-only, enforce-always | `require_founder`; creates a BACKLOG LOW-risk developer task in `company-os` whose write paths must be allowed Stage C files (422 otherwise); it runs nothing until authorized and made READY |
+| `POST /tasks` | Admin / host operator / founder, enforce-always | creates IDEA, BACKLOG or READY only (422 otherwise: terminal and REVIEW states go through the status route); context keys the server writes (`improvement`, `remote_stage_c`, `write`, `stage_c`, `external_release`, `guardian`, `incident`) are refused (422); a code task comes only from `POST /stage-c/tasks` |
 | `POST /control/agents` resume | Founder-only | `require_founder`; pausing (emergency stop) stays open to every authorized caller and records the real principal |
 | `POST /stage-c/authorization/revoke` | Founder or host operator, enforce-always | withdrawing authority is the safe direction; audit names who |
 | `POST /experiments...` founder steps (approve, accept, reject) | Founder-only, enforce-always | route layer is Agent 3's; contract below |

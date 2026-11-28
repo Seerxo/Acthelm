@@ -54,7 +54,7 @@ def _imported(engine, activate=True):
     with Session(engine) as s:
         _, receipt = h.import_packet(s, packet["id"], packet)
         if activate:
-            h.activate_import(s, packet["id"], packet["payload_sha256"])
+            h.activate_import(s, packet["id"], packet["payload_sha256"], sent_at=now)
     return packet["id"], packet["payload_sha256"], receipt["task_key"]
 
 
@@ -102,7 +102,7 @@ def test_pg_no_reuse(engine):
 
 
 @pytest.mark.parametrize("first", ["cancel", "activate"])
-def test_pg_cancel_activate(engine, first):
+def test_pg_ca(engine, first):
     """Cancel and activation of one import, released at once from behind a held task lock: no deadlock, and the
     result is never a runnable import (a cancel always wins, before or after activation)."""
     hid, sha, key = _imported(engine, activate=False)
@@ -117,7 +117,7 @@ def test_pg_cancel_activate(engine, first):
                 errors.append(e.code)
     with Session(engine) as holder:
         _task(holder, key, lock=True)
-        order = [h.cancel_import, h.activate_import]
+        order = [h.cancel_import, lambda s, i, p: h.activate_import(s, i, p, sent_at=datetime.now(timezone.utc))]
         threads = [threading.Thread(target=run, args=(fn,)) for fn in (order if first == "cancel" else order[::-1])]
         for t in threads:
             t.start()
@@ -132,3 +132,102 @@ def test_pg_cancel_activate(engine, first):
         assert task.status == enums.TaskStatus.CANCELLED
         assert h.grant_denial(s, task, {}) is not None
         assert s.get(models.ControlState, h.KEY_PREFIX + hid).value["cancelled_at"]
+
+
+def _packet(issued):
+    p = {"version": 1, "id": str(uuid.uuid4()), "origin": "production", "origin_task_key": "TASK-0001",
+         "repository": "seerxo/acthelm", "issued_at": issued.isoformat(),
+         "expires_at": (issued + timedelta(hours=1)).isoformat(), "risk": "LOW", "kind": "code_change",
+         "task": BODY}
+    p["payload_sha256"] = h.digest(p)
+    return p
+
+
+def test_pg_or(engine, monkeypatch):
+    """R4a-2 finding 4: two first imports of one production task with different ids, interleaved inside
+    _retire_superseded (nothing committed yet to lock), both committed. One open import per production task."""
+    now = datetime.now(timezone.utc)
+    p1, p2 = _packet(now - timedelta(minutes=1)), _packet(now)
+    a_in, b_done, out = threading.Event(), threading.Event(), {}
+    real = h._retire_superseded
+
+    def retire(db, origin, hid, at):
+        real(db, origin, hid, at)
+        if hid == p1["id"]:
+            a_in.set()
+            b_done.wait(2)                  # B would finish here unless it waits for A
+    monkeypatch.setattr(h, "_retire_superseded", retire)
+
+    def run(p, after=None):
+        if after:
+            after.wait(10)
+        with Session(engine) as s:
+            try:
+                out[p["id"]] = h.import_packet(s, p["id"], p)[0]
+            except h.HandoffError as e:
+                s.rollback()
+                out[p["id"]] = e.code
+        if after:
+            b_done.set()
+    threads = [threading.Thread(target=run, args=(p1,)), threading.Thread(target=run, args=(p2, a_in))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+        assert not t.is_alive()
+    with Session(engine) as s:
+        live = [t for t in s.scalars(select(models.Task)) if t.status != enums.TaskStatus.CANCELLED]
+    assert out == {p1["id"]: 201, p2["id"]: 201}
+    assert [t.context["remote_stage_c"]["id"] for t in live] == [p2["id"]]
+
+
+def test_pg_lk(engine):
+    """R4a-2 finding 3: replacing a finished handoff grant locks the handoff task (as a claim does) before the grant.
+    A native authorization waits for a held lock on that task, never deadlocks, and bumps its revision."""
+    hid, sha, key = _imported(engine)
+    fid, past = "founder:access:founder@example.invalid", datetime.now(timezone.utc) - timedelta(minutes=10)
+    with Session(engine) as s:   # issued earlier, expired now: replaceable
+        control.authorize_pilot(s, key, "c" * 40, founder=fid, handoff_id=hid, payload_sha256=sha,
+                                ttl=timedelta(minutes=1), now=past)
+        s.add(models.Task(key="TASK-0900", title="native", success_criteria="s"))
+        s.commit()
+        rev = _task(s, key).revision
+
+    def native():
+        with Session(engine) as s:
+            control.authorize_pilot(s, "TASK-0900", "c" * 40, founder=fid)
+    with Session(engine) as holder:
+        _task(holder, key, lock=True)
+        t = threading.Thread(target=native)
+        t.start()
+        t.join(1)
+        assert t.is_alive()                  # waits on the handoff task's lock
+        holder.commit()
+    t.join(30)
+    assert not t.is_alive()
+    with Session(engine) as s:
+        assert _task(s, key).revision == rev + 1
+        assert s.get(models.ControlState, control.PILOT_AUTHORIZATION).value["task_key"] == "TASK-0900"
+
+
+def test_pg_r4(engine, monkeypatch):
+    """R4a-2 pre-review 4: the report read the task (its revision) and the handoff row in separate READ COMMITTED
+    statements, so a cancel committed in between gave a report that was never committed state: an open task, an old
+    seq, and an acknowledged cancellation. The report is one consistent snapshot."""
+    hid, sha, key = _imported(engine)
+    real, calls = h._row, []
+
+    def row(db, i, lock=False):
+        calls.append(i)
+        if len(calls) == 2:                      # after the task row was read: a cancel commits elsewhere
+            monkeypatch.setattr(h, "_row", real)
+            with Session(engine) as other:
+                h.cancel_import(other, hid, sha)
+        return real(db, i, lock)
+    monkeypatch.setattr(h, "_row", row)
+    with Session(engine) as s:
+        snap = h.snapshot(s, hid)
+    assert (snap["task"]["status"], snap["cancellation"]) == ("BACKLOG", "NONE")
+    with Session(engine) as s:
+        new = h.snapshot(s, hid)
+    assert (new["task"]["status"], new["cancellation"]) == ("CANCELLED", "ACKNOWLEDGED") and new["seq"] > snap["seq"]

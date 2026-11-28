@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { approvalState, liveView, releaseBlock, type HandoffView } from "./handoff.ts"
+import { approvalState, liveView, releaseBlock, shownTask, type HandoffView } from "./handoff.ts"
 
 const H: HandoffView = { id: "00000000-0000-4000-8000-000000000001", payload_sha256: "a".repeat(64), delivery: "PENDING",
   remote_task_key: null, released_at: "2026-11-17T10:00:00+00:00", expires_at: "2026-11-18T10:00:00+00:00",
@@ -42,4 +42,12 @@ test("a stale report never shows as a current Stage C approval on any list row",
   const row = { ...H, freshness: "FRESH" as const, snapshot: { generated_at: at, authorization: { status: "ACTIVE" } } }
   assert.notEqual(approvalState(liveView(row, t0 + 60_000)).coding[1], "warning")     // fresh: the real state
   assert.equal(approvalState(liveView(row, t0 + 181_000)).coding[1], "warning")       // stale: Unknown
+})
+
+test("a late answer for another task is never shown or released (R4 pre-review finding 3)", () => {
+  const one = { key: "TASK-0001", status: "BACKLOG" }, two = { key: "TASK-0002", status: "WAITING_EXTERNAL" }
+  assert.equal(shownTask("TASK-0002", two), two)
+  assert.equal(shownTask("TASK-0002", one), null)   // a poll for the previously opened task landed late
+  assert.equal(shownTask(null, one), null)          // reset ("Start another") while a read was in flight
+  assert.equal(shownTask("TASK-0001", null), null)
 })

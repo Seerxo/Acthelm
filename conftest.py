@@ -20,7 +20,19 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture(autouse=True)
 def _stage_c_publication_on(monkeypatch):
-    """Production default holds approved Stage C results (STAGE_C_PUBLISH_ENABLED unset). The publication tests
-    exercise the push path, so it is on here; tests of the hold delete it explicitly. Root conftest, so
-    evals/ (which call publish() directly) get it too."""
+    """Production default holds approved Stage C results: publication is on only in a worker armed for the task
+    (stage_c_runner.publication_enabled, set by scripts/stage-c-arm). The publication tests exercise the push path,
+    so the flag is on here and a test worker WITHOUT STAGE_C_ARMED_TASK stands for one armed for the task it runs;
+    tests that set STAGE_C_ARMED_TASK get the real rule, and `publication_enabled.real` is the unwrapped function.
+    Tests of the hold delete the flag explicitly. Root conftest, so evals/ (which call publish() directly) get it."""
+    import os
+    from app import stage_c_runner
     monkeypatch.setenv("STAGE_C_PUBLISH_ENABLED", "true")
+    real = stage_c_runner.publication_enabled
+
+    def armed_as_its_task(task_key):
+        if "STAGE_C_ARMED_TASK" in os.environ:
+            return real(task_key)
+        return os.environ.get("STAGE_C_PUBLISH_ENABLED") == "true"
+    armed_as_its_task.real = real
+    monkeypatch.setattr(stage_c_runner, "publication_enabled", armed_as_its_task)

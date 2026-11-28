@@ -73,8 +73,10 @@ def _expired(value: dict, now: datetime) -> bool:
 
 
 def acquire(db: Session, repository: str, holder: str, ttl: timedelta,
-            now: datetime | None = None) -> int | None:
-    """Fencing token for `holder`, or None while another holder's lease is live. Caller commits."""
+            now: datetime | None = None, *, run_id: int | None = None) -> int | None:
+    """Fencing token for `holder`, or None while another holder's lease is live. Caller commits.
+    `run_id` records which AgentRun holds the lease (app/stage_c_arm.py proves run-to-lease ownership with it);
+    a lease taken without one carries none, never an earlier run's."""
     now = now or datetime.now(timezone.utc)
     row = _locked(db, lease_key(repository))
     value = dict(row.value)
@@ -82,6 +84,9 @@ def acquire(db: Session, repository: str, holder: str, ttl: timedelta,
         return None
     value.update(holder=holder, token=int(value.get("token", 0)) + 1,
                  expires_at=(now + ttl).isoformat())
+    value.pop("run_id", None)
+    if type(run_id) is int:
+        value["run_id"] = run_id
     row.value, row.updated_by = value, holder
     return value["token"]
 
@@ -116,6 +121,20 @@ def prepare_worktree(mirror: Path, workspaces: Path, task_key: str, base: str) -
     return path
 
 
+# The MERGED actor stage_c_ci._record_merge writes: "founder (github:<login>, via <path>)".
+MERGE_ACTOR = re.compile(r"founder \(github:([A-Za-z0-9][A-Za-z0-9-]*)(?:, via [^()]+)?\)")
+MERGE_COMMIT = re.compile(r"[0-9a-f]{40}")
+
+
+def verified_merge(actor, evidence) -> bool:
+    """A MERGED record is the founder's verified merge: the GitHub-verified actor form, its login equal to the
+    evidence's merged_by, and a full merge commit SHA. Anything else (a bare "founder") proves nothing."""
+    match = MERGE_ACTOR.fullmatch(actor) if isinstance(actor, str) else None
+    evidence = evidence if isinstance(evidence, dict) else {}
+    return (match is not None and evidence.get("merged_by") == match.group(1)
+            and isinstance(evidence.get("merge_commit"), str) and MERGE_COMMIT.fullmatch(evidence["merge_commit"]) is not None)
+
+
 def advance(db: Session, task: models.Task, stage: str, actor: str,
             evidence: dict | None = None) -> None:
     """Record the next improvement stage on the task. Raises on a skipped or backward step."""
@@ -125,11 +144,9 @@ def advance(db: Session, task: models.Task, stage: str, actor: str,
     allowed = {"DETECTED"} if current is None else NEXT[current]
     if stage not in allowed:
         raise ValueError(f"{task.key}: {current} -> {stage} is not allowed")
-    # Only the founder merges. Automation may record that act only from GitHub evidence
-    # (stage_c_ci: merged_by is the founder's login) and must say so in the actor.
-    if stage == "MERGED" and actor != "founder" and not (
-            actor.startswith("founder (github:") and (evidence or {}).get("merged_by")
-            and (evidence or {}).get("merge_commit")):
+    # Only the founder merges, and the act is recorded only from GitHub evidence (stage_c_ci._record_merge: merged_by
+    # is the founder's login). There is no bare "founder" path: nothing could have verified who that was.
+    if stage == "MERGED" and not verified_merge(actor, evidence):
         raise PermissionError("only the founder merges")
     if stage == "IMPLEMENTING":
         imp.pop("approval", None)

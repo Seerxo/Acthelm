@@ -368,7 +368,7 @@ def founder_desk_command(body: schemas.DeskCommand, db: Session = Depends(get_db
     unit = _by_key(db, models.BusinessUnit, body.business_unit)
     if project and unit and project.business_unit_id != unit.id:
         raise HTTPException(422, f"project '{project.key}' is not in business unit '{unit.key}'")
-    task = create_task(schemas.TaskCreate(
+    task = _create_task(schemas.TaskCreate(
         title=" ".join((body.title or text[:200]).split()), description=text,
         status=enums.TaskStatus.READY, priority=body.priority, assigned_agent=body.agent,
         # The request text is the objective unless one was given: an empty objective would
@@ -666,8 +666,34 @@ def list_tasks(status: enums.TaskStatus | None = None, db: Session = Depends(get
     return db.execute(stmt.order_by(models.Task.priority, models.Task.created_at)).scalars().all()
 
 
+# A client creates work only in a state that runs nothing it was not allowed to run: IDEA, BACKLOG, or READY (which the
+# worker re-checks at claim). Every other state (REVIEW, DONE, CANCELLED, FAILED, BLOCKED, IN_PROGRESS, ...) is reached
+# only through the guarded status route, the worker or Stage C, so creation cannot skip the founder-only rules.
+_CREATE_STATES = (enums.TaskStatus.IDEA, enums.TaskStatus.BACKLOG, enums.TaskStatus.READY)
+# Context keys the server writes and later trusts. A client may not supply them at creation:
+#   improvement      Stage C lifecycle (stage_c.advance); done_refusal, the Desk and the Stage C read model read it
+#   remote_stage_c   B5 handoff binding (stage_c_handoff); released(), status_refusal and the snapshot read it
+#   write, stage_c   make the task a code-writing task: only the founder's POST /stage-c/tasks (scope re-checked) or a
+#                    handoff import sets them
+#   external_release the worker's release proof, fed to the agent as external input
+#   guardian         repo_guardian's finding; incident  event_router's provenance
+_SERVER_CONTEXT_KEYS = ("improvement", "remote_stage_c", "write", "stage_c", "external_release", "guardian", "incident")
+
+
 @app.post("/tasks", response_model=schemas.TaskOut, status_code=201)
 def create_task(body: schemas.TaskCreate, db: Session = Depends(get_db), request: Request = None):
+    """Create a task from a client body: initial states only, no server-owned context. Nothing is written on a refusal."""
+    if body.status not in _CREATE_STATES:
+        raise HTTPException(422, f"a task is created as {', '.join(s.value for s in _CREATE_STATES)}; "
+                                 f"{body.status.value} is reached only through the status route")
+    if body.context is not None and (reserved := sorted(set(body.context) & set(_SERVER_CONTEXT_KEYS))):
+        raise HTTPException(422, f"context keys {', '.join(reserved)} are written by the server, not at creation")
+    return _create_task(body, db, request)
+
+
+def _create_task(body: schemas.TaskCreate, db: Session, request: Request | None):
+    """Insert a task and its creation audit row. In-process callers (/desk/command, /stage-c/tasks) build `body`
+    themselves; client bodies go through create_task's checks first."""
     # §150 duplicate protection — an equivalent OPEN task blocks a new one.
     if body.dedupe_key:
         dup = db.execute(
@@ -741,7 +767,7 @@ def get_task(key: str, db: Session = Depends(get_db)) -> dict:
 
 @app.post("/tasks/{key}/status", response_model=schemas.TaskOut)
 def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = Depends(get_db),
-                       request: Request = None):
+                       request: Request = None, response: Response = None):
     """Move a task through §32's states.
 
     Terminal states and REVIEW require the verified founder; DONE also needs evidence.
@@ -782,8 +808,28 @@ def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = D
     if refusal := stage_c_handoff.status_refusal(task, body.status):
         db.rollback()
         raise HTTPException(409, f"{task.key}: {refusal}")
+    # A native Stage C task is DONE only once its founder merge is recorded from GitHub, never on an evidence string.
+    if body.status == enums.TaskStatus.DONE and (refusal := stage_c_worker.done_refusal(db, task)):
+        db.rollback()
+        raise HTTPException(409, f"{task.key}: {refusal}")
     if body.status == enums.TaskStatus.CANCELLED:
         stage_c_handoff.request_cancel(db, task, actor=who.id)
+        if stage_c_handoff.cancel_unconfirmed(task):
+            # B5: the validated cancel is durable first (pending: from here every other status change is refused),
+            # then Stage C withdraws the import with no lock or transaction held across the request, then what it
+            # acknowledged is recorded under the lock again. The task is CANCELLED only once Stage C acknowledged.
+            db.commit()
+            withdrawn = stage_c_handoff.withdraw(db, task)
+            db.refresh(task, with_for_update=True)
+            stage_c_handoff.request_cancel(db, task, actor=who.id, withdrawn=withdrawn)
+        if stage_c_handoff.cancel_unconfirmed(task):
+            # Stage C has not acknowledged the withdrawal: never shown as cancelled. 202, the task stays
+            # WAITING_EXTERNAL with its handoff cancellation PENDING; the worker retries and closes it on acknowledgement.
+            db.commit()
+            db.refresh(task)
+            if response is not None:
+                response.status_code = 202
+            return task
 
     before = redact_data(audit.snapshot(task))
     previous = task.status
@@ -1136,7 +1182,7 @@ def stage_c_task(body: schemas.StageCTask, request: Request, db: Session = Depen
     if stage_c_worker.scope_refused(scope, set(stage_c_worker.task_paths())):
         raise HTTPException(422, "paths must be distinct allowed Stage C files; context must be other app/ or tests/ "
                                  ".py files (at most 10, 20 files in all)")
-    task = create_task(schemas.TaskCreate(
+    task = _create_task(schemas.TaskCreate(
         title=" ".join(body.title.split()), objective=body.objective, success_criteria=body.success_criteria,
         status=enums.TaskStatus.BACKLOG, assigned_agent="developer", project="company-os",
         risk_level=enums.RiskLevel.LOW, created_by="founder", reason="founder desk code task",
@@ -1224,6 +1270,15 @@ def release_task_to_stage_c(key: str, request: Request, body: schemas.HandoffRel
         raise HTTPException(e.status, e.code)
 
 
+@app.get("/desk/reconciliation")
+def desk_reconciliation(request: Request, db: Session = Depends(get_db)) -> dict:
+    """Read-only reconciliation of every open task (app/reconciliation.py): status, time in status, blocker and its
+    evidence, admissibility and the one next action. Founder only, from the verified principal. Writes nothing."""
+    approval_identity.require_founder(request)
+    from app import reconciliation
+    return reconciliation.build(db)
+
+
 @app.get("/desk/handoffs")
 def desk_handoffs(request: Request, db: Session = Depends(get_db)) -> dict:
     """Production: released tasks and the last authenticated Stage C report for each. Local read, no network call."""
@@ -1292,7 +1347,8 @@ async def handoff_activate(hid: str, request: Request, db: Session = Depends(get
     except ValueError:
         raise HTTPException(422, "MALFORMED")
     return _handoff_call("POST", get_route_path(request.scope),
-                         lambda: (200, stage_c_handoff.activate_import(db, hid, body.payload_sha256)), db)
+                         lambda: (200, stage_c_handoff.activate_import(db, hid, body.payload_sha256,
+                                                                       sent_at=body.sent_at)), db)
 
 
 @app.post("/stage-c/handoff-api/{hid}/cancel")

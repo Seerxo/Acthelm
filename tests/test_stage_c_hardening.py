@@ -620,7 +620,7 @@ def _leaks(secret: str) -> dict[str, tuple[str | None, str, str]]:
 
 @pytest.mark.parametrize("where", list(_leaks("x" * 40)))
 @pytest.mark.parametrize("secret", [REFRESH_TOKEN, ACCESS_SIG], ids=["refresh", "access"])
-def test_codex_login_slice_refused(tmp_path, where, secret):
+def test_login_slice(tmp_path, where, secret):
     from app import providers
     final, events, err = _leaks(secret)[where]
     p, _ = _codex(tmp_path, _answers(final, events, err))

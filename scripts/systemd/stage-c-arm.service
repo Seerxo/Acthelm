@@ -9,4 +9,12 @@ Requires=docker.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/flock -n /run/stage-c-arm.lock /opt/company-os/scripts/stage-c-arm
-TimeoutStartSec=300
+# Docker calls are bounded inside the script; its worst case is 460 s plus at most three 5 s log lines, 475 s (see
+# scripts/stage-c-arm). The whole run gets more than that, so the fallback stop and its read-back always run before
+# systemd could stop the script.
+TimeoutStartSec=540
+# Stopping the unit mid-arm runs one verified disarm (scripts/stage-c-arm on_interrupt). Worst case: the bounded call in
+# progress (a Compose run, 60 s + 5 s kill grace) plus the disarm (image resolution 15 s, Compose 65 s, read-back 15 s,
+# fallback stop 15 s and read-back 15 s, three 5 s log lines) = 65 + 140 = 205 s. 240 s leaves room; systemd's default
+# 90 s would SIGKILL it.
+TimeoutStopSec=240
