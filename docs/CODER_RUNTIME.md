@@ -331,8 +331,10 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
 - The decision is trusted only from the pinned API image: the API image, the pause fence and the authorization are
   read from one `company-api` container by its immutable ID, which must run exactly `COMPANY_OS_IMAGE_API`
   (`DISARM api_image_mismatch` / `pause_fence_off` otherwise). The decision is asked again immediately before the
-  arming Compose (`changed_before_arm`) and once more after it; before anything starts, the worker image Compose
-  resolves (base file, override and pins) must be the pinned worker image (`compose_image_mismatch`). `--dry-run`
+  arming Compose (`changed_before_arm`) and once more after it. Every Compose start (arm, disarm, `--recreate`)
+  first resolves the worker image from exactly the configuration it will start and starts nothing unless that is the
+  pinned worker image; a mismatch or an unreadable configuration fails the start, and the worker is then stopped and
+  read back (`DISARM_STOP`, or `DISARM_FAILED`). `--dry-run`
   applies the same image, SHA and fence checks as a tick. Between Compose and the read-back the worker's own
   claim check (`control.write_authorization_denial`) still refuses any write its one-task grant does not allow.
 - Each arm/disarm logs one journal line (`journalctl -t stage-c-arm`): time, action, reason code, task key.
@@ -342,7 +344,7 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
   plus the time the Docker calls of that tick take), even mid-run: the worker is recreated and the run is recovered
   as an infrastructure interruption (`stage_c_worker.recover_interrupted`). Every Docker call is time-bounded
   (10 s, 60 s per Compose run, 5 s kill grace; an override of these limits is honoured only between 1 s and the
-  default); one run's worst case is 430 s, under the unit's 480 s limit. If
+  default); one run's worst case is 460 s (Docker calls, Compose runs and log lines), under the unit's 540 s limit. If
   Docker itself does not respond, no disarm can be confirmed and no stop time is promised: each tick that reaches
   the script (the unit requires `docker.service`) logs `DISARM_FAILED`, exits 1 and removes the override, so nothing
   re-arms from it. A worker armed by this timer (`STAGE_C_ARMED_TASK` set) still refuses any write without its task's
