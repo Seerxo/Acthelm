@@ -1372,3 +1372,30 @@ def test_c(w):
     assert w.sync(now=t0 + timedelta(hours=1))["requests"][0]["outcome"] == "ACKNOWLEDGED"
     assert w.prod_task().status == enums.TaskStatus.CANCELLED and _open_sc(w) == []
     assert w.sync(now=t0 + timedelta(hours=2))["requests"] == []
+
+
+def test_lease(w):
+    """Founder conditions on Stage C: the confirmation lease runs from production's sent_at, capped at Stage C's clock.
+    A future-dated, replayed (older) or delayed (re)activation never extends it past sent_at + ACTIVATION_LEASE, a
+    missing or invalid sent_at grants none (the import activates unconfirmed: no grant), and an acknowledged cancel
+    refuses every later activation."""
+    t0, lease = datetime.now(timezone.utc), h.ACTIVATION_LEASE
+    p = _packet(t0)
+    with Session(w.sc) as s:
+        assert h.import_packet(s, p["id"], p)[0] == 201
+
+        def act(at, sent_at):
+            h.activate_import(s, p["id"], p["payload_sha256"], now=at, sent_at=sent_at)
+            value = h._row(s, p["id"]).value
+            return h._utc(value.get("confirmed_until")), value
+        for bad in (None, "not-a-time"):
+            until, value = act(t0, bad)
+            assert until is None and value["state"] == "ACTIVATED" and not h.confirmed(value, t0)
+        assert act(t0, t0 + timedelta(days=1))[0] == t0 + lease                                   # future: capped
+        assert act(t0 + timedelta(minutes=2), t0 - timedelta(hours=1))[0] == t0 + lease          # replayed: no gain
+        until, value = act(t0 + timedelta(minutes=20), t0 + timedelta(minutes=1))                # delayed
+        assert until == t0 + timedelta(minutes=1) + lease and not h.confirmed(value, t0 + timedelta(minutes=20))
+        h.cancel_import(s, p["id"], p["payload_sha256"])
+        with pytest.raises(h.HandoffError) as e:
+            act(t0 + timedelta(minutes=21), t0 + timedelta(minutes=21))
+        assert e.value.code == "CANCELLED"
