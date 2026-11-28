@@ -21,6 +21,10 @@ const level = (v: string): NeedLevel => (v === "critical" || v === "info" ? v : 
 // Ranks for items the Desk adds, placed among desk.py _RANK (APPROVAL 4, BLOCKED_P0 5, PROVIDER 7, OTHER 8).
 const R = { readyToMerge: 4.1, awaitingApproval: 4.2, mergedAccept: 4.3, stopped: 5.5, review: 6, stageC: 7.5 }
 const CLOSED = ["DONE", "CANCELLED"]
+/** Merging is the founder's only while the backend still holds the task open: a BLOCKED or FAILED task can keep its
+ *  READY_TO_MERGE stage (e.g. its PR head moved, or a refreshed head lacks context review) and must show as stopped. */
+const mergeable = (t: { stage: string | null; status: string }) =>
+  t.stage === "READY_TO_MERGE" && !CLOSED.includes(t.status) && t.status !== "BLOCKED" && t.status !== "FAILED"
 
 /** Everything that waits on the founder, most urgent first: critical before warning before info, then the API's own
  *  rank, then oldest first. One item per task: the API's row wins, then the more specific Stage C reason. */
@@ -39,7 +43,10 @@ export function stageCOnHost(sc: StageCState | null): StageCState | null {
   return sc && stageCEvidence(sc) ? sc : null
 }
 
-export function needsYou(d: Pick<DeskState, "needs_you" | "tasks" | "improvements">, sc: StageCState | null): NeedsView {
+/** `scFresh`: whether the LAST /stage-c/state read succeeded. After a failed read the hook keeps the previous state
+ *  (shown stale elsewhere), but no decision may come from it: no "ready to merge", no readiness item; Stage C's
+ *  tasks and readiness are reported unknown instead. */
+export function needsYou(d: Pick<DeskState, "needs_you" | "tasks" | "improvements">, sc: StageCState | null, scFresh = true): NeedsView {
   const items: NeedItem[] = []
   const unknown: string[] = []
   const seen = new Set<string>()
@@ -56,10 +63,10 @@ export function needsYou(d: Pick<DeskState, "needs_you" | "tasks" | "improvement
   else unknown.push("attention queue")
 
   // sc null: Stage C is not proven on this host (stageCOnHost), so it adds nothing and is not "unknown" either.
-  if (sc && !sc.tasks) unknown.push("Stage C tasks")
+  if (sc && (!scFresh || !sc.tasks)) unknown.push("Stage C tasks")
   else if (sc?.tasks) for (const t of sc.tasks) {
     if (!t.key || CLOSED.includes(t.status)) continue
-    if (t.stage === "READY_TO_MERGE") {
+    if (mergeable(t)) {
       const href = prHref(t.pr?.number)
       add({ id: `sc:merge:${t.key}`, level: "warning", rank: R.readyToMerge, since: t.updated_at,
         title: href ? `PR #${t.pr!.number} is ready to merge` : `${t.key} is ready to merge`,
@@ -82,7 +89,8 @@ export function needsYou(d: Pick<DeskState, "needs_you" | "tasks" | "improvement
       detail: `${t.key} · finished by the agent; review and accept`, target: { page: "tasks", key: t.key } }, t.key)
   }
 
-  if (sc) {
+  if (sc && !scFresh) unknown.push("Stage C readiness")
+  else if (sc) {
     // task_needs_founder is the task rows above; listing it again would count one decision twice.
     const blockers = sc.blockers?.filter(b => b !== "task_needs_founder") ?? null
     const failed = sc.runtime.preflight.failed ?? []
@@ -143,7 +151,7 @@ export function autonomy(d: Pick<DeskState, "control" | "worker">, sc: StageCSta
   return {
     counts: tasks && {
       inProgress: tasks.filter(t => t.status === "IN_PROGRESS").length,
-      readyToMerge: tasks.filter(t => t.stage === "READY_TO_MERGE" && !CLOSED.includes(t.status)).length,
+      readyToMerge: tasks.filter(mergeable).length,
       merged: tasks.filter(t => t.stage === "MERGED").length,
       blocked: tasks.filter(t => t.status === "BLOCKED" || t.status === "FAILED").length,
     },

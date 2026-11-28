@@ -575,7 +575,7 @@ def test_saved_approval_is_bound_to_the_original_base_and_checks(saved_review, f
                                     "legacy_approval", "diff", "malformed_history", "pause", "cancel", "metered",
                                     "authorization_missing", "authorization_consumed", "authorization_expired",
                                     "authorization_sha", "write_disabled"])
-def test_saved_review_rechecked(saved_review, monkeypatch, change):
+def test_review_rechecked(saved_review, monkeypatch, change):
     db, task, ps, coded = saved_review
     imp = task.context["improvement"]
     approval = dict(imp["approval"])

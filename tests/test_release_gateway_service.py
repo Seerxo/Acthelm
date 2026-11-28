@@ -6,7 +6,6 @@ import hashlib
 import os
 import shutil
 import subprocess
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -30,23 +29,24 @@ def bound(sha: str) -> dict:
     return {c: "sha256:" + hashlib.sha256(f"{sha}:{c}".encode()).hexdigest() for c in rg.BOUND}
 
 
-# The founder's offline desk build, in miniature: it sees only desk/ (and an empty app/static) and writes the bundle.
-DESK_BUILD = """import pathlib, sys
-root = pathlib.Path(sys.argv[1])
-assert not any((root / "app/static").iterdir()) and sorted(p.name for p in root.iterdir()) == ["app", "desk"]
-src = (root / "desk/src.txt").read_text()
-if src.startswith("broken"):
-    sys.exit(1)
-if src.startswith("link"):
-    (root / "app/static/desk.html").symlink_to("/etc/hostname")
-    sys.exit(0)
-(root / "app/static/desk.html").write_text("bundle:" + src)
-"""
-
-
 def keypair(d: Path, name: str):
     subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(d / name)], check=True)
     return d / name, (d / f"{name}.pub").read_text().strip()
+
+
+def seed_required_paths(root: Path) -> None:
+    """A placeholder for every required release path the fixture does not create itself: release_archive and
+    payload_listing refuse a commit without one (as the deploy driver does), and every real release has them all."""
+    for rel in rg.REQUIRED_DEPLOY_PATHS:
+        target = root / rel
+        if target.exists():
+            continue
+        if "." in target.name or target.name == "Dockerfile":
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("\n")
+        else:
+            target.mkdir(parents=True)
+            (target / ".keep").write_text("")
 
 
 class World:
@@ -61,11 +61,7 @@ class World:
         (self.work / "app").mkdir()
         (self.work / "docs/HANDOFF.md").write_text("old\n")
         (self.work / "app/main.py").write_text("x = 1\n")
-        (self.work / "app/static").mkdir()
-        (self.work / "desk").mkdir()
-        (self.work / "desk/src.txt").write_text("v1\n")
-        (self.work / "app/static/desk.html").write_text("bundle:v1\n")
-        (tmp / "desk_build.py").write_text(DESK_BUILD)
+        seed_required_paths(self.work)
         self.builds = tmp / "builds"
         self.builds.mkdir()
         self.base = self.commit("base")
@@ -94,8 +90,7 @@ class World:
             "ledger": str(tmp / "ledger.json"), "state": str(tmp / "state.json"), "outbox": str(tmp / "outbox"),
             "founder_queue": str(tmp / "queue"), "review_signer_socket": str(tmp / "signer.sock"),
             "builds": str(self.builds),
-            "checks_command": ["true"], "identity_report": str(tmp / "identity.json"),
-            "desk_build_command": [sys.executable, str(tmp / "desk_build.py")]})
+            "checks_command": ["true"], "identity_report": str(tmp / "identity.json")})
         self.check_calls, self.review_calls = [], []
         self.checks_pass, self.verdict, self.review_key, self.review_error = True, "APPROVE", "reviewer", None
 
@@ -159,12 +154,10 @@ class World:
         policy = rg.load_policy(self.cfg.policy.read_bytes(), self.cfg.policy_sig.read_text(), self.keys["founder"][1])
         digest = self.inputs_of(m["sha"])
         record, _ = svc.read_build_record(self.builds, digest)
-        generated = rg.generated_facts(self.work, ledger["last_sha"], m["sha"])
-        facts = {"repository": "seerxo/os", "branch": "main", "sha": m["sha"], "generated": generated,
+        facts = {"repository": "seerxo/os", "branch": "main", "sha": m["sha"],
                  "payload_digest": rg.payload_digest(rg.payload_listing(self.work, m["sha"])),
                  "changed_paths": rg.git_changed_paths(self.work, ledger["last_sha"], m["sha"]),
-                 "ancestor_of_parent": True,
-                 "diff": rg.review_diff(self.work, ledger["last_sha"], m["sha"], ledger, generated),
+                 "ancestor_of_parent": True, "diff": rg.git_release_diff(self.work, ledger["last_sha"], m["sha"]),
                  "inputs_digest": digest, "build_record": record, "driver_bound": True, "driver_sha256": DRIVER,
                  "images_present": True, "anchored_images": True}
         return rg.verify_release(raw, sig, policy=policy, founder_key=self.keys["founder"][1], host_facts=facts,
@@ -270,10 +263,10 @@ def test_the_payload_listing_is_the_one_the_deploy_script_ships(w):
     line = next(l for l in deploy.splitlines() if l.startswith("PATHS="))
     assert tuple(line.split("=", 1)[1].strip('"').split()) == rg.DEPLOY_PATHS
     sha = w.commit("app", **{"app/main.py": "x = 3\n", "scripts/s.sh": "echo\n"})
-    shell = subprocess.run(["bash", "-c", "git ls-tree -r \"$1\" --format='%(objectname) %(path)' -- app scripts "
-                            "| while read -r obj p; do printf '%s  %s\\n' \"$(git cat-file -p \"$obj\" | shasum -a 256 "
-                            "| cut -c1-64)\" \"$p\"; done", "_", sha], cwd=w.work, capture_output=True, text=True,
-                           check=True).stdout
+    # The driver's own manifest loop, verbatim, over its own PATHS.
+    loop = deploy[deploy.index("git -c core.quotePath=false ls-tree -r -z"):deploy.index('> "$TMP/main.sha256"')]
+    shell = subprocess.run(["bash", "-c", f'set -euo pipefail; SHA="$1"; PATHS="{" ".join(rg.DEPLOY_PATHS)}"\n{loop}',
+                            "_", sha], cwd=w.work, capture_output=True, text=True, check=True).stdout
     assert rg.payload_digest(shell) == rg.payload_digest(rg.payload_listing(w.work, sha))
 
 

@@ -90,8 +90,10 @@ export function Overview() {
   const now = useNow("minute")
   const read = useStageC()
   const sc = stageCOnHost(read.state)   // null on hosts without Stage C (production): its parts are hidden, not broken
+  // The hook keeps the last state after a failed read; decisions and merge links use it only when the last read succeeded.
+  const scFresh = read.error === null
   // One list for the header, the "Decisions for you" vital and the panel below, so their counts always agree.
-  const needs = needsYou(d, sc)
+  const needs = needsYou(d, sc, scFresh)
   const n = needs.items.length
   const op = operating(d, { stale, now, decisions: needs.items })
 
@@ -103,7 +105,7 @@ export function Overview() {
   const critical = needs.items.some(i => i.level === "critical")
 
   // What has content is drawn; the rest is one quiet line.
-  const pr = sc ? autonomy(d, sc).lastPr : null
+  const pr = sc && scFresh ? autonomy(d, sc).lastPr : null
   const runs = runCount(d.run_series)
   const hasFinished = recentlyFinished(d.tasks).length > 0 || (runs !== null && runs > 0) || !!pr
   const version = runningVersion(d)
@@ -137,11 +139,11 @@ export function Overview() {
         <div className="contents xl:grid xl:min-w-0 xl:content-start xl:gap-6">
           <Slot order="order-1"><NowCard /></Slot>
           {hasNext && <Slot order="order-4"><NextCard sc={sc} /></Slot>}
-          {hasFinished && <Slot order="order-5"><FinishedCard sc={sc} /></Slot>}
+          {hasFinished && <Slot order="order-5"><FinishedCard sc={sc} fresh={scFresh} /></Slot>}
           {sc && <Slot order="order-6"><AutonomyCard sc={sc} read={read} /></Slot>}
         </div>
         <div className="contents xl:grid xl:min-w-0 xl:content-start xl:gap-6">
-          <Slot order="order-2"><div id="needs-you" className="scroll-mt-4"><NeedsCard sc={sc} /></div></Slot>
+          <Slot order="order-2"><div id="needs-you" className="scroll-mt-4"><NeedsCard sc={sc} fresh={scFresh} /></div></Slot>
           <Slot order="order-3"><AlertsCard /></Slot>
           {hasGoals && <Slot order="order-7"><GoalsCard /></Slot>}
           {hasCost && <Slot order="order-8"><BudgetCard sc={sc} /></Slot>}

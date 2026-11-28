@@ -446,7 +446,7 @@ def _digest(info):
 
 
 @pytest.mark.parametrize("name", sorted(MORE_POWER))
-def test_container_power_identity(name):
+def test_power_id(name):
     import copy
     changed = copy.deepcopy(BASE_INFO)
     MORE_POWER[name](changed)
