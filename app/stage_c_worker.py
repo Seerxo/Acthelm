@@ -368,7 +368,7 @@ def execute(db, task, spec, usable):
                     sleep=wait, before_enqueue=before_coder_enqueue, after_start=after_coder_start)
                 out = stage_c_runner.run(db, task, job, coder_call,
                                         stage_c_runner.launcher_checks("sez-company", sleep=wait), jobs_root(),
-                                        ttl=timedelta(hours=1), before_write=before_task_write)
+                                        ttl=timedelta(hours=1), before_write=before_task_write, run_id=run.id)
                 if out["outcome"] == "OWNER_CHANGED":
                     raise PublishedPRRefused(out["detail"])
             if (out["outcome"] == "READY_FOR_REVIEW" and reviewer is None
@@ -428,7 +428,8 @@ def execute(db, task, spec, usable):
                                 stage_c_runner.gh_pr_opener(REPOSITORY, "main", head_repository),
                                 before_publish=before_publish,
                                 find_pr=stage_c_runner.gh_pr_lookup(REPOSITORY, "main", head_repository),
-                                pr_absent=stage_c_runner.gh_pr_absent(REPOSITORY, "main", head_repository))
+                                pr_absent=stage_c_runner.gh_pr_absent(REPOSITORY, "main", head_repository),
+                                run_id=run.id)
     except PublishedPRRefused as refused:
         out = {"outcome": "PUBLISHED_PR_REFUSED", "reason": refused.reason}
     except Exception as error:
@@ -949,6 +950,7 @@ def reconcile(db):
             if consumed:
                 request = None
         mode = os.environ.get("STAGE_C_REFRESH_RECONCILE", "dry-run")
+        evidence_failed = False
         if request:
             requested_at = (request.occurred_at.replace(tzinfo=timezone.utc)
                             if request.occurred_at.tzinfo is None else request.occurred_at)
@@ -996,6 +998,9 @@ def reconcile(db):
                                  after={"request_audit_id": request.id, "code": code})
                 db.commit()
                 outcomes.append({"task": task.key, **out})
+                # reconcile_refreshed RETURNS EVIDENCE_UNAVAILABLE (no refusal recorded) when the fingerprint cannot
+                # be rendered: the same pending request as a raised failure, so the same merge recovery follows.
+                evidence_failed = mode == "apply" and "EVIDENCE_UNAVAILABLE" in out.get("reasons", [])
             except stage_c_runner.RefreshRefused as exc:
                 if mode == "apply":
                     audit.record(db, actor="stage-c-ci", action="improvement.refresh_reconcile_refused",
@@ -1015,8 +1020,18 @@ def reconcile(db):
                                  after={"request_audit_id": request.id, "code": "EVIDENCE_UNAVAILABLE"})
                     db.commit()
                 outcomes.append({"task": task.key, "outcome": "BLOCKED", "reasons": ["EVIDENCE_UNAVAILABLE"]})
-            if mode in ("apply", "dry-run"):
+                # Missing evidence is not a refusal: the request stays pending for a later tick (bounded by its 24h
+                # life), but it must not suppress this tick's normal merge recovery.
+                evidence_failed = mode == "apply"
+            if mode in ("apply", "dry-run") and not evidence_failed:
                 continue
+            # The commit or rollback above released the row lock: take it again, or leave the task to the next tick.
+            task = db.scalar(select(models.Task).where(models.Task.id == task_id,
+                             models.Task.status.in_((enums.TaskStatus.REVIEW, enums.TaskStatus.BLOCKED)))
+                             .with_for_update(skip_locked=True).execution_options(populate_existing=True))
+            if task is None:
+                continue
+            stage = ((task.context or {}).get("improvement") or {}).get("stage")
         if (task.status == enums.TaskStatus.BLOCKED
                 and stage_c_ci.merge_recovery_block(db, task) is None):
             db.commit()
