@@ -66,6 +66,7 @@ ACCESS_ID_ENV, ACCESS_SECRET_ENV = "STAGE_C_HANDOFF_ACCESS_CLIENT_ID", "STAGE_C_
 MAC_HEADER = "x-acthelm-handoff-mac"
 _MAC_LABEL = b"acthelm-b5-response-mac-v1"
 KEY_PREFIX = "handoff:"
+ORIGIN_PREFIX = "handoff-origin:"   # + production task key: serializes its imports (_origin)
 API_PREFIX = "/stage-c/handoff-api/"
 MAX_TTL = timedelta(hours=24)
 MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES = 32 * 1024, 64 * 1024
@@ -75,6 +76,13 @@ REQUESTS_PER_TICK = 3
 MAX_DELIVERY_FAILURES = 5
 POLL_EVERY = timedelta(seconds=60)
 STALE_AFTER = timedelta(seconds=180)
+# An activated import may be authorized or claimed only while production's confirmation is live on Stage C: the
+# activation, then a renewal with every status poll (POLL_EVERY, about one worker tick), each valid for
+# ACTIVATION_LEASE from the production time it was decided at (capped at Stage C's clock), never shortened. Production
+# never decides a confirmation after it committed a cancel, so an unacknowledged cancel stops new grants and claims
+# within ACTIVATION_LEASE (plus clock skew between the hosts), even if Stage C never hears from production again.
+# Fail closed: without a live confirmation there is no grant and no claim.
+ACTIVATION_LEASE = timedelta(minutes=5)
 MAX_BACKOFF = timedelta(minutes=15)
 RELEASABLE = (enums.TaskStatus.BACKLOG, enums.TaskStatus.READY, enums.TaskStatus.BLOCKED)
 # A delivery refused for these reasons can never succeed with its packet: the founder's release ran out or the task
@@ -345,6 +353,8 @@ def release(db: Session, task: models.Task, *, founder: str, now: datetime | Non
     now = now or datetime.now(timezone.utc)
     db.refresh(task, with_for_update=True)
     remote = _remote(task)
+    if remote is not None and remote.get("cancel_requested_at"):
+        raise HandoffError(409, "CANCELLED")
     renew = (remote is not None and not remote.get("cancel_requested_at")
              and task.status == enums.TaskStatus.WAITING_EXTERNAL
              and ((remote.get("delivery") == "REFUSED" and remote.get("last_error_code") in RENEWABLE
@@ -457,15 +467,54 @@ def delivery_denial(db: Session, task: models.Task, now: datetime) -> str | None
     return None
 
 
-def request_cancel(db: Session, task: models.Task, *, actor: str, now: datetime | None = None) -> None:
-    """Called inside the founder's CANCELLED status change (caller commits): remote withdrawal becomes durable."""
+def withdraw(db: Session, task: models.Task, transport: "Transport | None" = None) -> list[str]:
+    """Called by the founder's CANCELLED status change after its founder check and BEFORE it locks and commits: Stage C
+    withdraws the import (the superseded live one first, then the current one) before production records the cancel,
+    so a cancel production has committed never leaves a grant consumable on Stage C, even with an activation already
+    in flight (Stage C serializes cancel against activation on the handoff row and against a claim on the task -> grant
+    locks; a cancelled import is never activated, authorized or claimed). Ends the read transaction first: no
+    transaction is held across the request. Returns the ids Stage C acknowledged, in order; request_cancel records
+    only those that still match the record under the lock. Unreachable: nothing is acknowledged, the task stays
+    WAITING_EXTERNAL (cancel PENDING) and the worker's sync retries the cancel (the remaining window: see _activate)."""
     remote = _remote(task)
-    if remote is None or remote.get("cancel_requested_at"):
+    if remote is None or remote.get("cancellation") == "ACKNOWLEDGED" or not sender_enabled():
+        return []
+    targets = _cancel_targets(remote)
+    db.commit()
+    acked = []
+    for hid, sha in targets:
+        if _send_cancel(hid, sha, transport or http_transport)[0] is None:
+            break
+        acked.append(hid)
+    return acked
+
+
+def cancel_unconfirmed(task: models.Task) -> bool:
+    """A cancel production requested that Stage C has not acknowledged yet: the task is never shown CANCELLED. It stays
+    WAITING_EXTERNAL with its handoff cancellation PENDING (desk_view) while sync retries the cancel, idempotently and
+    with back-off, until Stage C acknowledges it; only then is the task closed (_close_cancelled)."""
+    remote = _remote(task)
+    return bool(remote and remote.get("cancel_requested_at") and remote.get("cancellation") != "ACKNOWLEDGED")
+
+
+def request_cancel(db: Session, task: models.Task, *, actor: str, now: datetime | None = None,
+                   withdrawn=()) -> None:
+    """Called inside the founder's CANCELLED status change (caller commits): remote withdrawal becomes durable, and
+    what `withdraw` already confirmed on Stage C is recorded as acknowledged (matched by id, in cancel order). The
+    caller closes the task only if nothing is left unconfirmed (cancel_unconfirmed)."""
+    remote = _remote(task)
+    if remote is None:
         return
     now = now or datetime.now(timezone.utc)
-    _set_remote(task, cancel_requested_at=now.isoformat(), next_attempt_at=None)
-    audit.record(db, actor=actor, action="handoff.cancel_requested", entity_type="task", entity_key=task.key,
-                 task_id=task.id, after={"id": remote.get("id"), "payload_sha256": remote.get("payload_sha256")})
+    if not remote.get("cancel_requested_at"):
+        _set_remote(task, cancel_requested_at=now.isoformat(), next_attempt_at=None)
+        audit.record(db, actor=actor, action="handoff.cancel_requested", entity_type="task", entity_key=task.key,
+                     task_id=task.id, after={"id": remote.get("id"), "payload_sha256": remote.get("payload_sha256")})
+    remote = _remote(task)
+    for hid, _ in _cancel_targets(remote) if remote.get("cancellation") != "ACKNOWLEDGED" else []:
+        if hid not in withdrawn:
+            break
+        _acknowledged(db, task, hid, actor, now)
 
 
 def status_refusal(task: models.Task, status: enums.TaskStatus, now: datetime | None = None) -> str | None:
@@ -474,6 +523,8 @@ def status_refusal(task: models.Task, status: enums.TaskStatus, now: datetime | 
     remote = _remote(task)
     if remote is None:
         return None
+    if remote.get("cancel_requested_at") and status != enums.TaskStatus.CANCELLED:
+        return "the cancellation of this handoff is pending until Stage C acknowledges it"
     if status not in (enums.TaskStatus.CANCELLED, enums.TaskStatus.DONE, enums.TaskStatus.WAITING_EXTERNAL):
         # Leaving WAITING_EXTERNAL any other way would stop sync while Stage C may still be running it: only
         # cancellation (which withdraws it remotely) or an evidenced DONE closes a handed-off task.
@@ -558,7 +609,11 @@ def _backoff(failures: int) -> timedelta:
 def sync(db: Session, transport: Transport | None = None, *, paused: bool = False,
          now: datetime | None = None) -> dict:
     """Deterministic, model-free, bounded: cancellations first, then (unless agents are paused) new deliveries, then
-    status polls; at most REQUESTS_PER_TICK requests. No DB lock or transaction is held across a network call."""
+    status polls; at most REQUESTS_PER_TICK work items. A poll is two requests (the confirmation renewal, then the
+    GET), and an activation that finds a cancel committed while it was on the wire also sends that cancel (at most two
+    more). Confirmation leases ride on polls: with more delivered handoffs than the per-tick budget renews within
+    ACTIVATION_LEASE, or polls backing off after failures, leases lapse and Stage C refuses grants (fail closed) until
+    the next renewal. No DB lock or transaction is held across a network call."""
     if not sender_enabled():
         return {"handoff": "disabled"}
     transport = transport or http_transport
@@ -602,9 +657,11 @@ def _fail(db, task, remote, code: str, *, hard: bool, now: datetime, delivery: b
     state = remote.get("delivery")
     if delivery:
         state = "REFUSED" if hard else ("SUSPENDED" if attempts >= MAX_DELIVERY_FAILURES else retry)
+    # A cancel requested meanwhile owns the record now: it goes out next tick, never behind the delivery back-off.
+    retry_at = None if delivery and remote.get("cancel_requested_at") else \
+        (now + _backoff(attempts if delivery else polls)).isoformat()
     _set_remote(task, delivery=state, attempts=attempts, poll_failures=polls, last_error_code=code,
-                last_attempt_at=now.isoformat(),
-                next_attempt_at=(now + _backoff(attempts if delivery else polls)).isoformat())
+                last_attempt_at=now.isoformat(), next_attempt_at=retry_at)
     if delivery:
         audit.record(db, actor="company-worker", action="handoff.delivery_failed", entity_type="task",
                      entity_key=task.key, task_id=task.id,
@@ -635,7 +692,9 @@ def _deliver(db: Session, task_id: int, transport: Transport, now: datetime) -> 
     if remote is None or remote.get("id") != hid:
         db.commit()
         return {"task_id": task_id, "kind": "deliver", "outcome": "SKIPPED"}
-    if status == 409 and isinstance(remote.get("superseded"), dict) \
+    # A cancel that committed while the PUT was on the wire wins: the record (with its superseded live import) stays
+    # as it is, the refusal is recorded and _cancel withdraws the old id, then the new one.
+    if status == 409 and isinstance(remote.get("superseded"), dict) and not remote.get("cancel_requested_at") \
             and (_verified("PUT", path, status, body, sig) or {}).get("error") == "ACTIVE_IMPORT":
         return _restore_superseded(db, task, remote, now)
     if status not in (200, 201):
@@ -681,10 +740,20 @@ def _activate(db: Session, task_id: int, transport: Transport, now: datetime) ->
     """Phase 2: re-verify the founder release under the task row lock, then send the activation WITHOUT the lock (a
     slow Stage C reply never blocks the founder's cancel). The founder's cancellation (POST /tasks/{key}/status) takes
     the same lock, so production never sends an activation after it observed a committed cancel. A cancel that commits
-    while the request is on the wire is never overwritten: the result is recorded only if the record is unchanged and
-    not cancel-requested, and the cancel (sent first next tick) withdraws the import on Stage C, where activation and
-    cancellation serialize on the handoff row and a cancelled or expired import can never be activated. The record's
-    next_attempt_at is a lease over the request, so a concurrent tick does not send it twice."""
+    after the lock is released is withdrawn on Stage C by the cancel route itself before it commits (withdraw), so the
+    activation, whether still to be sent or already in flight, finds the import cancelled: activation and cancellation
+    serialize on Stage C's handoff row, and a cancelled or expired import is never activated, authorized or claimed.
+    Guarantee and its limit: once production has committed a cancel that Stage C acknowledged, no grant for the import
+    can be issued or consumed, and the task closes (CANCELLED) only then. If Stage C did not acknowledge it, the task
+    stays WAITING_EXTERNAL with its cancellation PENDING and sync retries it until it does; meanwhile an activation or
+    renewal decided before the cancel committed can still reach Stage C, so a grant can be issued and consumed until
+    the confirmation lease it carries ends: at most ACTIVATION_LEASE after the cancel committed (production never
+    decides a confirmation after that; plus clock skew between the hosts). Production re-checks under the lock as soon
+    as this reply returns and sends the cancel in the same tick (cancel_import revokes the bound grant; a run already
+    started stops at its next owner check). Closing the lease window entirely would need the row lock across the
+    request (removed on purpose: R4a finding 3) or Stage C calling production, which it never does.
+    The result is recorded only if the record is unchanged and not cancel-requested. The record's next_attempt_at is a
+    lease over the request, so a concurrent tick does not send it twice."""
     task = _locked(db, task_id)
     remote = _remote(task) if task is not None else None
     if remote is None or remote.get("delivery") != "IMPORTED" or not _due(remote, now):
@@ -697,15 +766,24 @@ def _activate(db: Session, task_id: int, transport: Transport, now: datetime) ->
     _set_remote(task, next_attempt_at=(now + timedelta(seconds=DEADLINE_S + 30)).isoformat())
     db.commit()   # release the row lock before the network call
     path = f"{API_PREFIX}{hid}/activate"
-    status, body, sig = transport("POST", path, canonical({"payload_sha256": sha}))
+    # `now` is no later than the lock check above that saw no cancel: the confirmation's lease starts there.
+    status, body, sig = transport("POST", path, canonical({"payload_sha256": sha, "sent_at": now.isoformat()}))
     task = _locked(db, task_id)
     remote = _remote(task) if task is not None else None
     if remote is None or remote.get("id") != hid or remote.get("delivery") != "IMPORTED":
         db.commit()
         return {"task_id": task_id, "kind": "activate", "outcome": "SKIPPED"}
     if remote.get("cancel_requested_at"):
-        db.commit()   # the cancel path owns it now (cancels sort first); nothing about this activation is recorded
-        return {"task": task.key, "kind": "activate", "outcome": "CANCEL_PENDING"}
+        # Nothing about this activation is recorded. Stage C may have just activated the import (the route could not
+        # reach it): the cancel goes out now, in this tick, not after the other work (superseded import first).
+        pending = remote.get("cancellation") != "ACKNOWLEDGED"
+        out = {"task": task.key, "kind": "activate", "outcome": "CANCEL_PENDING"}
+        db.commit()
+        for _ in range(2 if pending else 0):
+            out["cancel"] = _cancel(db, task_id, transport, now)["outcome"]
+            if out["cancel"] != "ACKNOWLEDGED_SUPERSEDED":
+                break
+        return out
     if status != 200:
         return _fail(db, task, remote, _transport_code(status), hard=status in HARD_STOP, now=now, delivery=True,
                      retry="IMPORTED")
@@ -731,7 +809,15 @@ def _poll(db: Session, task_id: int, transport: Transport, now: datetime) -> dic
     if remote is None:
         return {"task_id": task_id, "kind": "poll", "outcome": "SKIPPED"}
     hid = remote["id"]
+    confirm = not remote.get("cancel_requested_at") and task.status == enums.TaskStatus.WAITING_EXTERNAL \
+        and remote.get("delivery") == "DELIVERED"
     db.commit()
+    if confirm:
+        # Renew the activation's lease (ACTIVATION_LEASE). `now` is no later than the read above that saw no cancel,
+        # so no renewal ever starts after a committed cancel. The reply is not needed: the snapshot reports the state,
+        # and a failed renewal only lets the lease run out (fail closed).
+        transport("POST", f"{API_PREFIX}{hid}/activate",
+                  canonical({"payload_sha256": remote["payload_sha256"], "sent_at": now.isoformat()}))
     path = API_PREFIX + hid
     status, body, sig = transport("GET", path, None)
     task = _locked(db, task_id)
@@ -867,43 +953,77 @@ def _cancel(db: Session, task_id: int, transport: Transport, now: datetime) -> d
     remote = _remote(task) if task is not None else None
     if remote is None:
         return {"task_id": task_id, "kind": "cancel", "outcome": "SKIPPED"}
-    # A renewal keeps aside the record that reached Stage C (release); that import may be live there (its activation
-    # reply was lost). It is withdrawn first, by its own id, and the task's cancellation is ACKNOWLEDGED only after
-    # both: cancelling only the new id would leave the old task and its grant active on Stage C.
+    hid, sha = _cancel_targets(remote)[0]
+    db.commit()
+    ack, code = _send_cancel(hid, sha, transport)
+    task = _locked(db, task_id)
+    remote = _remote(task)
+    if ack is None:
+        failures = int(remote.get("cancel_failures") or 0) + 1
+        _set_remote(task, last_error_code=code, last_attempt_at=now.isoformat(), cancel_failures=failures,
+                    next_attempt_at=(now + _backoff(failures)).isoformat())
+        db.commit()
+        return {"task": task.key, "kind": "cancel", "outcome": code}   # "remote stop unconfirmed" until acknowledged
+    outcome = _acknowledged(db, task, hid, "company-worker", now, ack.task_key) or "SKIPPED"
+    if outcome == "ACKNOWLEDGED":
+        _close_cancelled(db, task, now)
+    db.commit()
+    return {"task": task.key, "kind": "cancel", "outcome": outcome}
+
+
+def _close_cancelled(db: Session, task: models.Task, now: datetime) -> None:
+    """Stage C acknowledged the founder's cancel: only now does the production task become CANCELLED."""
+    if task.status == enums.TaskStatus.CANCELLED:
+        return
+    before = task.status.value
+    task.status, task.completed_at = enums.TaskStatus.CANCELLED, now
+    audit.record(db, actor="company-worker", action="task.status", entity_type="task", entity_key=task.key,
+                 task_id=task.id, reason="HANDOFF_CANCEL_ACKNOWLEDGED", before={"status": before},
+                 after={"status": "CANCELLED"})
+
+
+def _cancel_targets(remote: dict) -> list[tuple[str, str]]:
+    """What a cancellation withdraws, in order. A renewal keeps aside the record that reached Stage C (release); that
+    import may be live there (its activation reply was lost). It is withdrawn first, by its own id, and the task's
+    cancellation is ACKNOWLEDGED only after both: cancelling only the new id would leave the old task and its grant
+    active on Stage C."""
     old = remote.get("superseded")
     old = old if isinstance(old, dict) and old.get("remote_task_key") and old.get("cancellation") != "ACKNOWLEDGED" \
         else None
-    hid, sha = (old["id"], old["payload_sha256"]) if old else (remote["id"], remote["payload_sha256"])
-    db.commit()
+    return ([(old["id"], old["payload_sha256"])] if old else []) + [(remote["id"], remote["payload_sha256"])]
+
+
+def _send_cancel(hid: str, sha: str, transport: Transport) -> tuple[CancelAck | None, str | None]:
+    """One authenticated cancel request: Stage C's verified acknowledgement for exactly `hid`, or the failure code."""
     path = f"{API_PREFIX}{hid}/cancel"
     status, body, sig = transport("POST", path, canonical({"payload_sha256": sha, "reason": "PRODUCTION_CANCELLED"}))
-    task = _locked(db, task_id)
-    remote = _remote(task)
     data = _verified("POST", path, status, body, sig) if status == 200 else None
     try:
         ack = CancelAck.model_validate(data) if data is not None else None
     except ValidationError:
         ack = None
     if ack is None or ack.id != hid:
-        code = _transport_code(status) if status != 200 else ("BAD_RESPONSE" if data is not None else "BAD_MAC")
-        failures = int(remote.get("cancel_failures") or 0) + 1
-        _set_remote(task, last_error_code=code, last_attempt_at=now.isoformat(), cancel_failures=failures,
-                    next_attempt_at=(now + _backoff(failures)).isoformat())
-        db.commit()
-        return {"task": task.key, "kind": "cancel", "outcome": code}   # "remote stop unconfirmed" until acknowledged
-    if old:
-        _set_remote(task, superseded={**remote["superseded"], "cancellation": "ACKNOWLEDGED"}, last_error_code=None,
+        return None, _transport_code(status) if status != 200 else ("BAD_RESPONSE" if data is not None else "BAD_MAC")
+    return ack, None
+
+
+def _acknowledged(db, task, hid: str, actor: str, now: datetime, remote_task_key: str | None = None) -> str | None:
+    """Record Stage C's acknowledged cancel of `hid` on whichever record it names (caller holds the lock, commits);
+    None if the record no longer names it."""
+    remote = _remote(task)
+    sup = remote.get("superseded")
+    if isinstance(sup, dict) and sup.get("id") == hid and hid != remote.get("id"):
+        _set_remote(task, superseded={**sup, "cancellation": "ACKNOWLEDGED"}, last_error_code=None,
                     last_attempt_at=now.isoformat(), next_attempt_at=None)
-        audit.record(db, actor="company-worker", action="handoff.cancel_acknowledged", entity_type="task",
-                     entity_key=task.key, task_id=task.id,
-                     after={"id": hid, "remote_task_key": ack.task_key, "superseded": True})
-        db.commit()
-        return {"task": task.key, "kind": "cancel", "outcome": "ACKNOWLEDGED_SUPERSEDED"}
+        audit.record(db, actor=actor, action="handoff.cancel_acknowledged", entity_type="task", entity_key=task.key,
+                     task_id=task.id, after={"id": hid, "remote_task_key": remote_task_key, "superseded": True})
+        return "ACKNOWLEDGED_SUPERSEDED"
+    if hid != remote.get("id"):
+        return None
     _set_remote(task, cancellation="ACKNOWLEDGED", last_error_code=None, last_attempt_at=now.isoformat())
-    audit.record(db, actor="company-worker", action="handoff.cancel_acknowledged", entity_type="task",
-                 entity_key=task.key, task_id=task.id, after={"id": hid, "remote_task_key": ack.task_key})
-    db.commit()
-    return {"task": task.key, "kind": "cancel", "outcome": "ACKNOWLEDGED"}
+    audit.record(db, actor=actor, action="handoff.cancel_acknowledged", entity_type="task", entity_key=task.key,
+                 task_id=task.id, after={"id": hid, "remote_task_key": remote_task_key})
+    return "ACKNOWLEDGED"
 
 
 # ---------------------------------------------------------------------------- Desk read model (production)
@@ -963,8 +1083,10 @@ def _existing(db: Session, hid: str, row: models.ControlState, sha: str) -> tupl
 
 
 def import_packet(db: Session, hid: str, raw, now: datetime | None = None) -> tuple[int, dict]:
-    """Idempotent import of one immutable packet: 201 created, 200 identical replay. The ControlState primary key
-    serializes concurrent deliveries; reservation, task and audit commit together."""
+    """Idempotent import of one immutable packet: 201 created, 200 identical replay. The per-origin row (_origin)
+    serializes imports for one production task and the ControlState primary key concurrent deliveries of one id; a
+    packet issued before the newest import for its task is refused (SUPERSEDED). Reservation, task and audit commit
+    together."""
     from app import stage_c_worker
     now = now or datetime.now(timezone.utc)
     try:
@@ -979,9 +1101,13 @@ def import_packet(db: Session, hid: str, raw, now: datetime | None = None) -> tu
     # (and the digest binds the declaration); anything else is refused, never down-graded.
     if packet.risk != "LOW" or packet.kind != "code_change":
         raise HandoffError(422, "NOT_ELIGIBLE")
+    origin = _origin(db, packet.origin_task_key)   # first: one import per production task at a time
     row = _row(db, hid, lock=True)
     if row is not None:
         return _existing(db, hid, row, packet.payload_sha256)
+    newest = _utc((origin.value or {}).get("issued_at")) if isinstance(origin.value, dict) else None
+    if newest is not None and issued < newest:
+        raise HandoffError(410, "SUPERSEDED")   # a late PUT of an older release never retires (or follows) a newer one
     if now >= expires:
         raise HandoffError(410, "EXPIRED")
     scope = {"paths": list(packet.task.paths), "context": list(packet.task.context)}
@@ -1022,6 +1148,7 @@ def import_packet(db: Session, hid: str, raw, now: datetime | None = None) -> tu
         raise HandoffError(409, "PAYLOAD_CONFLICT")
     row = _row(db, hid)
     row.value = {**reservation, "task_key": task.key}
+    origin.value = {"issued_at": issued.isoformat(), "id": hid}
     audit.record(db, actor=SERVICE, action="task.create", entity_type="task", entity_key=task.key,
                  reason="stage c handoff import", task_id=task.id,
                  after={"status": task.status.value, "handoff_id": hid})
@@ -1031,6 +1158,25 @@ def import_packet(db: Session, hid: str, raw, now: datetime | None = None) -> tu
                         "origin_task_key": packet.origin_task_key})
     db.commit()
     return 201, _receipt(db, hid, row.value)
+
+
+def _origin(db: Session, origin_task_key: str) -> models.ControlState:
+    """The per-production-task row every import locks first. It serializes first imports with different ids, which
+    otherwise find no committed task to lock (_retire_superseded) and both commit; it also keeps the issue time of the
+    newest import, so an older packet arriving late is refused even after that newer import was cancelled."""
+    stmt = select(models.ControlState).where(models.ControlState.key == ORIGIN_PREFIX + origin_task_key) \
+        .with_for_update().execution_options(populate_existing=True)
+    row = db.scalar(stmt)
+    if row is None:
+        try:
+            with db.begin_nested():
+                db.add(models.ControlState(key=ORIGIN_PREFIX + origin_task_key, value={}, updated_by=SERVICE))
+        except IntegrityError:   # a concurrent first import created it: this waits for that one to finish
+            db.rollback()        # nothing else is in this transaction yet
+        row = db.scalar(stmt)
+    if row is None:
+        raise HandoffError(409, "PAYLOAD_CONFLICT")
+    return row
 
 
 def _retire_superseded(db: Session, origin_task_key: str, hid: str, now: datetime) -> None:
@@ -1135,11 +1281,26 @@ def cancel_import(db: Session, hid: str, sha: str, now: datetime | None = None) 
     return {"id": hid, "cancellation": "ACKNOWLEDGED", "task_key": value.get("task_key")}
 
 
-def activate_import(db: Session, hid: str, sha: str, now: datetime | None = None) -> dict:
+def _lease(value: dict, sent_at, now: datetime) -> str | None:
+    """The confirmation lease after a (re)activation decided at production time `sent_at`: ACTIVATION_LEASE from it,
+    capped at this clock, never shorter than a lease already granted. No `sent_at`, no new lease."""
+    at = _utc(sent_at)
+    leases = [t for t in (min(at, now) + ACTIVATION_LEASE if at else None, _utc(value.get("confirmed_until"))) if t]
+    return max(leases).isoformat() if leases else None
+
+
+def confirmed(hv: dict, now: datetime) -> bool:
+    """Production's activation confirmation of this import is live (ACTIVATION_LEASE)."""
+    until = _utc(hv.get("confirmed_until"))
+    return until is not None and now < until
+
+
+def activate_import(db: Session, hid: str, sha: str, now: datetime | None = None, sent_at=None) -> dict:
     """Phase 2 of the two-phase handoff: production re-verified the founder release and asks Stage C to accept the
     import as work. Locks task -> handoff row (cancel_import's order), so activation and cancellation serialize:
     a cancelled (or tombstoned) or expired import is never activated, and a repeat is idempotent (no new task, grant
-    or run)."""
+    or run). Every (re)activation also renews production's confirmation lease (_lease): a repeat writes only that, and
+    bumps no revision (the lease is not part of the report's content)."""
     now = now or datetime.now(timezone.utc)
     peek = _row(db, hid)
     task_key = peek.value.get("task_key") if peek is not None and isinstance(peek.value, dict) else None
@@ -1155,13 +1316,16 @@ def activate_import(db: Session, hid: str, sha: str, now: datetime | None = None
         raise HandoffError(410, "CANCELLED")
     if task is None or value.get("task_key") != task_key:
         raise HandoffError(409, "NOT_IMPORTED")
+    lease = _lease(value, sent_at, now)
     if value.get("state") == "ACTIVATED":
+        if lease != value.get("confirmed_until"):
+            row.value = {**value, "confirmed_until": lease}
         db.commit()
         return {"id": hid, "activation": "ACTIVATED", "task_key": task.key}
     expires = _utc(value.get("expires_at"))
     if expires is None or now >= expires:
         raise HandoffError(410, "EXPIRED")
-    row.value = {**value, "state": "ACTIVATED", "activated_at": now.isoformat()}
+    row.value = {**value, "state": "ACTIVATED", "activated_at": now.isoformat(), "confirmed_until": lease}
     audit.record(db, actor=SERVICE, action="handoff.activate", entity_type="control_state",
                  entity_key=KEY_PREFIX + hid, task_id=task.id, after={"id": hid, "payload_sha256": sha,
                                                                       "task_key": task.key})
@@ -1176,7 +1340,7 @@ def _grant_view(db: Session, task: models.Task | None, hid: str, now: datetime) 
     if task is None or value.get("task_key") != task.key or value.get("handoff_id") != hid:
         return {"status": "NONE", "source_sha": None, "expires_at": None}
     denial = control._authorization_denial(db, row, task.key, value.get("source_sha") or "", now) \
-        or grant_denial(db, task, value)
+        or grant_denial(db, task, value, now)
     status = {None: "ACTIVE", "stage_c_authorization_consumed": "CONSUMED",
               "stage_c_authorization_expired": "EXPIRED"}.get(denial, "INVALID")
     sha = value.get("source_sha")
@@ -1290,9 +1454,10 @@ def import_view(db: Session, task) -> dict | None:
             "cancelled": bool(hv.get("cancelled_at"))}
 
 
-def grant_denial(db: Session, task, value: dict) -> str | None:
+def grant_denial(db: Session, task, value: dict, now: datetime | None = None) -> str | None:
     """An imported task's pilot grant must be issued for exactly this handoff and digest (and its issue audit must
-    say so), and the import must not be withdrawn. Anything else denies; there is no standing-grant fallback."""
+    say so), the import must not be withdrawn, and production's activation confirmation must be live (ACTIVATION_LEASE).
+    Anything else denies; there is no standing-grant fallback."""
     ref = imported(task)
     if ref is None:
         return None
@@ -1307,6 +1472,8 @@ def grant_denial(db: Session, task, value: dict) -> str | None:
         return "stage_c_handoff_cancelled"
     if hv.get("state") != "ACTIVATED":
         return "stage_c_handoff_not_activated"
+    if not confirmed(hv, now or datetime.now(timezone.utc)):
+        return "stage_c_handoff_unconfirmed"
     return None
 
 
@@ -1329,6 +1496,8 @@ def authorization_binding(db: Session, task, handoff_id: str | None, payload_sha
         raise ValueError("the handoff was cancelled")
     if hv.get("state") != "ACTIVATED":
         raise ValueError("the handoff is imported but not activated by production; it cannot be authorized yet")
+    if not confirmed(hv, now):
+        raise ValueError("production has not confirmed this handoff recently (cancelled there, or unreachable)")
     expires = _utc(hv.get("expires_at"))
     if not hv.get("first_authorized_at") and (expires is None or now >= expires):
         raise ValueError("the handoff expired before its first authorization; the founder renews the release on "

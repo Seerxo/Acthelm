@@ -298,8 +298,9 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
   proven with `SHOW default_transaction_read_only`) and arms the worker only when all hold: host acceptance for
   the source SHA in `.pilot-source-sha`, agents not paused, a fresh watchdog readiness for that SHA, and either an
   unexpired, unrevoked authorization for that SHA or the authorized task's own run still in flight after it consumed
-  the authorization (an unexpired repository lease held by `stage-c-runner:<task>`, or, for at most ten minutes after
-  it started, the consuming run still STARTED with its task IN_PROGRESS).
+  the authorization: the exact run that consumed it (`consumed_by_run_id`) still STARTED with its task IN_PROGRESS,
+  and either that run's own unexpired repository lease (`stage-c-runner:<task>`, the lease records the run id it
+  was taken for; an earlier run's lease never counts) or at most ten minutes since that run started).
 - Arm writes `/root/stage-c-pilot.compose.yml` (mode 600: the JSON above plus `"STAGE_C_ARMED_TASK": "<task key>"`,
   the one task the Start Pilot named) and recreates only
   `company-worker` with the four image IDs from `pilot-images.env` (each defined exactly once and well-formed, else
@@ -324,7 +325,17 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
   anything else is left in place and refused on every ARM tick.
 - The script runs on the Stage C host only: before any read or Docker call it refuses with exit 3 where a release
   ledger exists (`/var/lib/release-host/ledger/ledger.json`, the production host) and with exit 4 unless the
-  root-owned, not group/world-writable marker `/etc/acthelm/stage-c-host` exists (`action=REFUSED`).
+  root-owned, not group/world-writable marker `/etc/acthelm/stage-c-host` exists (`action=REFUSED`). Release control
+  here is the pinned image IDs and source SHA written by the founder-run Stage C rebuild; `compose-bound.sh` needs the
+  production ledger and is never used on this host.
+- The decision is trusted only from the pinned API image: the API image, the pause fence and the authorization are
+  read from one `company-api` container by its immutable ID, which must run exactly `COMPANY_OS_IMAGE_API`
+  (`DISARM api_image_mismatch` / `pause_fence_off` otherwise). The decision is asked again immediately before the
+  arming Compose (`changed_before_arm`) and once more after it; before anything starts, the worker image Compose
+  resolves (base file, override and pins) must be the pinned worker image (`compose_image_mismatch`). `--dry-run`
+  applies the same image, SHA, fence and publication checks as a tick. Between Compose and the read-back the
+  worker's own claim check (`control.write_authorization_denial`) still refuses any write its one-task grant does
+  not allow.
 - Stopping the unit (or any unexpected exit) between writing the override and logging `ARM` runs one verified disarm
   (`reason=interrupted`) and ends the run non-zero; `TimeoutStopSec=240` covers that disarm (190 s worst case). The
   unit is then left failed, which persists in `systemctl --failed` until reset, so an interrupted arm is visible even
@@ -337,8 +348,8 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
   plus the time the Docker calls of that tick take), even mid-run: the worker is recreated and the run is recovered
   as an infrastructure interruption (`stage_c_worker.recover_interrupted`). Every Docker call is time-bounded
   (10 s, 60 s per Compose run, 5 s kill grace; an override of these limits is honoured only between 1 s and the
-  default); one run's worst case is 355 s, under the unit's 400 s limit. If
-  Docker itself does not respond, no disarm can be confirmed and no stop time is promised: each tick that reaches
+  default); one run's worst case is 460 s (445 s of Docker calls plus three 5 s log lines), under the unit's 480 s
+  limit. If Docker itself does not respond, no disarm can be confirmed and no stop time is promised: each tick that reaches
   the script (the unit requires `docker.service`) logs `DISARM_FAILED`, exits 1 and removes the override, so nothing
   re-arms from it. A worker armed by this timer (`STAGE_C_ARMED_TASK` set) still refuses any write without its task's
   valid one-task grant; a worker started some other way without that variable falls under the ordinary checks below. Every new claim, including a CI repair,

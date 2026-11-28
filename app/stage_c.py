@@ -73,8 +73,10 @@ def _expired(value: dict, now: datetime) -> bool:
 
 
 def acquire(db: Session, repository: str, holder: str, ttl: timedelta,
-            now: datetime | None = None) -> int | None:
-    """Fencing token for `holder`, or None while another holder's lease is live. Caller commits."""
+            now: datetime | None = None, *, run_id: int | None = None) -> int | None:
+    """Fencing token for `holder`, or None while another holder's lease is live. Caller commits.
+    `run_id` records which AgentRun holds the lease (app/stage_c_arm.py proves run-to-lease ownership with it);
+    a lease taken without one carries none, never an earlier run's."""
     now = now or datetime.now(timezone.utc)
     row = _locked(db, lease_key(repository))
     value = dict(row.value)
@@ -82,6 +84,9 @@ def acquire(db: Session, repository: str, holder: str, ttl: timedelta,
         return None
     value.update(holder=holder, token=int(value.get("token", 0)) + 1,
                  expires_at=(now + ttl).isoformat())
+    value.pop("run_id", None)
+    if type(run_id) is int:
+        value["run_id"] = run_id
     row.value, row.updated_by = value, holder
     return value["token"]
 

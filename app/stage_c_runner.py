@@ -156,14 +156,15 @@ class CoderFailed(RuntimeError):
 
 
 def run(db: Session, task: models.Task, job: Job, coder: Coder, checks: Checks, workdir: Path,
-        ttl: timedelta = timedelta(minutes=30), *, before_write: Callable[[], None] | None = None) -> dict:
+        ttl: timedelta = timedelta(minutes=30), *, before_write: Callable[[], None] | None = None,
+        run_id: int | None = None) -> dict:
     """One attempt. Outcomes: LEASE_BUSY, CODER_FAILED, REJECTED, CHECKS_FAILED, LEASE_LOST,
     READY_FOR_REVIEW. Only READY_FOR_REVIEW leaves the task at INDEPENDENT_REVIEW; failures
     leave it at IMPLEMENTING for a bounded repair the caller decides on."""
     root = Path(workdir) / job.task_key
     if root.exists():
         raise FileExistsError(f"{root} exists; clean up the previous attempt first")
-    token = stage_c.acquire(db, job.repository, f"{HOLDER}:{job.task_key}", ttl)
+    token = stage_c.acquire(db, job.repository, f"{HOLDER}:{job.task_key}", ttl, run_id=run_id)
     db.commit()
     if token is None:
         return {"outcome": "LEASE_BUSY", "detail": f"{job.repository} is leased by another task"}
@@ -930,7 +931,7 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
             open_pr: PrOpener, ttl: timedelta = timedelta(minutes=10),
             before_publish: Callable[[], None] | None = None,
             find_pr: Callable[[str, str], str] | None = None,
-            pr_absent: Callable[[str], bool] | None = None) -> dict:
+            pr_absent: Callable[[str], bool] | None = None, run_id: int | None = None) -> dict:
     """Push task/<KEY> and open its PR. Outcomes: NOT_APPROVED, LEASE_BUSY, DRIFT, LEASE_LOST,
     PUSH_FAILED, PR_FAILED (branch pushed, delivery unverified), PR_OPEN.
 
@@ -952,7 +953,7 @@ def publish(db: Session, task: models.Task, job: Job, diff: bytes, worktree: Pat
     if protocol is None:
         raise ValueError("remote must be an https URL or an absolute local path")
     branch = f"task/{task.key}"
-    token = stage_c.acquire(db, job.repository, f"{HOLDER}:{job.task_key}", ttl)
+    token = stage_c.acquire(db, job.repository, f"{HOLDER}:{job.task_key}", ttl, run_id=run_id)
     db.commit()
     if token is None:
         return {"outcome": "LEASE_BUSY", "detail": f"{job.repository} is leased by another task"}
