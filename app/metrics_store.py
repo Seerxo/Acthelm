@@ -147,30 +147,6 @@ def portfolio(db: Session, now: datetime | None = None, per_unit: int = 60) -> l
     return out
 
 
-def mrr_change(db: Session, now: datetime | None = None) -> dict | None:
-    """How Seerxo's MRR moved between the two newest polar-api readings, or None with fewer than two.
-    Readings stamped beyond the allowed clock skew are not trusted. A zero previous value
-    leaves `percent_change` as None; the absolute change is still given."""
-    now = now or datetime.now(timezone.utc)
-    rows = db.execute(select(models.MetricObservation)
-                      .join(models.BusinessUnit, models.BusinessUnit.id == models.MetricObservation.business_unit_id)
-                      .where(models.BusinessUnit.key == "seerxo",
-                             models.MetricObservation.source == "polar-api",
-                             models.MetricObservation.metric == "mrr",
-                             models.MetricObservation.window == "",
-                             models.MetricObservation.observed_at <= now + FUTURE_SKEW)
-                      .order_by(models.MetricObservation.observed_at.desc()).limit(2)).scalars().all()
-    if len(rows) < 2:
-        return None
-    current, previous = rows
-    delta = Decimal(current.value) - Decimal(previous.value)
-    percent = None if Decimal(previous.value) == 0 else float(delta / Decimal(previous.value) * 100)
-    return {"current": float(current.value), "previous": float(previous.value),
-            "change": float(delta), "percent_change": percent, "source": "polar-api",
-            "current_observed_at": _aware(current.observed_at).isoformat(),
-            "previous_observed_at": _aware(previous.observed_at).isoformat()}
-
-
 # ponytail: one series' history is capped so a long-lived YouTube video cannot make a single response huge; raise it when a chart needs more.
 SERIES_MAX_POINTS = 1000
 

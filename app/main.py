@@ -741,7 +741,7 @@ def get_task(key: str, db: Session = Depends(get_db)) -> dict:
 
 @app.post("/tasks/{key}/status", response_model=schemas.TaskOut)
 def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = Depends(get_db),
-                       request: Request = None):
+                       request: Request = None, response: Response = None):
     """Move a task through §32's states.
 
     Terminal states and REVIEW require the verified founder; DONE also needs evidence.
@@ -762,7 +762,7 @@ def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = D
     # Worker-recorded error markers are facts: a status caller may neither write one nor overwrite one (erasing a
     # "PR closed" marker would turn a closed PR's task back into a retryable repair).
     reserved = (stage_c_worker.REPAIR_INTERRUPTED, stage_c_worker.JOB_UNFINISHED, stage_c_ci.MERGE_NOT_RECORDED,
-                stage_c_ci.REFRESH_CONTEXT_NOT_REVIEWED, stage_c_worker.PR_CLOSED, "PR_FAILED", "superseded:")
+                stage_c_worker.PR_CLOSED, "PR_FAILED", "superseded:")
     if body.error and (body.error.startswith(reserved) or (task.error or "").startswith(reserved)):
         db.rollback()
         raise HTTPException(422, "that error marker is recorded by the worker, not set through the status route")
@@ -784,6 +784,22 @@ def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = D
         raise HTTPException(409, f"{task.key}: {refusal}")
     if body.status == enums.TaskStatus.CANCELLED:
         stage_c_handoff.request_cancel(db, task, actor=who.id)
+        if stage_c_handoff.cancel_unconfirmed(task):
+            # B5: the validated cancel is durable first (pending: from here every other status change is refused),
+            # then Stage C withdraws the import with no lock or transaction held across the request, then what it
+            # acknowledged is recorded under the lock again. The task is CANCELLED only once Stage C acknowledged.
+            db.commit()
+            withdrawn = stage_c_handoff.withdraw(db, task)
+            db.refresh(task, with_for_update=True)
+            stage_c_handoff.request_cancel(db, task, actor=who.id, withdrawn=withdrawn)
+        if stage_c_handoff.cancel_unconfirmed(task):
+            # Stage C has not acknowledged the withdrawal: never shown as cancelled. 202, the task stays
+            # WAITING_EXTERNAL with its handoff cancellation PENDING; the worker retries and closes it on acknowledgement.
+            db.commit()
+            db.refresh(task)
+            if response is not None:
+                response.status_code = 202
+            return task
 
     before = redact_data(audit.snapshot(task))
     previous = task.status
@@ -1127,38 +1143,6 @@ def stage_c_authorize(body: schemas.StageCAuthorize, request: Request, db: Sessi
     return {k: value[k] for k in ("task_key", "source_sha", "expires_at", "issued_by", "action")}
 
 
-@app.post("/stage-c/tasks", status_code=201)
-def stage_c_task(body: schemas.StageCTask, request: Request, db: Session = Depends(get_db)) -> dict:
-    """The founder's code task: BACKLOG, LOW risk, developer, company-os, writing only allowed Stage C files.
-    Founder only, from the verified principal. It runs nothing: Authorize Stage C and Mark READY still decide."""
-    approval_identity.require_founder(request)
-    scope = {"paths": body.paths, "context": body.context}
-    if stage_c_worker.scope_refused(scope, set(stage_c_worker.task_paths())):
-        raise HTTPException(422, "paths must be distinct allowed Stage C files; context must be other app/ or tests/ "
-                                 ".py files (at most 10, 20 files in all)")
-    task = create_task(schemas.TaskCreate(
-        title=" ".join(body.title.split()), objective=body.objective, success_criteria=body.success_criteria,
-        status=enums.TaskStatus.BACKLOG, assigned_agent="developer", project="company-os",
-        risk_level=enums.RiskLevel.LOW, created_by="founder", reason="founder desk code task",
-        context={"autonomous": True, "write": True, "stage_c": scope}), db, request)
-    return {"key": task.key, "status": task.status.value}
-
-
-@app.post("/stage-c/reconcile-refresh", status_code=202)
-def stage_c_reconcile_refresh(body: schemas.StageCRefreshReconcile, request: Request,
-                              db: Session = Depends(get_db)) -> dict:
-    who = approval_identity.require_founder(request)
-    task = _by_key(db, models.Task, body.task_key)
-    if ((task.context or {}).get("improvement") or {}).get("stage") == "MERGED":
-        return {"outcome": "ALREADY_MERGED"}
-    event = audit.record(db, actor=who.id, action="stage-c.refresh_reconcile.requested",
-                         entity_type="task", entity_key=task.key, task_id=task.id,
-                         after=body.model_dump())
-    db.flush()
-    db.commit()
-    return {"outcome": "REQUESTED", "audit_id": event.id}
-
-
 @app.post("/stage-c/acceptance", status_code=201)
 def stage_c_acceptance(request: Request, db: Session = Depends(get_db)) -> dict:
     """The verified founder accepts the Stage C host for the deployed SHA, from the fresh all-PASS candidate the host
@@ -1292,7 +1276,8 @@ async def handoff_activate(hid: str, request: Request, db: Session = Depends(get
     except ValueError:
         raise HTTPException(422, "MALFORMED")
     return _handoff_call("POST", get_route_path(request.scope),
-                         lambda: (200, stage_c_handoff.activate_import(db, hid, body.payload_sha256)), db)
+                         lambda: (200, stage_c_handoff.activate_import(db, hid, body.payload_sha256,
+                                                                       sent_at=body.sent_at)), db)
 
 
 @app.post("/stage-c/handoff-api/{hid}/cancel")

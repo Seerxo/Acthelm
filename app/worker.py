@@ -41,11 +41,6 @@ RUN_TIMEOUT_S = int(os.environ.get("WORKER_RUN_TIMEOUT_S", "600"))
 MAX_TURNS = int(os.environ.get("WORKER_MAX_TURNS", "6"))
 # §37: never retry immediately. Index = attempts already made.
 BACKOFF = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=30))
-# A run with no work result (provider capacity, no independent reviewer, publication or lease wait) spends neither a
-# retry nor the daily budget, so it gets its own backoff and bound. Both are derived from the task's AgentRun rows,
-# so they survive restarts; a run marked `stalled` (the one that blocked the task) resets the count.
-NO_PROGRESS_BACKOFF = (timedelta(minutes=1), timedelta(minutes=5), timedelta(minutes=15), timedelta(minutes=30))
-MAX_NO_PROGRESS_RUNS = 6
 # A run still STARTED this long after it should have been killed belongs to a dead
 # worker (container restart, OOM). Saved results resume finalization; otherwise the task is requeued.
 STALE_AFTER = timedelta(seconds=RUN_TIMEOUT_S + 300)
@@ -223,19 +218,6 @@ def _zero_cost_incident(db: Session, provider: str, why: str) -> None:
 
 # --------------------------------------------------------------------------- work-check
 
-def _trailing_no_progress(db: Session, task_id: int, exclude: int | None = None) -> int:
-    """Consecutive most recent capacity-only runs of a task, up to MAX_NO_PROGRESS_RUNS, stopping at a `stalled` one."""
-    query = select(models.AgentRun).where(models.AgentRun.task_id == task_id)
-    if exclude is not None:
-        query = query.where(models.AgentRun.id != exclude)
-    count = 0
-    for run in db.scalars(query.order_by(models.AgentRun.id.desc()).limit(MAX_NO_PROGRESS_RUNS)).all():
-        if (run.tool_calls or {}).get("stalled") or not _capacity_only(run):
-            break
-        count += 1
-    return count
-
-
 def _capacity_only(run: models.AgentRun) -> bool:
     """No work result: exclude capacity probes, including pre-marker history.
 
@@ -332,9 +314,6 @@ def _eligible(db: Session, task: models.Task, specs: dict) -> tuple[str | None, 
     wait = BACKOFF[min(task.retry_count, len(BACKOFF) - 1)]
     if task.retry_count and last and _aware(last) + wait > _now():
         return "backoff", None
-    idle = _trailing_no_progress(db, task.id) if (task.context or {}).get("write") else 0   # Stage C (E5) only
-    if idle and last and _aware(last) + NO_PROGRESS_BACKOFF[min(idle, len(NO_PROGRESS_BACKOFF)) - 1] > _now():
-        return "no_progress_backoff", None
     return None, spec
 
 

@@ -19,7 +19,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 from sqlalchemy import select
@@ -53,40 +52,30 @@ def _owned(path: Path, uid: int) -> tuple[str, str]:
     return "PASS", f"owned by uid {uid}, mode {stat.S_IMODE(st.st_mode):o}"
 
 
-def _github_read(path: str, *, actions: bool, env: dict, run, sleep=time.sleep) -> tuple[str, str]:
+def _github_read(path: str, *, actions: bool, env: dict, run) -> tuple[str, str]:
     """Probe the worker's actual read access; never surface GitHub bodies or credentials."""
-    for attempt in range(2):
-        try:
-            result = run(["gh", "api", "--method", "GET", path], env=env,
-                         capture_output=True, text=True, timeout=10)
-            if result.returncode:
-                code = re.search(r"\bHTTP (401|403|404)\b", result.stderr or "")
-                if code:
-                    return "FAIL", f"GitHub refused this read (HTTP {code[1]})"
-                outcome = ("UNKNOWN", "GitHub read unavailable; check connectivity and rate limits")
-                code = re.search(r"\bHTTP (\d{3})\b", result.stderr or "")
-                if code and not 500 <= int(code[1]) < 600:
-                    return outcome
-            else:
-                data = json.loads(result.stdout)
-                if actions:
-                    rows = data.get("workflow_runs") if isinstance(data, dict) else None
-                    valid = isinstance(rows, list) and all(
-                        isinstance(row, dict) and type(row.get("id")) is int
-                        and isinstance(row.get("path"), str) and isinstance(row.get("status"), str) for row in rows)
-                else:
-                    valid = isinstance(data, list) and all(
-                        isinstance(row, dict) and type(row.get("id")) is int and isinstance(row.get("context"), str)
-                        and isinstance(row.get("state"), str) and row["state"] in {"pending", "success", "failure", "error"}
-                        and isinstance(row.get("creator"), dict) for row in data)
-                if valid:
-                    return "PASS", "read access verified; this does not assert CI passed"
-                outcome = ("UNKNOWN", "GitHub returned an unexpected response")
-        except (OSError, ValueError, subprocess.SubprocessError):
-            outcome = ("UNKNOWN", "GitHub read unavailable; no CI access proof")
-        if attempt == 0:
-            sleep(2)
-    return outcome
+    try:
+        result = run(["gh", "api", "--method", "GET", path], env=env,
+                     capture_output=True, text=True, timeout=10)
+        if result.returncode:
+            code = re.search(r"\bHTTP (401|403|404)\b", result.stderr or "")
+            return ("FAIL", f"GitHub refused this read (HTTP {code[1]})") if code else (
+                "UNKNOWN", "GitHub read unavailable; check connectivity and rate limits")
+        data = json.loads(result.stdout)
+        if actions:
+            rows = data.get("workflow_runs") if isinstance(data, dict) else None
+            valid = isinstance(rows, list) and all(
+                isinstance(row, dict) and type(row.get("id")) is int
+                and isinstance(row.get("path"), str) and isinstance(row.get("status"), str) for row in rows)
+        else:
+            valid = isinstance(data, list) and all(
+                isinstance(row, dict) and type(row.get("id")) is int and isinstance(row.get("context"), str)
+                and isinstance(row.get("state"), str) and row["state"] in {"pending", "success", "failure", "error"}
+                and isinstance(row.get("creator"), dict) for row in data)
+        return ("PASS", "read access verified; this does not assert CI passed") if valid else (
+            "UNKNOWN", "GitHub returned an unexpected response")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return "UNKNOWN", "GitHub read unavailable; no CI access proof"
 
 
 def evaluate(db, *, host: dict | None, health: dict | None, jobs: Path, flag: bool,

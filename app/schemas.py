@@ -315,19 +315,13 @@ class HandoffRelease(BaseModel):
 class HandoffActivate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sent_at: datetime | None = None   # production's decision time: starts the confirmation lease (none: no lease)
 
 
 class HandoffCancel(BaseModel):
     model_config = ConfigDict(extra="forbid")
     payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     reason: Literal["PRODUCTION_CANCELLED"]
-
-
-class StageCRefreshReconcile(BaseModel):
-    task_key: str = Field(pattern=r"^[A-Z]+-\d{1,6}$")
-    pr_number: int = Field(gt=0, le=9999999999)
-    final_head: str = Field(pattern=r"^[0-9a-f]{40}$")
-    merge_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
 
 
 class StageCStanding(BaseModel):

@@ -310,57 +310,6 @@ def test_revenue_unit_is_none_when_the_stored_reading_has_no_unit():
     assert metrics_store.revenue(db, now=NOW)["unit"] is None
 
 
-def _mrr(db, value, at, source="polar-api"):
-    metrics_store.record(db, schemas.MetricsIn(business_unit="seerxo", observations=[
-        schemas.MetricIn(subject="polar", metric="mrr", value=value, source=source, observed_at=at)]), now=NOW)
-
-
-def test_mrr_change_compares_the_two_newest_readings():
-    db = _db()
-    _mrr(db, 50, NOW - timedelta(days=3))
-    _mrr(db, 200, NOW - timedelta(days=2))
-    _mrr(db, 250, NOW - timedelta(hours=1))
-    assert metrics_store.mrr_change(db, now=NOW) == {
-        "current": 250.0, "previous": 200.0, "change": 50.0, "percent_change": 25.0,
-        "source": "polar-api",
-        "current_observed_at": (NOW - timedelta(hours=1)).isoformat(),
-        "previous_observed_at": (NOW - timedelta(days=2)).isoformat()}
-
-
-def test_mrr_change_handles_a_drop():
-    db = _db()
-    _mrr(db, 200, NOW - timedelta(days=1))
-    _mrr(db, 150, NOW)
-    out = metrics_store.mrr_change(db, now=NOW)
-    assert out["change"] == -50.0 and out["percent_change"] == -25.0
-
-
-def test_mrr_change_needs_two_readings():
-    db = _db()
-    assert metrics_store.mrr_change(db, now=NOW) is None
-    _mrr(db, 100, NOW)
-    assert metrics_store.mrr_change(db, now=NOW) is None
-
-
-def test_mrr_change_from_zero_has_no_percent():
-    db = _db()
-    _mrr(db, 0, NOW - timedelta(days=1))
-    _mrr(db, 80, NOW)
-    out = metrics_store.mrr_change(db, now=NOW)
-    assert out["change"] == 80.0 and out["percent_change"] is None
-    assert out["previous"] == 0.0 and out["current"] == 80.0
-
-
-def test_mrr_change_skips_readings_from_other_sources():
-    db = _db()
-    _mrr(db, 100, NOW - timedelta(days=2))
-    _mrr(db, 999, NOW - timedelta(days=1), source="seerxo-backend")
-    assert metrics_store.mrr_change(db, now=NOW) is None
-    _mrr(db, 110, NOW)
-    out = metrics_store.mrr_change(db, now=NOW)
-    assert out["previous"] == 100.0 and out["current"] == 110.0 and out["change"] == 10.0
-
-
 def test_series_is_one_series_oldest_first_within_the_window():
     db = _db()
     metrics_store.record(db, _views(10, NOW - timedelta(days=2)), now=NOW)
@@ -408,23 +357,6 @@ def test_series_is_oldest_first_regardless_of_insertion_order():
     assert [p["value"] for p in out["points"]] == [1.0, 2.0, 3.0, 4.0]
     stamps = [datetime.fromisoformat(p["observed_at"]) for p in out["points"]]
     assert stamps == sorted(stamps)
-
-
-def test_series_only_returns_readings_from_the_requested_source():
-    db = _db()
-    metrics_store.record(db, _views(10, NOW - timedelta(days=1)), now=NOW)
-    other = _views(500, NOW - timedelta(hours=12))
-    other.observations[0].source = "youtube-auto"  # same subject, metric and window, different source
-    metrics_store.record(db, other, now=NOW)
-    assert _rows(db) == 2
-    mine = _series(db, 30)
-    assert mine["source"] == "youtube-data-api" and [p["value"] for p in mine["points"]] == [10.0]
-    theirs = metrics_store.series(db, source="youtube-auto", subject="youtube:abc123", metric="views",
-                                  window="24h", days=30, now=NOW)
-    assert [p["value"] for p in theirs["points"]] == [500.0]
-    nobody = metrics_store.series(db, source="polar-api", subject="youtube:abc123", metric="views",
-                                  window="24h", days=30, now=NOW)
-    assert nobody["points"] == []
 
 
 def test_a_series_with_no_readings_is_empty_never_zero():

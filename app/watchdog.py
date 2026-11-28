@@ -29,7 +29,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, aliased
 
 from app import (business_reconciler, ci_usage, enums, event_router, experiment_scheduler, metric_sources, models,
-                 reconciler_heartbeat, stage_c_state, worker)
+                 reconciler_heartbeat, worker)
 from app.db import SessionLocal, engine
 from app.notify import RECOVERY_RETRY_STATE_PREFIX, fingerprint, notifier
 
@@ -1057,17 +1057,10 @@ def record_stage_c_readiness(db: Session, facts: dict) -> dict | None:
     if not isinstance(report, dict) or not isinstance(report.get("ready"), bool):
         report = {"ready": False, "checks": [{"name": "preflight_unavailable", "status": "UNKNOWN"}]}
     sha = report.get("source_sha")
-    failed = [c for c in report.get("checks", [])
-              if isinstance(c, dict) and c.get("status") != "PASS"][:10]
-    failed_status = {}
-    for c in failed:
-        name = c.get("name")
-        if not isinstance(name, str) or (name not in stage_c_state.PREFLIGHT_CHECKS and name != "preflight_unavailable"):
-            name = "other"
-        failed_status[name] = c["status"] if c.get("status") in ("FAIL", "UNKNOWN") else "UNKNOWN"
     value = {"ready": report["ready"], "checked_at": _now().isoformat(),
              "source_sha": sha if isinstance(sha, str) and re.fullmatch(r"[a-f0-9]{40}", sha) else None,
-             "failed": [str(c.get("name")) for c in failed], "failed_status": failed_status}
+             "failed": [str(c.get("name")) for c in report.get("checks", [])
+                        if isinstance(c, dict) and c.get("status") != "PASS"][:10]}
     row = db.get(models.ControlState, STAGE_C_READINESS_KEY)
     if row is None:
         db.add(models.ControlState(key=STAGE_C_READINESS_KEY, value=value, updated_by="watchdog"))
