@@ -13,7 +13,7 @@ def _beat(db, run, ago):
     db.commit()
 
 
-def test_beating_stage_c_run_past_the_hour_is_not_recovered():
+def test_beating_run_kept():
     """A second worker's run of 61 minutes whose wait() beat a minute ago is alive: it keeps its task."""
     db = _db()
     task, run = interrupted(db, "IMPLEMENTING")
@@ -25,7 +25,7 @@ def test_beating_stage_c_run_past_the_hour_is_not_recovered():
 
 @pytest.mark.parametrize("beat_ago", [None, worker.HEARTBEAT_STALE + timedelta(minutes=1),
                                       timedelta(hours=1, minutes=5)])   # stale, or older than the run itself
-def test_silent_stage_c_run_is_still_recovered(beat_ago):
+def test_silent_run_recovered(beat_ago):
     db = _db()
     task, run = interrupted(db, "IMPLEMENTING")
     if beat_ago is not None:
@@ -35,7 +35,7 @@ def test_silent_stage_c_run_is_still_recovered(beat_ago):
     assert run.status == enums.AgentRunStatus.FAILED
 
 
-def test_heartbeat_never_protects_past_the_hard_maximum():
+def test_heartbeat_hard_max():
     db = _db()
     task, run = interrupted(db, "IMPLEMENTING")
     run.started_at = worker._now() - worker.RUN_MAX_AGE - timedelta(minutes=1)

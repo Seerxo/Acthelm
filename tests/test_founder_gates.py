@@ -79,7 +79,7 @@ DENIED = [  # (label, headers, client host, expected status)
 
 
 @pytest.mark.parametrize("mode", ["enforce", "log"])
-@pytest.mark.parametrize("label,headers,host,status", DENIED, ids=lambda v: v if isinstance(v, str) else "")
+@pytest.mark.parametrize("label,headers,host,status", DENIED, ids=[d[0].split()[0] for d in DENIED])
 @pytest.mark.parametrize("route,body", [("/tasks/TASK-0001/status", DONE), ("/phases/7", COMPLETE)], ids=["task", "phase"])
 def test_forged_founder_actor_never_completes_work(env, monkeypatch, mode, label, headers, host, status, route, body):
     engine, _ = env

@@ -81,13 +81,13 @@ def _refused(r):
 # ------------------------------------------------------------------------------------------- refused
 
 @pytest.mark.parametrize("upto", ["PR_OPEN", "READY_TO_MERGE"])
-def test_evidence_string_alone_does_not_close_an_unmerged_stage_c_task(engine, upto):
+def test_evidence_alone(engine, upto):
     _stage_c_task(engine, upto)
     _refused(_post(_founder, KEY, DONE))
     assert _task(engine) == (T.REVIEW, upto, 0)                         # nothing written
 
 
-def test_an_abandoned_stage_c_attempt_is_not_done(engine):
+def test_abandoned_not_done(engine):
     _stage_c_task(engine, "TESTING", status=T.BLOCKED)
     with Session(engine) as db:
         stage_c.advance(db, db.scalar(select(models.Task).where(models.Task.key == KEY)), "ABANDONED",
@@ -97,7 +97,7 @@ def test_an_abandoned_stage_c_attempt_is_not_done(engine):
 
 
 @pytest.mark.parametrize("stage", ["MERGED", "MEASURED"])
-def test_a_hand_edited_context_without_a_recorded_merge_is_refused(engine, stage):
+def test_hand_edited_ctx(engine, stage):
     _stage_c_task(engine)
     with Session(engine) as db:
         task = db.scalar(select(models.Task).where(models.Task.key == KEY))
@@ -110,7 +110,7 @@ def test_a_hand_edited_context_without_a_recorded_merge_is_refused(engine, stage
     assert _task(engine)[0] == T.REVIEW
 
 
-def test_a_client_created_task_with_a_fabricated_merged_context_is_refused(engine, monkeypatch):
+def test_fabricated_ctx(engine, monkeypatch):
     """A MEASURED improvement in a client body (POST /tasks, admin credential) proves nothing: since R5 the server-owned
     context keys and non-initial states are refused at creation, and even a task already holding such a context (an
     older row) is refused DONE, because done_refusal reads only server-written audit rows."""
@@ -134,7 +134,7 @@ def test_a_client_created_task_with_a_fabricated_merged_context_is_refused(engin
     _refused(_post(_founder, KEY, DONE))
 
 
-def test_a_merged_row_without_github_merge_evidence_is_refused(engine):
+def test_merged_no_evidence(engine):
     """stage_c.advance refuses a bare "founder" actor for MERGED (no GitHub merge proof), so the task stays open."""
     _stage_c_task(engine)
     with Session(engine) as db:
@@ -144,7 +144,7 @@ def test_a_merged_row_without_github_merge_evidence_is_refused(engine):
     _refused(_post(_founder, KEY, DONE))
 
 
-def test_a_refresh_marker_without_the_reconciliation_row_is_refused(engine):
+def test_refresh_no_row(engine):
     _stage_c_task(engine, status=T.BLOCKED)
     with Session(engine) as db:
         db.scalar(select(models.Task).where(models.Task.key == KEY)).error = \
@@ -169,7 +169,7 @@ def test_recorded_merge_closes(engine, then):
     assert _task(engine) == (T.DONE, then or "MERGED", 1)
 
 
-def test_the_founder_accepts_a_reconciled_refreshed_merge(engine):
+def test_founder_accepts_refresh(engine):
     """stage_c_ci.reconcile_refreshed leaves a verified founder merge BLOCKED for explicit acceptance."""
     _stage_c_task(engine, status=T.BLOCKED)
     with Session(engine) as db:
@@ -203,7 +203,7 @@ def test_non_stage_c_done_rule(engine, context):
 # ------------------------------------------------------------------------------------------- callers
 
 @pytest.mark.parametrize("status", ["DONE", "REVIEW", "READY", "CANCELLED"])
-def test_fake_founder_cannot_move_merged(engine, status):
+def test_fake_founder_merged(engine, status):
     _stage_c_task(engine)
     _record_merge(engine)
     r = _post(_service, KEY, {**DONE, "status": status})
@@ -212,7 +212,7 @@ def test_fake_founder_cannot_move_merged(engine, status):
 
 
 @pytest.mark.parametrize("status", ["DONE", "REVIEW", "READY"])
-def test_service_cannot_move_unmerged(engine, status):
+def test_svc_unmerged(engine, status):
     _stage_c_task(engine, status=T.BLOCKED)
     r = _post(_service, KEY, {**DONE, "status": status})
     assert r.status_code == 403, r.text

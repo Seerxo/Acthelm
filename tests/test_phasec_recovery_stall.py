@@ -38,7 +38,7 @@ def _labels(db):
 @pytest.mark.parametrize("status", [enums.TaskStatus.IN_PROGRESS, enums.TaskStatus.REVIEW,
                                     enums.TaskStatus.WAITING_APPROVAL, enums.TaskStatus.WAITING_EXTERNAL,
                                     enums.TaskStatus.BLOCKED])
-def test_long_time_in_status_alerts(status):
+def test_stall_alerts(status):
     db = _db()
     task = _task(db, status, timedelta(days=10))
     _entered(db, task, status, timedelta(days=4))
@@ -49,7 +49,7 @@ def test_long_time_in_status_alerts(status):
 @pytest.mark.parametrize("status", [enums.TaskStatus.IN_PROGRESS, enums.TaskStatus.REVIEW,
                                     enums.TaskStatus.WAITING_APPROVAL, enums.TaskStatus.WAITING_EXTERNAL,
                                     enums.TaskStatus.BLOCKED])
-def test_new_status_not_stale(status):
+def test_new_not_stale(status):
     """Age since creation is not time in status: a 10-day-old task that entered this status an hour ago is fine."""
     db = _db()
     task = _task(db, status, timedelta(days=10))
@@ -70,7 +70,7 @@ def test_same_status_audit_row_does_not_reset_the_clock():
     assert "stale:REVIEW" in _labels(db)
 
 
-def test_without_audit_falls_back_to_created_at_and_never_mutates():
+def test_no_audit_created_at():
     db = _db()
     task = _task(db, enums.TaskStatus.IN_PROGRESS, timedelta(hours=4))
     revision = task.revision

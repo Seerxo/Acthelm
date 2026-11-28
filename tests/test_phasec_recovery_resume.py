@@ -57,8 +57,8 @@ def _later_coder_run(db, *, provider="claude", outcome="PR_OPEN", calls=1, ago=t
     return run
 
 
-@pytest.mark.parametrize("error", [CAPACITY, LAUNCHER])
-def test_proven_resume_audited(armed, error):
+@pytest.mark.parametrize("error", [CAPACITY, LAUNCHER], ids=["cap", "launch"])
+def test_resume_audited(armed, error):
     db = armed
     task = _blocked(db, error)
     proof = _later_coder_run(db)
@@ -94,7 +94,7 @@ def test_off_by_default(armed, monkeypatch):
     {"capacity_failure": True},
     {"provider": "codex"},                                  # capacity of a different provider proves nothing
 ])
-def test_no_proof_stays_blocked(armed, proof):
+def test_no_proof(armed, proof):
     task = _blocked(armed, CAPACITY)
     if proof is not None:
         _later_coder_run(armed, **proof)
@@ -108,8 +108,8 @@ def test_no_proof_stays_blocked(armed, proof):
     f"{stage_c_worker.REPAIR_INTERRUPTED} inspect it", "upstream_role_not_read_only: restore Read",
     "upstream_role_unverified: renew", "CHECKS_REPEATED: same tests", "RUNTIME_ERROR", worker.OWNER_CHANGED_BLOCK,
     None,
-])
-def test_other_blocks_not_resumed(armed, error):
+], ids=["stall", "job", "repair", "ro", "unver", "checks", "rt", "owner", "none"])
+def test_no_resume_other(armed, error):
     task = _blocked(armed, error)
     _later_coder_run(armed)
     assert worker.resume_resolved_blocks(armed, SPECS) == []
@@ -119,7 +119,7 @@ def test_other_blocks_not_resumed(armed, error):
 
 @pytest.mark.parametrize("gate", ["paused", "no_authorization", "approval_required", "retries_spent",
                                   "preflight_stale", "launcher_cooling", "not_a_write_task"])
-def test_gates_still_apply(armed, monkeypatch, gate):
+def test_gates(armed, monkeypatch, gate):
     db = armed
     task = _blocked(db, LAUNCHER, authorize=gate != "no_authorization")
     _later_coder_run(db)

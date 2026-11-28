@@ -41,7 +41,7 @@ def test_recovery_audited(case, status):
     assert worker.recover_stale(db) == [] and len(_rows(db, task)) == 1   # idempotent: one change, one row
 
 
-def test_a_run_that_no_longer_owns_its_task_writes_no_recovery_row():
+def test_unowned_run_no_row():
     """A cancelled task is not the run's: recover_stale records it as superseded, recover_interrupted changes nothing."""
     db = _db()
     task, run = interrupted(db, "DETECTED")
