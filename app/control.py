@@ -333,7 +333,7 @@ def write_authorization_denial(db: Session, task, sha: str, now: datetime | None
     if stage_c_handoff.imported(task) is not None:
         # A handed-off task: only its own handoff-bound one-task grant, never the standing fallback.
         row = db.get(models.ControlState, PILOT_AUTHORIZATION)
-        return pilot or stage_c_handoff.grant_denial(db, task, row.value if row is not None else {})
+        return pilot or stage_c_handoff.grant_denial(db, task, row.value if row is not None else {}, now)
     if pilot is None or ARMED_TASK_ENV in os.environ:
         return pilot                     # armed: the one-task grant only, never the standing fallback
     row = db.get(models.ControlState, STANDING_AUTHORIZATION)
@@ -409,7 +409,7 @@ def consume_write_authorization(db: Session, task, sha: str, run_id: int, now: d
         row = db.scalar(select(models.ControlState).where(models.ControlState.key == PILOT_AUTHORIZATION)
                         .with_for_update().execution_options(populate_existing=True))
         denial = (_authorization_denial(db, row, task.key, sha, now) or stage_c_handoff.grant_denial(
-            db, task, row.value if row is not None else {})
+            db, task, row.value if row is not None else {}, now)
             or consume_pilot_authorization(db, task.key, sha, run_id, now))   # no standing fallback
         if denial is None:
             models.bump_revision(task)   # the consumed grant is part of the handoff's reported state

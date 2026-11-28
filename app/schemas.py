@@ -315,6 +315,7 @@ class HandoffRelease(BaseModel):
 class HandoffActivate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sent_at: datetime | None = None   # production's decision time: starts the confirmation lease (none: no lease)
 
 
 class HandoffCancel(BaseModel):

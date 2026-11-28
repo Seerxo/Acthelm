@@ -54,7 +54,7 @@ def _imported(engine, activate=True):
     with Session(engine) as s:
         _, receipt = h.import_packet(s, packet["id"], packet)
         if activate:
-            h.activate_import(s, packet["id"], packet["payload_sha256"])
+            h.activate_import(s, packet["id"], packet["payload_sha256"], sent_at=now)
     return packet["id"], packet["payload_sha256"], receipt["task_key"]
 
 
@@ -143,7 +143,7 @@ def _packet(issued):
     return p
 
 
-def test_pg_origin(engine, monkeypatch):
+def test_pg_or(engine, monkeypatch):
     """R4a-2 finding 4: two first imports of one production task with different ids, interleaved inside
     _retire_superseded (nothing committed yet to lock), both committed. One open import per production task."""
     now = datetime.now(timezone.utc)
@@ -181,7 +181,7 @@ def test_pg_origin(engine, monkeypatch):
     assert [t.context["remote_stage_c"]["id"] for t in live] == [p2["id"]]
 
 
-def test_pg_grant_lock(engine):
+def test_pg_lk(engine):
     """R4a-2 finding 3: replacing a finished handoff grant locks the handoff task (as a claim does) before the grant.
     A native authorization waits for a held lock on that task, never deadlocks, and bumps its revision."""
     hid, sha, key = _imported(engine)

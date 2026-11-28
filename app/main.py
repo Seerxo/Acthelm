@@ -741,7 +741,7 @@ def get_task(key: str, db: Session = Depends(get_db)) -> dict:
 
 @app.post("/tasks/{key}/status", response_model=schemas.TaskOut)
 def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = Depends(get_db),
-                       request: Request = None):
+                       request: Request = None, response: Response = None):
     """Move a task through §32's states.
 
     Terminal states and REVIEW require the verified founder; DONE also needs evidence.
@@ -790,6 +790,14 @@ def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = D
         raise HTTPException(409, f"{task.key}: {refusal}")
     if body.status == enums.TaskStatus.CANCELLED:
         stage_c_handoff.request_cancel(db, task, actor=who.id, withdrawn=withdrawn)
+        if stage_c_handoff.cancel_unconfirmed(task):
+            # Stage C has not acknowledged the withdrawal: never shown as cancelled. 202, the task stays
+            # WAITING_EXTERNAL with its handoff cancellation PENDING; the worker retries and closes it on acknowledgement.
+            db.commit()
+            db.refresh(task)
+            if response is not None:
+                response.status_code = 202
+            return task
 
     before = redact_data(audit.snapshot(task))
     previous = task.status
@@ -1266,7 +1274,8 @@ async def handoff_activate(hid: str, request: Request, db: Session = Depends(get
     except ValueError:
         raise HTTPException(422, "MALFORMED")
     return _handoff_call("POST", get_route_path(request.scope),
-                         lambda: (200, stage_c_handoff.activate_import(db, hid, body.payload_sha256)), db)
+                         lambda: (200, stage_c_handoff.activate_import(db, hid, body.payload_sha256,
+                                                                       sent_at=body.sent_at)), db)
 
 
 @app.post("/stage-c/handoff-api/{hid}/cancel")

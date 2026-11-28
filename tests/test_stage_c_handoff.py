@@ -418,7 +418,7 @@ def _open_sc(w):
 
 def _sc_activate(w, hid, sha):
     with w.on("sc"), Session(w.sc) as s:
-        return h.activate_import(s, hid, sha)
+        return h.activate_import(s, hid, sha, sent_at=datetime.now(timezone.utc))
 
 
 def _refused_after_import(w, change):
@@ -505,7 +505,7 @@ def test_renew_lost_activation_ack(w):
     assert w.calls[-1] == ("GET", h.API_PREFIX + old["id"])
     with w.on("prod"):
         assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
-                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 200
+                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 202
     assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED"               # ...and cancelled by its own id
     assert w.calls[-1] == ("POST", f"{h.API_PREFIX}{old['id']}/cancel") and _open_sc(w) == []
 
@@ -522,7 +522,7 @@ def test_cancel_before_renewal_delivery_withdraws_the_live_import(w):
     assert new["id"] != old["id"] and len(_open_sc(w)) == 1
     with w.on("prod"):
         assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
-                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 200
+                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 202
     assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED_SUPERSEDED"
     assert w.calls[-1] == ("POST", f"{h.API_PREFIX}{old['id']}/cancel") and _open_sc(w) == []
     assert w.prod_task().context["remote_stage_c"]["cancellation"] != "ACKNOWLEDGED"
@@ -560,7 +560,7 @@ def test_renew_refused(w, who):
             task.context = {**task.context, "remote_stage_c": {**task.context["remote_stage_c"],
                                                                  "cancel_requested_at": "2026-01-01T00:00:00+00:00"}}
             s.commit()
-        assert w.release().json()["id"] == old["id"]
+        assert w.release().status_code == 409                   # a pending cancel is never renewed or retried
     else:
         with w.on("prod"), Session(w.prod) as s, pytest.raises(PermissionError):
             h.release(s, s.scalar(select(models.Task).where(models.Task.key == "TASK-0001")), founder="operator:x")
@@ -588,7 +588,7 @@ def test_cancel_first(w):
     packet = w.prod_task().context["remote_stage_c"]["packet"]
     with w.on("prod"):
         assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
-                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 200
+                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 202
     assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED" and w.calls[0][0] == "POST"
     status, _, _ = w.transport("PUT", h.API_PREFIX + hid, h.canonical(packet))
     assert status == 410 and w.sc_tasks() == []
@@ -813,7 +813,7 @@ def test_review_fixes(w):
             assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
                                    json={"status": status, "actor": "founder"}).status_code == 409, status
         assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT,
-                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 200
+                               json={"status": "CANCELLED", "actor": "founder"}).status_code == 202
     assert h._backoff(10_000) == h.MAX_BACKOFF
     with Session(w.prod) as s:
         rows = s.scalars(select(models.AuditLog.after)).all() + s.scalars(select(models.AuditLog.before)).all()
@@ -870,13 +870,13 @@ def test_race(w, when):
     def put_then_cancel(method, path, body):   # the founder cancels while the PUT is on the wire
         out = w.transport(method, path, body)
         with w.on("prod"):
-            assert cancel().status_code == 200
+            assert cancel().status_code == 202
         return out
     t0 = datetime.now(timezone.utc)
     assert w.sync(put_then_cancel if when == "in_put" else None, now=t0)["requests"][0]["outcome"] == "IMPORTED"
     if when == "after_put":
         with w.on("prod"):
-            assert cancel().status_code == 200
+            assert cancel().status_code == 202
     if when == "sc_first":   # Stage C records the cancel before production tries to activate
         w.transport("POST", f"{h.API_PREFIX}{hid}/cancel", h.canonical({"payload_sha256": sha,
                                                                          "reason": "PRODUCTION_CANCELLED"}))
@@ -932,9 +932,12 @@ def test_scope_view():
 
 # ------------------------------------------------------------------------------------------------ R4a hardening
 def _cancel_prod(w):
+    """The founder's cancel: 200 once Stage C acknowledged it, else 202 (pending, the task stays WAITING_EXTERNAL)."""
     with w.on("prod"):
-        assert w.client(host=PROD_HOST).post("/tasks/TASK-0001/status", headers=ASSERT,
-                                             json={"status": "CANCELLED", "actor": "founder"}).status_code == 200
+        r = w.client(host=PROD_HOST).post("/tasks/TASK-0001/status", headers=ASSERT,
+                                          json={"status": "CANCELLED", "actor": "founder"})
+    assert r.status_code in (200, 202)
+    return r
 
 
 def test_no_row_lock_across_activation(w):
@@ -949,7 +952,7 @@ def test_no_row_lock_across_activation(w):
         assert h.sync(s, probe)["requests"][0]["outcome"] == "IMPORTED"
         assert h.sync(s, probe)["requests"][0]["outcome"] == "ACTIVATED"
         assert h.sync(s, probe)["requests"][0]["outcome"] == "OBSERVED"
-    assert [locked for _, locked in seen] == [False, False, False] and seen[1][0] == "activate"
+    assert [locked for _, locked in seen] == [False] * 4 and [p for p, _ in seen[1:3]] == ["activate"] * 2
 
 
 def test_cancel_while_activation_in_flight(w):
@@ -1262,6 +1265,13 @@ def test_f3(w):
     """R4a-2 finding 3: a native authorization replaced a live handoff grant, and replacing a finished one left the
     handoff task's revision (its report seq) unchanged."""
     old, imp = _activated_and_polled(w)
+    with Session(w.sc) as s:   # production's confirmation lease ran out: no grant until a poll renews it
+        row = s.get(models.ControlState, h.KEY_PREFIX + old["id"])
+        row.value = {**row.value, "confirmed_until": datetime.now(timezone.utc).isoformat()}
+        s.commit()
+    assert _authorize(w, imp.key, handoff_id=old["id"], payload_sha256=old["payload_sha256"]).status_code == 422
+    w.sync(now=datetime.now(timezone.utc) + timedelta(seconds=61))
+    assert w.calls[-2:] == [("POST", f"{h.API_PREFIX}{old['id']}/activate"), ("GET", h.API_PREFIX + old["id"])]
     assert _authorize(w, imp.key, handoff_id=old["id"], payload_sha256=old["payload_sha256"]).status_code == 201
     with Session(w.sc) as s:
         s.add(models.Task(key="TASK-0900", title="native", objective="o", success_criteria="s"))
@@ -1312,3 +1322,53 @@ def test_f1r(w):
     remote = w.prod_task().context["remote_stage_c"]
     assert remote["cancellation"] == remote["superseded"]["cancellation"] == "ACKNOWLEDGED"
     assert _open_sc(w) == [] and w.sync()["requests"] == []
+
+
+def _try_claim(w, key, at):
+    """A claim at Stage C time `at`, rolled back: its denial, or None where it would be allowed."""
+    with Session(w.sc) as s:
+        task = s.scalar(select(models.Task).where(models.Task.key == key))
+        run = models.AgentRun(task_id=task.id, status=enums.AgentRunStatus.STARTED, tool_calls={"stage_c": True})
+        s.add(run)
+        s.flush()
+        denial = control.consume_write_authorization(s, task, SHA, run.id, now=at)
+        s.rollback()
+        return denial
+
+
+def test_c(w):
+    """Founder rule: Stage C is unreachable for every cancel while the activation already on the wire lands. The cancel
+    is never shown done (202, WAITING_EXTERNAL, PENDING) and is retried until acknowledged; with no renewal from
+    production, the grant issued in that window can be consumed only until the confirmation lease ends."""
+    hid = w.release().json()["id"]
+    sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
+    assert w.sync()["requests"][0]["outcome"] == "IMPORTED"
+    seen = []
+
+    def lost(method, path, body):
+        if path.endswith("/cancel"):
+            return 0, b"", None
+        if not path.endswith("/activate"):
+            return w.transport(method, path, body)
+        seen.append(_cancel_prod(w).status_code)
+        out = w.transport(method, path, body)
+        [imp] = w.sc_tasks()
+        seen.append(_authorize(w, imp.key, handoff_id=hid, payload_sha256=sha).status_code)
+        return out
+    t0 = datetime.now(timezone.utc)
+    out = w.sync(lost, now=t0)["requests"][0]
+    assert seen == [202, 201] and (out["outcome"], out["cancel"]) == ("CANCEL_PENDING", "UNREACHABLE")
+    task = w.prod_task()
+    assert task.status == enums.TaskStatus.WAITING_EXTERNAL and h.desk_view(task)["cancellation"] == "PENDING"
+    with w.on("prod"):
+        assert w.client().post("/tasks/TASK-0001/status", headers=ASSERT, json={
+            "status": "DONE", "actor": "founder", "evidence": "x"}).status_code == 409
+    [imp] = w.sc_tasks()
+    end = t0 + h.ACTIVATION_LEASE
+    assert _try_claim(w, imp.key, end - timedelta(seconds=1)) is None      # the documented bound
+    assert _try_claim(w, imp.key, end) == "stage_c_handoff_unconfirmed" and _consumed(w) == 0
+    assert w.sync(lost, now=t0 + timedelta(minutes=1))["requests"][0]["outcome"] == "UNREACHABLE"
+    assert w.prod_task().status == enums.TaskStatus.WAITING_EXTERNAL
+    assert w.sync(now=t0 + timedelta(hours=1))["requests"][0]["outcome"] == "ACKNOWLEDGED"
+    assert w.prod_task().status == enums.TaskStatus.CANCELLED and _open_sc(w) == []
+    assert w.sync(now=t0 + timedelta(hours=2))["requests"] == []
