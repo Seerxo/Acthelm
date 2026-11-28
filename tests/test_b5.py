@@ -1240,8 +1240,8 @@ def _in_window(w, reach):
 
 
 def test_f2(w):
-    """R4a-2 finding 2, founder rule: a committed cancel never authorizes remote work. The route withdraws the import
-    on Stage C before production records the cancel, so the in-flight activation is refused and no grant exists."""
+    """R4a-2 finding 2, founder rule: the cancel route records the cancel (pending) and withdraws the import on Stage C
+    in the same request, before the task is shown CANCELLED: the activation sent after it is refused, no grant exists."""
     hid, out, seen = _in_window(w, reach=True)
     [imp] = w.sc_tasks()
     assert seen == [("route", False), 422] and _activated(w, hid) == 0   # no transaction across the request
@@ -1378,21 +1378,22 @@ def test_r1(w):
     """R4a-2 pre-review 1: the poll renewed the confirmation lease without re-checking the release, and while agents
     were paused. A paused production, a changed task or a reopened dependency stops renewals (fail closed)."""
     old, _ = _activated_and_polled(w)
-    act = ("POST", f"{h.API_PREFIX}{old['id']}/activate")
+    act, get = ("POST", f"{h.API_PREFIX}{old['id']}/activate"), ("GET", h.API_PREFIX + old["id"])
     t = datetime.now(timezone.utc)
-    w.calls.clear()
-    w.sync(now=t + timedelta(seconds=61))
-    assert w.calls[0] == act                                    # live: renewed
-    w.sync(paused=True, now=t + timedelta(seconds=122))
-    assert act not in w.calls[1:]
+
+    def tick(n, **kw):
+        w.calls.clear()
+        w.sync(now=t + timedelta(seconds=61 * n), **kw)
+        return w.calls
+    assert tick(1) == [act, get]                                # live: renewed, then polled
+    assert tick(2, paused=True) == [get]
     _depend(w, enums.TaskStatus.BACKLOG)
-    w.sync(now=t + timedelta(seconds=183))
+    assert tick(3) == [get]
     _depend(w, enums.TaskStatus.DONE)
     with Session(w.prod) as s:
         s.scalar(select(models.Task).where(models.Task.key == "TASK-0001")).objective = "edited"
         s.commit()
-    w.sync(now=t + timedelta(seconds=244))
-    assert w.calls.count(act) == 1 and w.calls[-1] == ("GET", h.API_PREFIX + old["id"])
+    assert tick(4) == [get]
 
 
 def test_r3(w):
@@ -1400,7 +1401,9 @@ def test_r3(w):
     committed meanwhile left production DONE with Stage C cancelled. The cancel is now validated and recorded (pending)
     under the lock first: while it is withdrawn on Stage C, a concurrent DONE is refused."""
     _reach(w)
-    w.release()
+    _, imp = _activated_and_polled(w)
+    _pipeline(w, imp.key)                         # a fresh verified merge report: DONE alone would be accepted
+    assert w.sync(now=datetime.now(timezone.utc) + timedelta(seconds=61))["requests"][0]["outcome"] == "OBSERVED"
     seen = []
     real = w.transport
 

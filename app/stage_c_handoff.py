@@ -737,15 +737,16 @@ def _activate(db: Session, task_id: int, transport: Transport, now: datetime) ->
     """Phase 2: re-verify the founder release under the task row lock, then send the activation WITHOUT the lock (a
     slow Stage C reply never blocks the founder's cancel). The founder's cancellation (POST /tasks/{key}/status) takes
     the same lock, so production never sends an activation after it observed a committed cancel. A cancel that commits
-    after the lock is released is withdrawn on Stage C by the cancel route itself before it commits (withdraw), so the
-    activation, whether still to be sent or already in flight, finds the import cancelled: activation and cancellation
-    serialize on Stage C's handoff row, and a cancelled or expired import is never activated, authorized or claimed.
-    Guarantee and its limit: once production has committed a cancel that Stage C acknowledged, no grant for the import
-    can be issued or consumed, and the task closes (CANCELLED) only then. If Stage C did not acknowledge it, the task
-    stays WAITING_EXTERNAL with its cancellation PENDING and sync retries it until it does; meanwhile an activation or
-    renewal decided before the cancel committed can still reach Stage C, so a grant can be issued and consumed until
-    the confirmation lease it carries ends: at most ACTIVATION_LEASE after the cancel committed (production never
-    decides a confirmation after that; plus clock skew between the hosts). Production re-checks under the lock as soon
+    after the lock is released is recorded as PENDING and then withdrawn on Stage C by the cancel route itself
+    (withdraw) before the task is shown CANCELLED: activation and cancellation serialize on Stage C's handoff row, and
+    a cancelled or expired import is never activated, authorized or claimed afterwards.
+    Guarantee and its limit: production shows a handed-off task CANCELLED only after Stage C acknowledged the
+    withdrawal, and from that acknowledgement no grant for the import can be issued or consumed. Between the pending
+    cancel's commit and the acknowledgement, an activation or renewal decided before the commit can still land and a
+    grant can be issued and consumed: for the length of the route's one withdrawal request (DEADLINE_S) when Stage C is
+    reachable, otherwise until the confirmation lease ends, at most ACTIVATION_LEASE after the cancel committed
+    (production never decides a confirmation after it; plus clock skew between the hosts), while the task stays
+    WAITING_EXTERNAL with its cancellation PENDING and sync retries the cancel. Production re-checks under the lock as soon
     as this reply returns and sends the cancel in the same tick (cancel_import revokes the bound grant; a run already
     started stops at its next owner check). Closing the lease window entirely would need the row lock across the
     request (removed on purpose: R4a finding 3) or Stage C calling production, which it never does.
