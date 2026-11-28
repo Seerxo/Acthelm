@@ -117,7 +117,7 @@ def test_pg_cancel_activate(engine, first):
                 errors.append(e.code)
     with Session(engine) as holder:
         _task(holder, key, lock=True)
-        order = [h.cancel_import, h.activate_import]
+        order = [h.cancel_import, lambda s, i, p: h.activate_import(s, i, p, sent_at=datetime.now(timezone.utc))]
         threads = [threading.Thread(target=run, args=(fn,)) for fn in (order if first == "cancel" else order[::-1])]
         for t in threads:
             t.start()

@@ -587,9 +587,11 @@ def _backoff(failures: int) -> timedelta:
 def sync(db: Session, transport: Transport | None = None, *, paused: bool = False,
          now: datetime | None = None) -> dict:
     """Deterministic, model-free, bounded: cancellations first, then (unless agents are paused) new deliveries, then
-    status polls; at most REQUESTS_PER_TICK work items (an activation that finds a cancel committed while it was on
-    the wire also sends that cancel: at most two more requests). No DB lock or transaction is held across a network
-    call."""
+    status polls; at most REQUESTS_PER_TICK work items. A poll is two requests (the confirmation renewal, then the
+    GET), and an activation that finds a cancel committed while it was on the wire also sends that cancel (at most two
+    more). Confirmation leases ride on polls: with more delivered handoffs than the per-tick budget renews within
+    ACTIVATION_LEASE, or polls backing off after failures, leases lapse and Stage C refuses grants (fail closed) until
+    the next renewal. No DB lock or transaction is held across a network call."""
     if not sender_enabled():
         return {"handoff": "disabled"}
     transport = transport or http_transport
