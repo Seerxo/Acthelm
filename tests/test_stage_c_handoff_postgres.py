@@ -132,3 +132,50 @@ def test_pg_cancel_activate(engine, first):
         assert task.status == enums.TaskStatus.CANCELLED
         assert h.grant_denial(s, task, {}) is not None
         assert s.get(models.ControlState, h.KEY_PREFIX + hid).value["cancelled_at"]
+
+
+def _packet(issued):
+    p = {"version": 1, "id": str(uuid.uuid4()), "origin": "production", "origin_task_key": "TASK-0001",
+         "repository": "seerxo/acthelm", "issued_at": issued.isoformat(),
+         "expires_at": (issued + timedelta(hours=1)).isoformat(), "risk": "LOW", "kind": "code_change",
+         "task": BODY}
+    p["payload_sha256"] = h.digest(p)
+    return p
+
+
+def test_pg_origin(engine, monkeypatch):
+    """R4a-2 finding 4: two first imports of one production task with different ids, interleaved inside
+    _retire_superseded (nothing committed yet to lock), both committed. One open import per production task."""
+    now = datetime.now(timezone.utc)
+    p1, p2 = _packet(now - timedelta(minutes=1)), _packet(now)
+    a_in, b_done, out = threading.Event(), threading.Event(), {}
+    real = h._retire_superseded
+
+    def retire(db, origin, hid, at):
+        real(db, origin, hid, at)
+        if hid == p1["id"]:
+            a_in.set()
+            b_done.wait(2)                  # B would finish here unless it waits for A
+    monkeypatch.setattr(h, "_retire_superseded", retire)
+
+    def run(p, after=None):
+        if after:
+            after.wait(10)
+        with Session(engine) as s:
+            try:
+                out[p["id"]] = h.import_packet(s, p["id"], p)[0]
+            except h.HandoffError as e:
+                s.rollback()
+                out[p["id"]] = e.code
+        if after:
+            b_done.set()
+    threads = [threading.Thread(target=run, args=(p1,)), threading.Thread(target=run, args=(p2, a_in))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+        assert not t.is_alive()
+    with Session(engine) as s:
+        live = [t for t in s.scalars(select(models.Task)) if t.status != enums.TaskStatus.CANCELLED]
+    assert out == {p1["id"]: 201, p2["id"]: 201}
+    assert [t.context["remote_stage_c"]["id"] for t in live] == [p2["id"]]

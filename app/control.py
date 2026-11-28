@@ -176,16 +176,30 @@ def authorize_pilot(db: Session, task_key: str, sha: str, *, founder: str, ttl: 
     now = now or datetime.now(timezone.utc)
     if not _TASK_KEY.match(task_key) or not _SHA.match(sha) or not (timedelta(0) < ttl <= AUTH_MAX_TTL):
         raise ValueError("authorization needs a task key, a 40-hex source SHA and a ttl up to one hour")
-    # Lock order task -> grant -> handoff row, the same as a claim and the handoff cancel/activation.
-    task = db.scalar(select(models.Task).where(models.Task.key == task_key).with_for_update())
+    # Lock order task -> grant -> handoff row, the same as a claim and the handoff cancel/activation. The task that
+    # holds the current grant is locked too (both tasks in key order, before the grant): replacing its grant changes
+    # its reported state. Its key is peeked unlocked and re-checked under the grant lock.
+    peek = db.scalar(select(models.ControlState).where(models.ControlState.key == PILOT_AUTHORIZATION)
+                     .execution_options(populate_existing=True))
+    held = peek.value.get("task_key") if peek is not None and isinstance(peek.value, dict) else None
+    held = held if isinstance(held, str) and held != task_key else None
+    locked = {t.key: t for t in db.scalars(select(models.Task).where(models.Task.key.in_({task_key, held} - {None}))
+                                           .order_by(models.Task.key).with_for_update())}
+    task = locked.get(task_key)
     if task is None:
         raise ValueError(f"{task_key} does not exist")
     row = db.scalar(select(models.ControlState).where(models.ControlState.key == PILOT_AUTHORIZATION)
                     .with_for_update().execution_options(populate_existing=True))
     before = dict(row.value) if row and isinstance(row.value, dict) else None
+    if before is not None and before.get("task_key") not in (task_key, held):   # the grant moved since the peek
+        db.rollback()
+        return authorize_pilot(db, task_key, sha, founder=founder, ttl=ttl, now=now, handoff_id=handoff_id,
+                               payload_sha256=payload_sha256)
     binding = stage_c_handoff.authorization_binding(db, task, handoff_id, payload_sha256, now)
-    if binding is not None and before is not None and before.get("task_key") != task_key:
-        # One outstanding authorized handoff at a time: never replace another task's live or in-flight grant.
+    if (before is not None and before.get("task_key") != task_key
+            and (binding is not None or before.get("handoff_id"))):
+        # One outstanding authorized handoff at a time: never replace another task's live or in-flight grant, whether
+        # the new grant or the current one is the handoff's.
         live = before.get("consumed_at") is None and (_utc(before.get("expires_at")) or now) > now
         run_id = before.get("consumed_by_run_id")
         run = db.get(models.AgentRun, run_id) if type(run_id) is int else None
@@ -199,6 +213,8 @@ def authorize_pilot(db: Session, task_key: str, sha: str, *, founder: str, ttl: 
         db.add(row)
     else:
         row.value, row.updated_by = value, founder
+    if (previous := locked.get((before or {}).get("task_key"))) is not None and previous is not task:
+        models.bump_revision(previous)   # its reported grant changed: a handed-off task reports it as a new revision
     audit.record(db, actor=founder, action="stage-c.authorization.issue", entity_type="control_state",
                  entity_key=PILOT_AUTHORIZATION, reason=f"{task_key} @ {sha[:7]}", before=before, after=value)
     db.commit()

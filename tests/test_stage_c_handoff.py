@@ -114,6 +114,8 @@ def w(monkeypatch):
                  "API_AUTH_MODE": "enforce", "COMPANY_OS_GIT_SHA": SHA, "API_HOST_IPS": "10.0.6.1"}.items():
         monkeypatch.setenv(k, v)
     monkeypatch.delenv("ENABLE_AUTONOMOUS_CODE_WRITE", raising=False)
+    # The founder's cancel route cannot reach Stage C unless a test says so (_reach): the worker path withdraws.
+    monkeypatch.setattr(h, "http_transport", lambda method, path, body: (0, b"", None))
 
     async def identity(token, **kw):   # a Cloudflare service-token assertion is never a founder
         return {"founder-assertion": FOUNDER}.get(token)
@@ -952,20 +954,22 @@ def test_no_row_lock_across_activation(w):
 
 def test_cancel_while_activation_in_flight(w):
     """R4a finding 3: a founder cancel that commits while the (now unlocked) activation request is on the wire is
-    never overwritten: production records no activation, and the cancel withdraws the import on Stage C next tick."""
+    never overwritten: production records no activation, and withdraws the import on Stage C in the same tick."""
     hid = w.release().json()["id"]
     sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
     assert w.sync()["requests"][0]["outcome"] == "IMPORTED"
 
     def cancel_then_send(method, path, body):
-        _cancel_prod(w)
+        if path.endswith("/activate"):
+            _cancel_prod(w)
         return w.transport(method, path, body)
-    assert w.sync(cancel_then_send)["requests"][0]["outcome"] == "CANCEL_PENDING"
+    out = w.sync(cancel_then_send)["requests"][0]
+    assert (out["outcome"], out["cancel"]) == ("CANCEL_PENDING", "ACKNOWLEDGED")
     remote = w.prod_task().context["remote_stage_c"]
     assert remote["cancel_requested_at"] and remote["delivery"] == "IMPORTED"
     with Session(w.prod) as s:
         assert s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.activation")) is None
-    assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED"
+    assert w.sync()["requests"] == []
     [imp] = w.sc_tasks()
     assert imp.status == enums.TaskStatus.CANCELLED
     assert _authorize(w, imp.key, handoff_id=hid, payload_sha256=sha).status_code == 422
@@ -1166,3 +1170,124 @@ def test_lost_replies_are_idempotent(w):
     with Session(w.sc) as s:
         assert s.scalar(select(func.count()).select_from(models.AuditLog)
                         .where(models.AuditLog.action == "handoff.cancel")) == 1
+
+
+# ------------------------------------------------------------------------------------------------ R4a-2 review
+def _reach(w):
+    w.mp.setattr(h, "http_transport", w.transport)
+
+
+def _consumed(w):
+    with Session(w.sc) as s:
+        return s.scalar(select(func.count()).select_from(models.AuditLog).where(
+            models.AuditLog.action == "stage-c.authorization.consume"))
+
+
+def _packet(issued, origin="TASK-0001"):
+    p = {"version": 1, "id": str(uuid.uuid4()), "origin": "production", "origin_task_key": origin,
+         "repository": "seerxo/acthelm", "issued_at": issued.isoformat(),
+         "expires_at": (issued + timedelta(hours=1)).isoformat(), "risk": "LOW", "kind": "code_change",
+         "task": {k: v for k, v in BODY.items()}}
+    p["payload_sha256"] = h.digest(p)
+    return p
+
+
+def test_f1(w):
+    """R4a-2 finding 1: the founder cancels (Stage C unreachable from the route) while the renewal PUT is on the wire
+    and Stage C answers ACTIVE_IMPORT. The restore dropped the cancel: the old live import stayed open for good."""
+    old = w.release().json()
+    w.sync()
+    _sc_activate(w, old["id"], old["payload_sha256"])
+    w.sync(now=datetime.now(timezone.utc) + timedelta(hours=25))
+    new = w.release().json()
+
+    def put_then_cancel(method, path, body):
+        out = w.transport(method, path, body)
+        _cancel_prod(w)
+        return out
+    assert w.sync(put_then_cancel)["requests"][0]["outcome"] == "HTTP_409"
+    assert [w.sync()["requests"][0]["outcome"] for _ in range(2)] == ["ACKNOWLEDGED_SUPERSEDED", "ACKNOWLEDGED"]
+    assert w.calls[-2:] == [("POST", f"{h.API_PREFIX}{old['id']}/cancel"), ("POST", f"{h.API_PREFIX}{new['id']}/cancel")]
+    assert _open_sc(w) == [] and w.prod_task().context["remote_stage_c"]["cancellation"] == "ACKNOWLEDGED"
+
+
+def _in_window(w, reach):
+    """A cancel commits after the activation's lock release, before its POST; the founder authorizes and a worker
+    claims on Stage C right after the activation request was served."""
+    if reach:
+        _reach(w)
+    hid = w.release().json()["id"]
+    sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
+    assert w.sync()["requests"][0]["outcome"] == "IMPORTED"
+    seen = []
+
+    def cancel_then_send(method, path, body):
+        if not path.endswith("/activate"):
+            return w.transport(method, path, body)
+        _cancel_prod(w)
+        out = w.transport(method, path, body)
+        [imp] = w.sc_tasks()
+        seen.append(_authorize(w, imp.key, handoff_id=hid, payload_sha256=sha).status_code)
+        return out
+    return hid, w.sync(cancel_then_send)["requests"][0], seen
+
+
+def test_f2(w):
+    """R4a-2 finding 2, founder rule: a committed cancel never authorizes remote work. The route withdraws the import
+    on Stage C before production records the cancel, so the in-flight activation is refused and no grant exists."""
+    hid, out, seen = _in_window(w, reach=True)
+    [imp] = w.sc_tasks()
+    assert seen == [422] and _activated(w, hid) == 0
+    assert _claim(w, imp.key) is not None and _consumed(w) == 0
+    assert w.prod_task().context["remote_stage_c"]["cancellation"] == "ACKNOWLEDGED"
+
+
+def test_f2b(w):
+    """The residual window (the route cannot reach Stage C): the activation lands and a grant can be issued, but
+    production re-checks under its lock right after the reply and withdraws the import in the same tick."""
+    hid, out, seen = _in_window(w, reach=False)
+    [imp] = w.sc_tasks()
+    assert seen == [201] and out["outcome"] == "CANCEL_PENDING" and out["cancel"] == "ACKNOWLEDGED"
+    assert _claim(w, imp.key) is not None and _consumed(w) == 0
+    with Session(w.sc) as s:
+        assert s.get(models.ControlState, control.PILOT_AUTHORIZATION) is None
+
+
+def test_f3(w):
+    """R4a-2 finding 3: a native authorization replaced a live handoff grant, and replacing a finished one left the
+    handoff task's revision (its report seq) unchanged."""
+    old, imp = _activated_and_polled(w)
+    assert _authorize(w, imp.key, handoff_id=old["id"], payload_sha256=old["payload_sha256"]).status_code == 201
+    with Session(w.sc) as s:
+        s.add(models.Task(key="TASK-0900", title="native", objective="o", success_criteria="s"))
+        s.commit()
+    assert _authorize(w, "TASK-0900").status_code == 422                     # live
+    assert _claim(w, imp.key) is None
+    assert _authorize(w, "TASK-0900").status_code == 422                     # in flight
+    with Session(w.sc) as s:
+        for run in s.scalars(select(models.AgentRun)):
+            run.status = enums.AgentRunStatus.SUCCEEDED
+        s.commit()
+        rev = s.scalar(select(models.Task.revision).where(models.Task.key == imp.key))
+    assert _authorize(w, "TASK-0900").status_code == 201
+    with Session(w.sc) as s:
+        assert s.scalar(select(models.Task.revision).where(models.Task.key == imp.key)) == rev + 1
+
+
+def test_f4(w):
+    """R4a-2 finding 4: a late PUT of an older packet retired the newer import, or, once that was cancelled, opened an
+    orphan. Stage C keeps the newest issue time per production task and refuses anything older."""
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=10)
+    p1, p2 = _packet(t0), _packet(t0 + timedelta(minutes=1))
+    with Session(w.sc) as s:
+        assert h.import_packet(s, p2["id"], p2)[0] == 201
+        for cancel in (False, True):
+            if cancel:
+                h.cancel_import(s, p2["id"], p2["payload_sha256"])
+            with pytest.raises(h.HandoffError) as e:
+                h.import_packet(s, p1["id"], p1)
+            s.rollback()
+            assert e.value.code == "SUPERSEDED"
+            if not cancel:
+                assert h.import_packet(s, p2["id"], p2)[0] == 200
+    assert _open_sc(w) == [] and len(w.sc_tasks()) == 1
