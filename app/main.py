@@ -754,21 +754,15 @@ def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = D
            else approval_identity.principal_of(request))
     if body.status == enums.TaskStatus.READY and not _may_requeue(who):
         raise HTTPException(403, "only the founder or a host operator may make a task READY")
-    # Worker-recorded error markers are facts: a status caller may neither write one nor overwrite one (erasing a
-    # "PR closed" marker would turn a closed PR's task back into a retryable repair).
-    reserved = (stage_c_worker.REPAIR_INTERRUPTED, stage_c_worker.JOB_UNFINISHED, stage_c_ci.MERGE_NOT_RECORDED,
-                stage_c_worker.PR_CLOSED, "PR_FAILED", "superseded:")
-    # B5: the founder's cancel of a handed-off task withdraws it on Stage C BEFORE production records the cancel (no
-    # lock or transaction is held across that request), so a committed cancel never leaves a grant consumable there.
-    withdrawn = []
-    if (body.status == enums.TaskStatus.CANCELLED and stage_c_handoff.released(task)
-            and not (body.error and (body.error.startswith(reserved) or (task.error or "").startswith(reserved)))):
-        withdrawn = stage_c_handoff.withdraw(db, task)
     # Same row lock as worker.recover_stale's claim recovery: a person's takeover (even a same-status
     # one, which changes no column) and the worker's requeue serialize, and each sees the other's result.
     db.refresh(task, with_for_update=True)
     if task.status in _FOUNDER_ONLY_TASK_STATES:
         who = approval_identity.require_founder(request)  # a closed or reviewed task is changed by the founder only
+    # Worker-recorded error markers are facts: a status caller may neither write one nor overwrite one (erasing a
+    # "PR closed" marker would turn a closed PR's task back into a retryable repair).
+    reserved = (stage_c_worker.REPAIR_INTERRUPTED, stage_c_worker.JOB_UNFINISHED, stage_c_ci.MERGE_NOT_RECORDED,
+                stage_c_worker.PR_CLOSED, "PR_FAILED", "superseded:")
     if body.error and (body.error.startswith(reserved) or (task.error or "").startswith(reserved)):
         db.rollback()
         raise HTTPException(422, "that error marker is recorded by the worker, not set through the status route")
@@ -789,7 +783,15 @@ def update_task_status(key: str, body: schemas.TaskStatusUpdate, db: Session = D
         db.rollback()
         raise HTTPException(409, f"{task.key}: {refusal}")
     if body.status == enums.TaskStatus.CANCELLED:
-        stage_c_handoff.request_cancel(db, task, actor=who.id, withdrawn=withdrawn)
+        stage_c_handoff.request_cancel(db, task, actor=who.id)
+        if stage_c_handoff.cancel_unconfirmed(task):
+            # B5: the validated cancel is durable first (pending: from here every other status change is refused),
+            # then Stage C withdraws the import with no lock or transaction held across the request, then what it
+            # acknowledged is recorded under the lock again. The task is CANCELLED only once Stage C acknowledged.
+            db.commit()
+            withdrawn = stage_c_handoff.withdraw(db, task)
+            db.refresh(task, with_for_update=True)
+            stage_c_handoff.request_cancel(db, task, actor=who.id, withdrawn=withdrawn)
         if stage_c_handoff.cancel_unconfirmed(task):
             # Stage C has not acknowledged the withdrawal: never shown as cancelled. 202, the task stays
             # WAITING_EXTERNAL with its handoff cancellation PENDING; the worker retries and closes it on acknowledgement.
