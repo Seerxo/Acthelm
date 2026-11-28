@@ -9,4 +9,6 @@ Requires=docker.service
 [Service]
 Type=oneshot
 ExecStart=/usr/bin/flock -n /run/stage-c-arm.lock /opt/company-os/scripts/stage-c-arm
-TimeoutStartSec=300
+# Docker calls are bounded inside the script; its worst case is 460 s (see scripts/stage-c-arm). The whole run gets
+# more than that, so the fallback stop and its read-back always run before systemd could stop the script.
+TimeoutStartSec=540

@@ -11,8 +11,7 @@ production claims here.
 
 - **Fact:** `Seerxo/Acthelm` is the only active repository for development and CI (renamed from
   `Seerxo/seerxo-os`; same repository). Code identities name `seerxo/acthelm`. Stage C publishes from the fork
-  `seerxo-agent/acthelm` (GitHub fork of `Seerxo/Acthelm`). `seerxo-agent/seerxo-os` left the fork network and can
-  no longer open PRs upstream; it has no Stage C role. `Seerxo/os` is archived and
+  `seerxo-agent/seerxo-os`, which is a separate repository and keeps its name. `Seerxo/os` is archived and
   read-only; it has no release, migration or CI role.
 - **Production identity:** the signed production release identity is moved to `seerxo/acthelm` only by a
   founder-signed policy and a founder-signed ledger rebase; a code change never moves it. Until that migration is

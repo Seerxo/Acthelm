@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -299,35 +298,6 @@ class StageCAuthorize(BaseModel):
     """The SHA is never client-supplied: the server binds the authorization to the deployed source."""
     task_key: str = Field(pattern=r"^[A-Z]+-\d{1,6}$")
     minutes: int = Field(default=30, ge=1, le=60)
-    # Required for a task imported by the production handoff (app/stage_c_handoff.py), refused for any other.
-    handoff_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
-    payload_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    # The SHA the founder was shown; a mismatch with the deployed source is a 409, never a silent rebind.
-    expected_source_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
-
-
-class HandoffRelease(BaseModel):
-    """POST /tasks/{key}/handoff: names the task only. Any content field is refused (the packet is built server-side
-    from the stored task)."""
-    model_config = ConfigDict(extra="forbid")
-
-
-class HandoffActivate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-
-class HandoffCancel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    reason: Literal["PRODUCTION_CANCELLED"]
-
-
-class StageCRefreshReconcile(BaseModel):
-    task_key: str = Field(pattern=r"^[A-Z]+-\d{1,6}$")
-    pr_number: int = Field(gt=0, le=9999999999)
-    final_head: str = Field(pattern=r"^[0-9a-f]{40}$")
-    merge_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
 
 
 class StageCStanding(BaseModel):
@@ -335,15 +305,6 @@ class StageCStanding(BaseModel):
     paths: list[str] = Field(min_length=1, max_length=20)
     days: int = Field(default=3, ge=1, le=7)
     max_per_day: int = Field(default=1, ge=1, le=3)
-
-
-class StageCTask(BaseModel):
-    """A founder's code task from the Desk. Write paths are re-checked against the allowed Stage C files."""
-    title: str = Field(min_length=3, max_length=200)
-    objective: str = Field(min_length=3, max_length=2000)
-    success_criteria: str = Field(min_length=3, max_length=2000)
-    paths: list[str] = Field(min_length=1, max_length=20)
-    context: list[str] = Field(default_factory=list, max_length=10)
 
 
 class StageCRevoke(BaseModel):
