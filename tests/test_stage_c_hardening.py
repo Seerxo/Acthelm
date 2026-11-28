@@ -253,22 +253,17 @@ def test_ordinary_task_names_are_not_credentials(name):
                                   '"' + " " * (1 << 20) + "!", "token" + " " * (1 << 20) + "!"],
                          ids=["letters", "json-dotted", "dotted", "spaces", "tabs", "literal-spaces", "key-spaces"])
 def test_jwt_scanning_stays_linear_on_hostile_megabyte_inputs(text):
-    """1 MiB of hostile input is scanned in linear time. The bound is on this process's CPU time, which other load
-    on the host does not inflate: on the production gateway's single-CPU checks container the slowest case
-    ("dotted") measured 3.1-3.8 s alone, while a wall-clock 5 s bound failed there under full-suite load. The old
-    quadratic scan took over 4 s for 16 KiB of "a" alone, i.e. hours for 1 MiB, so 8 s CPU still separates linear
-    from quadratic by more than three orders of magnitude. A wall-clock alarm stays as the hang guard."""
     import time
     import signal
     def timed_out(*_):
-        raise AssertionError("credential scanning exceeded the 30 s wall-clock hang guard")
+        raise AssertionError("credential scanning exceeded five seconds")
     previous = signal.signal(signal.SIGALRM, timed_out)
-    signal.setitimer(signal.ITIMER_REAL, 30)
-    started = time.process_time()
+    signal.setitimer(signal.ITIMER_REAL, 5)
+    started = time.monotonic()
     try:
         stage_c_runner._redact_secrets(text)
         stage_c_runner._outgoing_credentials(("diff --git a/t.py b/t.py\n+" + text + "\n").encode())
-        assert time.process_time() - started < 8   # CPU seconds; was over 4 s for 16 KiB of "a" alone
+        assert time.monotonic() - started < 5   # was over 4 s for 16 KiB of "a" alone
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
