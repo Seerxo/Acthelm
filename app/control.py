@@ -205,6 +205,18 @@ def authorize_pilot(db: Session, task_key: str, sha: str, *, founder: str, ttl: 
         run = db.get(models.AgentRun, run_id) if type(run_id) is int else None
         if live or (run is not None and run.status == enums.AgentRunStatus.STARTED):
             raise ValueError("another task's Stage C authorization is still live; revoke it or let it finish first")
+    if before is not None and before.get("task_key") == task_key and before.get("consumed_at") is not None:
+        # This task's own grant is in use: never replace it (and its run binding) while the run that consumed it is
+        # still STARTED. Once that run has ended, the founder re-authorizes as usual. A STARTED run older than the
+        # worker's own Stage C stale cutoff (worker.recover_stale: one hour) is a lost run, not one still going: the
+        # founder's authority for its recovery may be issued before the worker marks it FAILED.
+        run_id = before.get("consumed_by_run_id")
+        run = db.get(models.AgentRun, run_id) if type(run_id) is int else None
+        started = run.started_at if run is not None else None
+        started = started.replace(tzinfo=timezone.utc) if started is not None and started.tzinfo is None else started
+        if (run is not None and run.status == enums.AgentRunStatus.STARTED
+                and (started is None or now - started < timedelta(hours=1))):
+            raise ValueError("this task's Stage C authorization is in use by a run still going; let it finish first")
     value = {"task_key": task_key, "repository": AUTH_REPOSITORY, "source_sha": sha, "action": PILOT_ACTION,
              "issued_at": now.isoformat(), "expires_at": (now + ttl).isoformat(), "issued_by": founder,
              "consumed_at": None, "consumed_by_run_id": None, **(binding or {})}

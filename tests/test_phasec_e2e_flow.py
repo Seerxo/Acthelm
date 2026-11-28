@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app import control, enums, models, stage_c_ci, stage_c_merge_gate, stage_c_verify, stage_c_worker, watchdog, worker
 from app import stage_c_handoff as h
-from tests.test_stage_c_handoff import ADMIN, ASSERT, SHA, World, _authorize, w  # noqa: F401  (w is the two-app fixture)
+from tests.test_b5 import ADMIN, ASSERT, SHA, World, _authorize, w  # noqa: F401  (w is the two-app fixture)
 from tests.test_stage_c_worker import Reviewer, accept_host, pipeline, runtime_report
 from tests.test_worker import SPECS
 

@@ -468,12 +468,12 @@ def delivery_denial(db: Session, task: models.Task, now: datetime) -> str | None
 
 
 def withdraw(db: Session, task: models.Task, transport: "Transport | None" = None) -> list[str]:
-    """Called by the founder's CANCELLED status change after its founder check and BEFORE it locks and commits: Stage C
-    withdraws the import (the superseded live one first, then the current one) before production records the cancel,
-    so a cancel production has committed never leaves a grant consumable on Stage C, even with an activation already
-    in flight (Stage C serializes cancel against activation on the handoff row and against a claim on the task -> grant
-    locks; a cancelled import is never activated, authorized or claimed). Ends the read transaction first: no
-    transaction is held across the request. Returns the ids Stage C acknowledged, in order; request_cancel records
+    """Called by the founder's CANCELLED status change after it validated the change and committed the cancel request
+    (pending) under the task lock: Stage C withdraws the import (the superseded live one first, then the current one)
+    before production closes the task, so a task production shows CANCELLED never leaves a grant consumable on Stage C,
+    even with an activation already in flight (Stage C serializes cancel against activation on the handoff row and
+    against a claim on the task -> grant locks; a cancelled import is never activated, authorized or claimed). Ends
+    the read transaction first: no transaction is held across the request. Returns the ids Stage C acknowledged, in order; request_cancel records
     only those that still match the record under the lock. Unreachable: nothing is acknowledged, the task stays
     WAITING_EXTERNAL (cancel PENDING) and the worker's sync retries the cancel (the remaining window: see _activate)."""
     remote = _remote(task)
@@ -495,6 +495,22 @@ def cancel_unconfirmed(task: models.Task) -> bool:
     with back-off, until Stage C acknowledges it; only then is the task closed (_close_cancelled)."""
     remote = _remote(task)
     return bool(remote and remote.get("cancel_requested_at") and remote.get("cancellation") != "ACKNOWLEDGED")
+
+
+def renewal_denial(db: Session, task: models.Task) -> str | None:
+    """Why production must not renew an activated import's confirmation lease (ACTIVATION_LEASE) now: the founder's
+    cancel, a closed task, the task's text changed since its release, or a dependency reopened. The founder's release
+    itself was verified at activation and its audit is immutable; its expiry is enforced by Stage C (first
+    authorization only). A renewal is not sent while agents are paused either (sync)."""
+    remote = _remote(task)
+    if (remote is None or remote.get("cancel_requested_at") or task.status != enums.TaskStatus.WAITING_EXTERNAL
+            or remote.get("delivery") != "DELIVERED"):
+        return "RELEASE_WITHDRAWN"
+    if source_digest(task) != remote.get("source_sha256"):
+        return "TASK_CHANGED"
+    if _open_dependencies(db, task):
+        return "DEPENDENCIES_OPEN"
+    return None
 
 
 def request_cancel(db: Session, task: models.Task, *, actor: str, now: datetime | None = None,
@@ -642,8 +658,11 @@ def sync(db: Session, transport: Transport | None = None, *, paused: bool = Fals
            [("deliver", i) for i in deliveries] + [("poll", i) for _, i in sorted(polls)]
     for kind, task_id in work[:REQUESTS_PER_TICK]:
         try:
-            done.append({"cancel": _cancel, "activate": _activate, "deliver": _deliver,
-                         "poll": _poll}[kind](db, task_id, transport, now))
+            if kind == "poll":   # a paused production confirms nothing: Stage C stops new claims when the lease ends
+                done.append(_poll(db, task_id, transport, now, renew=not paused))
+            else:
+                done.append({"cancel": _cancel, "activate": _activate, "deliver": _deliver}[kind](
+                    db, task_id, transport, now))
         except Exception:  # noqa: BLE001 - one bad row must not stop the others or the worker tick
             db.rollback()
             log.exception("stage c handoff %s failed for task id %s", kind, task_id)
@@ -740,15 +759,16 @@ def _activate(db: Session, task_id: int, transport: Transport, now: datetime) ->
     """Phase 2: re-verify the founder release under the task row lock, then send the activation WITHOUT the lock (a
     slow Stage C reply never blocks the founder's cancel). The founder's cancellation (POST /tasks/{key}/status) takes
     the same lock, so production never sends an activation after it observed a committed cancel. A cancel that commits
-    after the lock is released is withdrawn on Stage C by the cancel route itself before it commits (withdraw), so the
-    activation, whether still to be sent or already in flight, finds the import cancelled: activation and cancellation
-    serialize on Stage C's handoff row, and a cancelled or expired import is never activated, authorized or claimed.
-    Guarantee and its limit: once production has committed a cancel that Stage C acknowledged, no grant for the import
-    can be issued or consumed, and the task closes (CANCELLED) only then. If Stage C did not acknowledge it, the task
-    stays WAITING_EXTERNAL with its cancellation PENDING and sync retries it until it does; meanwhile an activation or
-    renewal decided before the cancel committed can still reach Stage C, so a grant can be issued and consumed until
-    the confirmation lease it carries ends: at most ACTIVATION_LEASE after the cancel committed (production never
-    decides a confirmation after that; plus clock skew between the hosts). Production re-checks under the lock as soon
+    after the lock is released is recorded as PENDING and then withdrawn on Stage C by the cancel route itself
+    (withdraw) before the task is shown CANCELLED: activation and cancellation serialize on Stage C's handoff row, and
+    a cancelled or expired import is never activated, authorized or claimed afterwards.
+    Guarantee and its limit: production shows a handed-off task CANCELLED only after Stage C acknowledged the
+    withdrawal, and from that acknowledgement no grant for the import can be issued or consumed. Between the pending
+    cancel's commit and the acknowledgement, an activation or renewal decided before the commit can still land and a
+    grant can be issued and consumed: for the length of the route's one withdrawal request (DEADLINE_S) when Stage C is
+    reachable, otherwise until the confirmation lease ends, at most ACTIVATION_LEASE after the cancel committed
+    (production never decides a confirmation after it; plus clock skew between the hosts), while the task stays
+    WAITING_EXTERNAL with its cancellation PENDING and sync retries the cancel. Production re-checks under the lock as soon
     as this reply returns and sends the cancel in the same tick (cancel_import revokes the bound grant; a run already
     started stops at its next owner check). Closing the lease window entirely would need the row lock across the
     request (removed on purpose: R4a finding 3) or Stage C calling production, which it never does.
@@ -803,19 +823,19 @@ def _activate(db: Session, task_id: int, transport: Transport, now: datetime) ->
     return {"task": task.key, "kind": "activate", "outcome": "ACTIVATED"}
 
 
-def _poll(db: Session, task_id: int, transport: Transport, now: datetime) -> dict:
+def _poll(db: Session, task_id: int, transport: Transport, now: datetime, renew: bool = True) -> dict:
     task = db.get(models.Task, task_id)
     remote = _remote(task) if task is not None else None
     if remote is None:
         return {"task_id": task_id, "kind": "poll", "outcome": "SKIPPED"}
     hid = remote["id"]
-    confirm = not remote.get("cancel_requested_at") and task.status == enums.TaskStatus.WAITING_EXTERNAL \
-        and remote.get("delivery") == "DELIVERED"
+    confirm = renew and renewal_denial(db, task) is None
     db.commit()
     if confirm:
-        # Renew the activation's lease (ACTIVATION_LEASE). `now` is no later than the read above that saw no cancel,
-        # so no renewal ever starts after a committed cancel. The reply is not needed: the snapshot reports the state,
-        # and a failed renewal only lets the lease run out (fail closed).
+        # Renew the activation's lease (ACTIVATION_LEASE). `now` is no later than the read above that found nothing
+        # stopping it, so a cancel, edit or reopened dependency committed after that read ends new claims within one
+        # lease. The reply is not needed: the snapshot reports the state, and a failed renewal only lets the lease run
+        # out (fail closed).
         transport("POST", f"{API_PREFIX}{hid}/activate",
                   canonical({"payload_sha256": remote["payload_sha256"], "sent_at": now.isoformat()}))
     path = API_PREFIX + hid
@@ -1353,15 +1373,21 @@ def snapshot(db: Session, hid: str, now: datetime | None = None) -> dict:
     an owner change to a running attempt."""
     from app import stage_c, stage_c_state, worker
     now = now or datetime.now(timezone.utc)
+    # One snapshot of committed state for the whole report: on PostgreSQL a REPEATABLE READ transaction (READ
+    # COMMITTED would let a commit land between the task read and the handoff, grant and run reads). SQLite reads in
+    # one transaction are already consistent. The connection's isolation level is reset when it returns to the pool.
+    db.rollback()
+    if db.get_bind().dialect.name == "postgresql":
+        db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
     row = _row(db, hid)
     if row is None:
         raise HandoffError(404, "NOT_FOUND")
     value = row.value if isinstance(row.value, dict) else {}
     task_key = value.get("task_key")   # written once, at import
-    # seq is the task row's revision, read in the SAME row read as the task's own content. Every change to the task,
+    # seq is the task row's revision, read in the same snapshot as everything else reported. Every change to the task,
     # its handoff row (activation, cancel) or its grant bumps that revision in the same transaction
-    # (models.Task.revision), and those other rows are read AFTER the task row: whatever they show is at least as new
-    # as the label. A committed change therefore always carries a revision above any older projection's.
+    # (models.Task.revision), so the report is exactly the committed state that revision labels. (Time alone can
+    # change the grant view, an expiry or the confirmation lease, under the same seq; _observe accepts that.)
     db.expire_all()
     task = db.scalar(select(models.Task).where(models.Task.key == task_key)) if task_key else None
     seq = task.revision if task is not None else 0
