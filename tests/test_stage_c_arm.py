@@ -166,7 +166,8 @@ case "$*" in
       unreadable) echo unreadable > "$FAKE_STATE.stopped" ;;
       *) echo false > "$FAKE_STATE.stopped" ;;
     esac ;;
-  *" config --images company-worker") echo "${FAKE_RESOLVED_IMAGE:-$COMPANY_OS_IMAGE_WORKER}"; exit 0 ;;
+  *" config --images company-worker") [ "${FAKE_CONFIG_FAIL:-}" != 1 ] || exit 1
+    echo "${FAKE_RESOLVED_IMAGE:-$COMPANY_OS_IMAGE_WORKER}"; exit 0 ;;
   compose*) [ "$FAKE_COMPOSE_FAIL" != 1 ] || exit 1
     case "$*" in *stage-c-pilot*) [ "${FAKE_HANG_ARM:-}" != 1 ] || { echo "arming" >> "$FAKE_LOG"; exec sleep 60; } ;; esac
     [ "${FAKE_COMPOSE_NOOP:-}" != 1 ] || exit 0          # reports success, changes nothing
@@ -312,15 +313,16 @@ def test_timeout_budget_covers_the_worst_case():
     limit covers every bounded Docker call site (10 s + 5 s grace) and both Compose runs (60 s + 5 s grace)."""
     import re
     script = (ROOT / "scripts/stage-c-arm").read_text()
-    calls = len(re.findall(r"\$\(docker |^\s*docker stop |\$\(resolved_worker_image", script, re.M))
+    calls = len(re.findall(r"\$\(docker |^\s*docker stop ", script, re.M))
     body = script[script.index("decide() {"):script.index("\n}\n", script.index("decide() {"))]
     calls += len(re.findall(r"\$\(docker ", body)) * script.count("post=$(decide)")   # decide re-runs on ARM
     compose_runs = len(re.findall(r"(?:^\s*if |&& )compose ", script, re.M))   # the arm and the disarm recreate
-    assert (calls, compose_runs) == (21, 2), "update the documented worst case and this test together"
+    calls += compose_runs                                        # each Compose run first resolves the worker image
+    assert (calls, compose_runs) == (22, 2), "update the documented worst case and this test together"
     assert 'STAGE_C_ARM_DOCKER_TIMEOUT:-10' in script and 'STAGE_C_ARM_COMPOSE_TIMEOUT:-60' in script
     unit = (ROOT / "scripts/systemd/stage-c-arm.service").read_text()
     limit = int(re.search(r"^TimeoutStartSec=(\d+)$", unit, re.M).group(1))
-    assert limit > calls * (10 + 5) + compose_runs * (60 + 5) + 3 * 5          # plus three 5 s log lines
+    assert limit > calls * (10 + 5) + compose_runs * (60 + 5) + 3 * 5     # + three bounded log lines
 
 
 def test_sh_hung_compose_is_killed_and_the_worker_stopped(tmp_path):
@@ -700,7 +702,7 @@ def test_stop_timeout_covers_the_interrupted_disarm():
     import re
     unit = (ROOT / "scripts/systemd/stage-c-arm.service").read_text()
     stop = int(re.search(r"^TimeoutStopSec=(\d+)$", unit, re.M).group(1))
-    assert stop > (60 + 5) + (60 + 5) + 3 * (10 + 5) + 3 * 5       # call in progress + the whole disarm
+    assert stop > (60 + 5) + (60 + 5) + 4 * (10 + 5) + 3 * 5       # call in progress + the whole disarm (incl. its config)
 
 
 # ----------------------------------------------- R4a-1v7: API image, re-check before Compose, dry-run drift
@@ -721,11 +723,19 @@ def test_sh_rechecked_right_before_compose(tmp_path):
     assert "reason=changed_before_arm" in log
 
 
-def test_sh_compose_must_resolve_the_pinned_worker_image(tmp_path):
-    """A Compose configuration that resolves another worker image never starts a write-enabled worker."""
-    out, log, ovr = _run(tmp_path, "ARM TASK-0100", "false", extra={"FAKE_RESOLVED_IMAGE": "sha256:" + "9" * 64})
-    assert out.returncode == 1 and "stage-c-pilot.compose.yml up" not in log and "action=ARM " not in log
-    assert "reason=compose_image_mismatch" in log and not ovr.exists()
+@pytest.mark.parametrize("bad", ["image", "unread"])
+@pytest.mark.parametrize("path", ["arm", "disarm", "recreate"])
+def test_sh_every_start_resolves_the_pinned_image(tmp_path, path, bad):
+    """R4a-1v8 review: no Compose start (arm, disarm, --recreate) runs unless the worker image resolved from exactly the
+    configuration it starts is the pinned one; otherwise nothing starts and the worker is stopped and read back."""
+    extra = {"image": {"FAKE_RESOLVED_IMAGE": "sha256:" + "9" * 64}, "unread": {"FAKE_CONFIG_FAIL": "1"}}[bad]
+    decision, armed, args = {"arm": ("ARM TASK-0100", "false", ()),
+                             "disarm": ("DISARM stage_c_authorization_missing", "true", ()),
+                             "recreate": ("DISARM stage_c_authorization_missing", "true", ("--recreate",))}[path]
+    out, log, ovr = _run(tmp_path, decision, armed, *args, extra=extra)
+    assert " up -d " not in log and "action=ARM " not in log and "action=DISARM " not in log
+    assert "docker stop -t 5 company-worker" in log and "action=DISARM_STOP" in log and not ovr.exists()
+    assert out.returncode == (0 if path == "disarm" else 1)
 
 
 @pytest.mark.parametrize("drift", ["none", "image", "sha", "publish"])

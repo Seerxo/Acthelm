@@ -331,13 +331,14 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
 - The decision is trusted only from the pinned API image: the API image, the pause fence and the authorization are
   read from one `company-api` container by its immutable ID, which must run exactly `COMPANY_OS_IMAGE_API`
   (`DISARM api_image_mismatch` / `pause_fence_off` otherwise). The decision is asked again immediately before the
-  arming Compose (`changed_before_arm`) and once more after it; before anything starts, the worker image Compose
-  resolves (base file, override and pins) must be the pinned worker image (`compose_image_mismatch`). `--dry-run`
-  applies the same image, SHA, fence and publication checks as a tick. Between Compose and the read-back the
-  worker's own claim check (`control.write_authorization_denial`) still refuses any write its one-task grant does
-  not allow.
+  arming Compose (`changed_before_arm`) and once more after it. Every Compose start (arm, disarm, `--recreate`)
+  first resolves the worker image from exactly the configuration it will start and starts nothing unless that is the
+  pinned worker image; a mismatch or an unreadable configuration fails the start, and the worker is then stopped and
+  read back (`DISARM_STOP`, or `DISARM_FAILED`). `--dry-run` applies the same image, SHA, fence and publication checks
+  as a tick. Between Compose and the read-back the worker's own claim check (`control.write_authorization_denial`)
+  still refuses any write its one-task grant does not allow.
 - Stopping the unit (or any unexpected exit) between writing the override and logging `ARM` runs one verified disarm
-  (`reason=interrupted`) and ends the run non-zero; `TimeoutStopSec=240` covers that disarm (190 s worst case). The
+  (`reason=interrupted`) and ends the run non-zero; `TimeoutStopSec=240` covers that disarm (205 s worst case). The
   unit is then left failed, which persists in `systemctl --failed` until reset, so an interrupted arm is visible even
   with the timer stopped; an unverifiable disarm still logs `DISARM_FAILED`. SIGKILL cannot be trapped: after a
   `kill -9` run `stage-c-arm` (or `--recreate`) by hand before leaving the timer stopped.
@@ -348,8 +349,8 @@ On the Stage C host the flag is no longer left on. It follows the founder's exis
   plus the time the Docker calls of that tick take), even mid-run: the worker is recreated and the run is recovered
   as an infrastructure interruption (`stage_c_worker.recover_interrupted`). Every Docker call is time-bounded
   (10 s, 60 s per Compose run, 5 s kill grace; an override of these limits is honoured only between 1 s and the
-  default); one run's worst case is 460 s (445 s of Docker calls plus three 5 s log lines), under the unit's 480 s
-  limit. If Docker itself does not respond, no disarm can be confirmed and no stop time is promised: each tick that reaches
+  default); one run's worst case is 475 s (Docker calls, Compose runs and log lines), under the unit's 540 s limit. If
+  Docker itself does not respond, no disarm can be confirmed and no stop time is promised: each tick that reaches
   the script (the unit requires `docker.service`) logs `DISARM_FAILED`, exits 1 and removes the override, so nothing
   re-arms from it. A worker armed by this timer (`STAGE_C_ARMED_TASK` set) still refuses any write without its task's
   valid one-task grant; a worker started some other way without that variable falls under the ordinary checks below. Every new claim, including a CI repair,

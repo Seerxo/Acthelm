@@ -52,8 +52,8 @@ cd "$DIR" 2>/dev/null || CD_OK=0
 
 # Every Docker call is time-bounded (a Compose recreate gets longer): a hung daemon or Compose run must never keep an
 # armed worker past the disarm window. A timed-out call fails like any other error, so the worker state reads UNKNOWN
-# and the script disarms (fail closed). Worst case of one run: at most 21 Docker calls (15 call sites incl. the Compose image check and the publication read; the decision, with its 3 calls, is asked three times) and 2 Compose runs, each with
-# its limit plus the 5 s kill grace, so 21*(10+5) + 2*(60+5) = 445 s, plus at most three 5 s log lines (460 s);
+# and the script disarms (fail closed). Worst case of one run: at most 22 Docker calls (14 call sites incl. the publication read; the image resolution inside each of the 2 Compose runs; the decision, with its 3 calls, is asked three times) and 2 Compose runs, each with
+# its limit plus the 5 s kill grace, so 22*(10+5) + 2*(60+5) = 460 s, plus at most three 5 s log lines = 475 s;
 # stage-c-arm.service allows more than that
 # (tests/test_stage_c_arm.py pins it), so systemd never kills the run before the fallback stop and its read-back.
 # A limit override is honoured only as 1..default seconds: 0 would disable `timeout`, more would break the budget.
@@ -162,8 +162,17 @@ if [ "$DRY" = 1 ]; then  # read-only; exit 1 when the worker may write contrary 
 fi
 
 UP_FLAGS=()
+# The ONE way this script starts the worker (arm, disarm, --recreate). Before `up` it resolves the worker image from
+# exactly the configuration `up` will use (base file, the same extra -f files, the same pins and environment) and
+# starts nothing unless that is the pinned worker image ID; an unreadable configuration fails the same way. A failure
+# returns non-zero: arm then disarms, and disarm falls back to stopping the worker and reading it back.
+# `env` runs the docker binary itself (it would bypass the docker() function), so the limits are applied here.
 compose() {  # the manual pilot command; extra -f files come first
-  # `env` runs the docker binary itself (it would bypass the docker() function), so the limit is applied here.
+  local resolved
+  resolved=$(timeout --kill-after=5 "$DOCKER_LIMIT" \
+    env -u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_ENV_FILES "${IMAGES[@]}" COMPANY_OS_GIT_SHA="$SHA" \
+    docker compose -p company-os --env-file .env -f docker-compose.yml "$@" config --images company-worker) || return 1
+  [ "$resolved" = "$EXP_WIMG" ] || return 1
   timeout --kill-after=5 "$COMPOSE_LIMIT" \
     env -u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_ENV_FILES "${IMAGES[@]}" COMPANY_OS_GIT_SHA="$SHA" \
     docker compose -p company-os --env-file .env -f docker-compose.yml "$@" \
@@ -192,12 +201,6 @@ write_override() {
 
 # A disarm counts only when verified: the recreated worker reads back unarmed, or the worker reads back as not
 # running. Anything else is DISARM_FAILED and exit 1.
-resolved_worker_image() {  # the worker image Compose would run with the override; starts nothing (Docker-call limit)
-  timeout --kill-after=5 "$DOCKER_LIMIT" \
-    env -u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_ENV_FILES "${IMAGES[@]}" COMPANY_OS_GIT_SHA="$SHA" \
-    docker compose -p company-os --env-file .env -f docker-compose.yml -f "$OVERRIDE" config --images company-worker
-}
-
 disarm() {
   local post
   trap - EXIT TERM INT HUP             # a disarm is already the cleanup; never re-entered from a trap
@@ -232,7 +235,8 @@ disarm() {
 # armed with no tick to follow (`systemctl disable --now` stops the timer too). A stop signal or an unexpected exit
 # there runs one verified disarm and ends the run non-zero; a disarm that cannot be verified is DISARM_FAILED, as
 # always. Bash runs the trap once the current bounded call returns: systemd's stop SIGTERMs the whole unit, so that is
-# at most one Compose limit (65 s) before the disarm itself (125 s); see TimeoutStopSec in stage-c-arm.service.
+# at most one Compose limit (65 s) before the disarm itself (140 s, incl. its image resolution); see TimeoutStopSec in
+# stage-c-arm.service.
 on_interrupt() {
   local rc=${1:-$?}
   trap - EXIT TERM INT HUP
@@ -305,13 +309,6 @@ if [ "$ACTION" = ARM ]; then
   # A worker armed for another task or release is not left as it is when the override cannot be written.
   if ! write_override; then
     REASON=override_write_failed
-    disarm
-    exit 1
-  fi
-  # Before anything starts: the image Compose resolves for the worker (base file plus override, pins applied) must be
-  # the pinned worker image ID, so a configuration that ignores the pin never starts a write-enabled worker.
-  if ! { post=$(resolved_worker_image 2>/dev/null) && [ "$post" = "$EXP_WIMG" ]; }; then
-    REASON=compose_image_mismatch
     disarm
     exit 1
   fi
