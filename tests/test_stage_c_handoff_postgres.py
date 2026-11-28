@@ -179,3 +179,32 @@ def test_pg_origin(engine, monkeypatch):
         live = [t for t in s.scalars(select(models.Task)) if t.status != enums.TaskStatus.CANCELLED]
     assert out == {p1["id"]: 201, p2["id"]: 201}
     assert [t.context["remote_stage_c"]["id"] for t in live] == [p2["id"]]
+
+
+def test_pg_grant_lock(engine):
+    """R4a-2 finding 3: replacing a finished handoff grant locks the handoff task (as a claim does) before the grant.
+    A native authorization waits for a held lock on that task, never deadlocks, and bumps its revision."""
+    hid, sha, key = _imported(engine)
+    fid, past = "founder:access:founder@example.invalid", datetime.now(timezone.utc) - timedelta(minutes=10)
+    with Session(engine) as s:   # issued earlier, expired now: replaceable
+        control.authorize_pilot(s, key, "c" * 40, founder=fid, handoff_id=hid, payload_sha256=sha,
+                                ttl=timedelta(minutes=1), now=past)
+        s.add(models.Task(key="TASK-0900", title="native", success_criteria="s"))
+        s.commit()
+        rev = _task(s, key).revision
+
+    def native():
+        with Session(engine) as s:
+            control.authorize_pilot(s, "TASK-0900", "c" * 40, founder=fid)
+    with Session(engine) as holder:
+        _task(holder, key, lock=True)
+        t = threading.Thread(target=native)
+        t.start()
+        t.join(1)
+        assert t.is_alive()                  # waits on the handoff task's lock
+        holder.commit()
+    t.join(30)
+    assert not t.is_alive()
+    with Session(engine) as s:
+        assert _task(s, key).revision == rev + 1
+        assert s.get(models.ControlState, control.PILOT_AUTHORIZATION).value["task_key"] == "TASK-0900"

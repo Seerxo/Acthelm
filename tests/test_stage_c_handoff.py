@@ -1212,14 +1212,18 @@ def test_f1(w):
 
 
 def _in_window(w, reach):
-    """A cancel commits after the activation's lock release, before its POST; the founder authorizes and a worker
-    claims on Stage C right after the activation request was served."""
+    """A cancel commits after the activation's lock release, before its POST; the founder authorizes on Stage C right
+    after the activation request was served. With `reach`, the route's own cancel request is recorded too, with
+    whether the route's session held a transaction across it."""
+    sessions, seen = [], []
     if reach:
-        _reach(w)
+        real = getattr(h, "withdraw", None)
+        w.mp.setattr(h, "withdraw", lambda db, task, t=None: (sessions.append(db), real(db, task, t))[1], raising=False)
+        w.mp.setattr(h, "http_transport", lambda m, p, b: (
+            seen.append(("route", any(s.in_transaction() for s in sessions))), w.transport(m, p, b))[1])
     hid = w.release().json()["id"]
     sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
     assert w.sync()["requests"][0]["outcome"] == "IMPORTED"
-    seen = []
 
     def cancel_then_send(method, path, body):
         if not path.endswith("/activate"):
@@ -1237,7 +1241,7 @@ def test_f2(w):
     on Stage C before production records the cancel, so the in-flight activation is refused and no grant exists."""
     hid, out, seen = _in_window(w, reach=True)
     [imp] = w.sc_tasks()
-    assert seen == [422] and _activated(w, hid) == 0
+    assert seen == [("route", False), 422] and _activated(w, hid) == 0   # no transaction across the request
     assert _claim(w, imp.key) is not None and _consumed(w) == 0
     assert w.prod_task().context["remote_stage_c"]["cancellation"] == "ACKNOWLEDGED"
 
@@ -1247,10 +1251,11 @@ def test_f2b(w):
     production re-checks under its lock right after the reply and withdraws the import in the same tick."""
     hid, out, seen = _in_window(w, reach=False)
     [imp] = w.sc_tasks()
-    assert seen == [201] and out["outcome"] == "CANCEL_PENDING" and out["cancel"] == "ACKNOWLEDGED"
+    assert seen == [201]
     assert _claim(w, imp.key) is not None and _consumed(w) == 0
     with Session(w.sc) as s:
         assert s.get(models.ControlState, control.PILOT_AUTHORIZATION) is None
+    assert out["outcome"] == "CANCEL_PENDING" and out["cancel"] == "ACKNOWLEDGED"
 
 
 def test_f3(w):
@@ -1291,3 +1296,19 @@ def test_f4(w):
             if not cancel:
                 assert h.import_packet(s, p2["id"], p2)[0] == 200
     assert _open_sc(w) == [] and len(w.sc_tasks()) == 1
+
+
+def test_f1r(w):
+    """The route reaches Stage C: the founder's cancel withdraws the superseded live import, then the renewal, before
+    production commits; both are recorded acknowledged and the worker has nothing left to send."""
+    _reach(w)
+    old = w.release().json()
+    w.sync()
+    _sc_activate(w, old["id"], old["payload_sha256"])
+    w.sync(now=datetime.now(timezone.utc) + timedelta(hours=25))
+    new = w.release().json()
+    _cancel_prod(w)
+    assert w.calls[-2:] == [("POST", f"{h.API_PREFIX}{old['id']}/cancel"), ("POST", f"{h.API_PREFIX}{new['id']}/cancel")]
+    remote = w.prod_task().context["remote_stage_c"]
+    assert remote["cancellation"] == remote["superseded"]["cancellation"] == "ACKNOWLEDGED"
+    assert _open_sc(w) == [] and w.sync()["requests"] == []
