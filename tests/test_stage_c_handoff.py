@@ -347,7 +347,7 @@ def _depend(w, status):
         s.commit()
 
 
-def test_open_dependencies_hold_the_handoff_back(w):
+def test_open_deps_hold(w):
     """R4a pre-review finding 2: the handoff dropped task dependencies, so an imported task could run while its
     production prerequisites were unmet. Release (and renewal) refuses while any dependency is not DONE, and a
     dependency reopened after the release refuses delivery: nothing reaches Stage C."""
@@ -364,7 +364,7 @@ def test_open_dependencies_hold_the_handoff_back(w):
 
 
 @pytest.mark.parametrize("change", ["expired", "edited"])
-def test_the_founder_renews_an_expired_or_edited_release(w, change):
+def test_founder_renews(w, change):
     """R3 finding 4: a release refused for RELEASE_EXPIRED / TASK_CHANGED was stuck for good. The founder's own new
     release (never sync) supersedes it with a new packet from the task as stored now; the old one is never sent."""
     old = w.release().json()
@@ -397,7 +397,7 @@ def test_the_founder_renews_an_expired_or_edited_release(w, change):
     assert [t.context["remote_stage_c"]["id"] for t in w.sc_tasks()] == [new["id"]]
 
 
-def test_a_superseded_release_cannot_be_put_back(w):
+def test_superseded_stays(w):
     """The old packet's founder release no longer authorizes anything once a new release superseded it."""
     w.release()
     old_remote = dict(w.prod_task().context["remote_stage_c"])
@@ -510,7 +510,7 @@ def test_renew_lost_activation_ack(w):
     assert w.calls[-1] == ("POST", f"{h.API_PREFIX}{old['id']}/cancel") and _open_sc(w) == []
 
 
-def test_cancel_before_renewal_delivery_withdraws_the_live_import(w):
+def test_cancel_pre_renewal(w):
     """R4a pre-review finding 1: Stage C activated the old import (its ack lost), the founder renewed, then cancelled
     before the renewed packet was delivered. The cancellation must withdraw the live old import by its own id, not
     only tombstone the new id; the task's cancellation is acknowledged only after both."""
@@ -570,7 +570,7 @@ def test_renew_refused(w, who):
 
 
 @pytest.mark.parametrize("code", ["RELEASE_NOT_AUTHORIZED", "HTTP_409"])
-def test_other_refusals_are_never_renewed(w, code):
+def test_refusal_no_renew(w, code):
     """Only an expired or changed release is renewable; any other refusal keeps its packet (a plain retry)."""
     old = w.release().json()
     with Session(w.prod) as s:
@@ -978,7 +978,7 @@ def test_cancel_while_activation_in_flight(w):
     assert _authorize(w, imp.key, handoff_id=hid, payload_sha256=sha).status_code == 422
 
 
-def test_activation_not_sent_after_observed_cancel(w):
+def test_no_activation_after_cancel(w):
     """The cancel committed before the activation tick: production sees it under the row lock and never sends."""
     w.release()
     w.sync()
@@ -1032,7 +1032,7 @@ def _activated_and_polled(w):
     return old, imp
 
 
-def test_activated_never_authorized_is_renewable(w):
+def test_unauthorized_renewable(w):
     """R4a finding 1: production activated the import, but the packet expired before the founder's first coding
     authorization on Stage C. Stage C refused the late authorization ("release again"), production refused to renew a
     recorded activation and Stage C refused to retire an activated import: only cancel remained. An import that was
@@ -1067,7 +1067,7 @@ def test_activated_never_authorized_is_renewable(w):
 
 
 @pytest.mark.parametrize("live", ["authorized", "ran"])
-def test_activated_live_import_is_never_renewed(w, live):
+def test_live_never_renewed(w, live):
     """An import that was authorized (or ran) is live work: production does not renew it from its report, and even a
     renewal sent anyway is refused by Stage C (ACTIVE_IMPORT) and the live record restored; nothing is retired."""
     old, imp = _activated_and_polled(w)
@@ -1097,7 +1097,7 @@ def test_activated_live_import_is_never_renewed(w, live):
     assert only.key == imp.key and len(w.sc_tasks()) == 1
 
 
-def test_finished_import_is_never_duplicated(w):
+def test_no_duplicate_import(w):
     """State audit: Stage C finished the import (DONE) while production missed its activation ack. A renewal must not
     import a second task for the same production task: Stage C refuses it and production restores the finished
     import's record, whose report carries the verified merge."""
@@ -1127,7 +1127,7 @@ def _keys(obj):
             yield from _keys(v)
 
 
-def test_superseded_record_never_carries_the_packet(w):
+def test_superseded_no_packet(w):
     """R4a finding 2: a renewal kept a copy of the old record, packet included, under remote_stage_c.superseded, and
     audit snapshots stripped only the top-level packet: the private task text reached the audit log. The superseded
     record keeps only the fields its restore and cancel paths read, and audit snapshots strip a packet at any depth."""
@@ -1142,7 +1142,7 @@ def test_superseded_record_never_carries_the_packet(w):
     assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED_SUPERSEDED"   # the cancel path still has what it needs
 
 
-def test_audit_snapshot_strips_nested_packets():
+def test_audit_strips_packets():
     from app import audit
     task = models.Task(key="TASK-0009", title="t", success_criteria="s", context={"remote_stage_c": {
         "id": "x", "packet": {"task": "secret"}, "superseded": {"id": "y", "packet": {"task": "secret"},
