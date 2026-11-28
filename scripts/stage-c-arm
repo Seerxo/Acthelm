@@ -24,6 +24,27 @@ case "${1:-}" in
   --recreate) RECREATE=1 ;;
   *) echo "usage: stage-c-arm [--dry-run|--recreate]" >&2; exit 2 ;;
 esac
+# Stage C host only, before any read or Docker call: never on the production host (a release ledger exists there) and
+# only where the root-owned Stage C host marker exists. The fixed ledger path is always checked; the variable can only
+# add a path (tests), never replace it. Release control on this host is the pinned image IDs and the source SHA
+# (pilot-images.env, .pilot-source-sha, written by the founder-run Stage C rebuild); compose-bound.sh needs the
+# release ledger that only production has, so it is never used here (docs/CODER_RUNTIME.md).
+for ledger in /var/lib/release-host/ledger/ledger.json ${STAGE_C_ARM_EXTRA_LEDGER:+"$STAGE_C_ARM_EXTRA_LEDGER"}; do
+  if [ -e "$ledger" ] || [ -L "$ledger" ]; then
+    timeout 5 logger -t stage-c-arm -- "$(date -u +%Y-%m-%dT%H:%M:%SZ) action=REFUSED reason=production_ledger task=-" \
+      2>/dev/null || true
+    echo "stage-c-arm: refusing: production release ledger present ($ledger); this runs on the Stage C host only" >&2
+    exit 3
+  fi
+done
+MARKER=/etc/acthelm/stage-c-host
+if [ -L "$MARKER" ] || [ -z "$(find "$MARKER" -maxdepth 0 -type f -user 0 ! -perm -020 ! -perm -002 2>/dev/null)" ]; then
+  timeout 5 logger -t stage-c-arm -- "$(date -u +%Y-%m-%dT%H:%M:%SZ) action=REFUSED reason=not_stage_c_host task=-" \
+    2>/dev/null || true
+  echo "stage-c-arm: refusing: no root-owned Stage C host marker at $MARKER; this runs on the Stage C host only" >&2
+  exit 4
+fi
+
 # A missing directory is not a reason to leave an armed worker as it is: the inputs then count as unreadable (below),
 # which disarms by the fallback stop. set -e never ends a run before the worker state is acted on.
 CD_OK=1
@@ -31,8 +52,8 @@ cd "$DIR" 2>/dev/null || CD_OK=0
 
 # Every Docker call is time-bounded (a Compose recreate gets longer): a hung daemon or Compose run must never keep an
 # armed worker past the disarm window. A timed-out call fails like any other error, so the worker state reads UNKNOWN
-# and the script disarms (fail closed). Worst case of one run: at most 14 Docker calls (13 call sites; the decision is asked twice) and 2 Compose runs, each with
-# its limit plus the 5 s kill grace, so 14*(10+5) + 2*(60+5) = 340 s, plus at most a few 5 s log lines;
+# and the script disarms (fail closed). Worst case of one run: at most 20 Docker calls (14 call sites incl. the Compose image check; the decision, with its 3 calls, is asked three times) and 2 Compose runs, each with
+# its limit plus the 5 s kill grace, so 20*(10+5) + 2*(60+5) = 430 s, plus at most a few 5 s log lines;
 # stage-c-arm.service allows more than that
 # (tests/test_stage_c_arm.py pins it), so systemd never kills the run before the fallback stop and its read-back.
 # A limit override is honoured only as 1..default seconds: 0 would disable `timeout`, more would break the budget.
@@ -65,10 +86,25 @@ INPUTS_OK=0
 if [ "$CD_OK" = 1 ] && [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] && [ "${#IMAGES[@]}" -eq 4 ]; then INPUTS_OK=1; fi
 
 # ---------------------------------------------------------------- decision (fail closed)
+EXP_AIMG=-; EXP_WIMG=-
+for line in "${IMAGES[@]+"${IMAGES[@]}"}"; do
+  case $line in
+    COMPANY_OS_IMAGE_API=*) EXP_AIMG=${line#*=} ;;
+    COMPANY_OS_IMAGE_WORKER=*) EXP_WIMG=${line#*=} ;;
+  esac
+done
 decide() {  # prints ARM <task> or DISARM <reason>; never fails
-  local out
+  local out info aid aimg fence
   if [ "$INPUTS_OK" != 1 ]; then echo "DISARM bad_inputs"; return 0; fi
-  out=$(docker exec -i -e PGOPTIONS='-c default_transaction_read_only=on' company-api python -I - "$SHA" \
+  # One container, by its immutable ID: the pinned API image, the pause fence and the decision all come from the same
+  # company-api container, so a replacement between these reads cannot mix them. The decision is trusted only from
+  # the pinned API image (by image ID), never from the SHA that container reports about itself.
+  info=$(docker inspect -f '{{.Id}} {{.Image}}' company-api 2>/dev/null) || info=-
+  aid=${info%% *}; aimg=${info#* }
+  if ! [[ "$aid" =~ ^[0-9a-f]{64}$ ]] || [ "$aimg" != "$EXP_AIMG" ]; then echo "DISARM api_image_mismatch"; return 0; fi
+  fence=$(docker exec "$aid" printenv CODER_PAUSE_FENCE_ENABLED 2>/dev/null) || fence=unreadable
+  if [ "$fence" != true ]; then echo "DISARM pause_fence_off"; return 0; fi
+  out=$(docker exec -i -e PGOPTIONS='-c default_transaction_read_only=on' "$aid" python -I - "$SHA" \
         2>/dev/null <<'PY' || echo "FAILED"
 import sys
 sys.path.insert(0, "/app")  # -I drops the working directory from sys.path; the image keeps the code in /app
@@ -99,6 +135,8 @@ READ_FAILED=0
 ARMED_TASK=$(docker exec company-worker sh -c 'printf "%s\n" "${STAGE_C_ARMED_TASK--}"' 2>/dev/null) || {
   ARMED_TASK=-; READ_FAILED=1; }
 RUNNING=$(docker inspect -f '{{.State.Running}}' company-worker 2>/dev/null) || RUNNING=UNKNOWN
+WIMG=$(docker inspect -f '{{.Image}}' company-worker 2>/dev/null) || WIMG=-
+WSHA=$(docker exec company-worker printenv COMPANY_OS_GIT_SHA 2>/dev/null) || WSHA=-
 
 if [ "$DRY" = 1 ]; then  # read-only; exit 1 when the worker may write contrary to the decision or cannot be read
   shown_task=$ARMED_TASK; [[ "$shown_task" =~ ^[A-Z]+-[0-9]{1,6}$ ]] || shown_task=-
@@ -106,9 +144,9 @@ if [ "$DRY" = 1 ]; then  # read-only; exit 1 when the worker may write contrary 
   shown_running=$RUNNING; [[ "$shown_running" =~ ^(true|false)$ ]] || shown_running=UNKNOWN
   echo "decision: $DECISION"
   echo "worker:   ENABLE_AUTONOMOUS_CODE_WRITE=$shown_armed STAGE_C_ARMED_TASK=$shown_task running=$shown_running"
-  if [ "$RUNNING" = false ] || [ "$ARMED" = false ] \
+  if [ "$RUNNING" = false ] || { [ "$ARMED" = false ] && [ "$RUNNING" = true ]; } \
      || { [ "$RUNNING" = true ] && [ "$ARMED" = true ] && [ "$ACTION" = ARM ] && [ "$ARMED_TASK" = "$TASK" ] \
-          && [ "$READ_FAILED" = 0 ]; }; then
+          && [ "$READ_FAILED" = 0 ] && [ "$WIMG" = "$EXP_WIMG" ] && [ "$WSHA" = "$SHA" ]; }; then
     exit 0
   fi
   exit 1
@@ -145,6 +183,12 @@ write_override() {
 
 # A disarm counts only when verified: the recreated worker reads back unarmed, or the worker reads back as not
 # running. Anything else is DISARM_FAILED and exit 1.
+resolved_worker_image() {  # the worker image Compose would run with the override; starts nothing (Docker-call limit)
+  timeout --kill-after=5 "$DOCKER_LIMIT" \
+    env -u COMPOSE_FILE -u COMPOSE_PROFILES -u COMPOSE_ENV_FILES "${IMAGES[@]}" COMPANY_OS_GIT_SHA="$SHA" \
+    docker compose -p company-os --env-file .env -f docker-compose.yml -f "$OVERRIDE" config --images company-worker
+}
+
 disarm() {
   local post
   if [ "$INPUTS_OK" = 1 ] && compose >/dev/null 2>&1 \
@@ -209,21 +253,9 @@ if [ "$ACTION" = ARM ]; then
     disarm
     exit 1
   fi
-  # The pause fence is re-checked on every ARM tick, also for a worker already armed: the API can be recreated with
-  # the fence off while the worker stays armed.
-  FENCE=$(docker exec company-api printenv CODER_PAUSE_FENCE_ENABLED 2>/dev/null) || FENCE=unreadable
-  if [ "$FENCE" != true ]; then
-    REASON=pause_fence_off
-    disarm
-    exit 1
-  fi
   # Already armed for this very task AND running the decided release (the pinned worker image and the source SHA the
   # decision was validated against): nothing to do. Anything else (another task, an older or different worker image
   # or SHA, or an unreadable one) is re-armed from the pinned images, never left armed as it is.
-  WIMG=$(docker inspect -f '{{.Image}}' company-worker 2>/dev/null) || WIMG=-
-  WSHA=$(docker exec company-worker printenv COMPANY_OS_GIT_SHA 2>/dev/null) || WSHA=-
-  EXP_WIMG=-
-  for line in "${IMAGES[@]}"; do case $line in COMPANY_OS_IMAGE_WORKER=*) EXP_WIMG=${line#*=} ;; esac; done
   # A failed read is never taken as "needs re-arming": the worker is disarmed (verified) and the tick fails.
   if [ "$READ_FAILED" = 1 ] || [ "$WIMG" = - ] || [ "$WSHA" = - ]; then
     REASON=worker_state_unknown
@@ -231,9 +263,25 @@ if [ "$ACTION" = ARM ]; then
     exit 1
   fi
   [ "$ARMED" = true ] && [ "$ARMED_TASK" = "$TASK" ] && [ "$WIMG" = "$EXP_WIMG" ] && [ "$WSHA" = "$SHA" ] && exit 0
+  # Immediately before Compose: the decision once more (pinned API image, pause fence and authorization, from one
+  # container ID), so a Stop Pilot or an API recreated with the fence off since the first read never reaches the
+  # worker. Between Compose and the read-back the worker's own claim check still refuses any write its grant does not
+  # allow: control.write_authorization_denial, the armed task's live one-task grant only, no standing fallback.
+  if ! { post=$(decide) && [ "$post" = "$DECISION" ]; }; then
+    REASON=changed_before_arm
+    disarm
+    exit 1
+  fi
   # A worker armed for another task or release is not left as it is when the override cannot be written.
   if ! write_override; then
     REASON=override_write_failed
+    disarm
+    exit 1
+  fi
+  # Before anything starts: the image Compose resolves for the worker (base file plus override, pins applied) must be
+  # the pinned worker image ID, so a configuration that ignores the pin never starts a write-enabled worker.
+  if ! { post=$(resolved_worker_image 2>/dev/null) && [ "$post" = "$EXP_WIMG" ]; }; then
+    REASON=compose_image_mismatch
     disarm
     exit 1
   fi
@@ -244,7 +292,6 @@ if [ "$ACTION" = ARM ]; then
      && post=$(docker exec company-worker printenv ENABLE_AUTONOMOUS_CODE_WRITE STAGE_C_ARMED_TASK COMPANY_OS_GIT_SHA \
                2>/dev/null) && [ "$post" = "true"$'\n'"$TASK"$'\n'"$SHA" ] \
      && post=$(docker inspect -f '{{.Image}}' company-worker 2>/dev/null) && [ "$post" = "$EXP_WIMG" ] \
-     && post=$(docker exec company-api printenv CODER_PAUSE_FENCE_ENABLED 2>/dev/null) && [ "$post" = true ] \
      && post=$(decide) && [ "$post" = "$DECISION" ]; then
     log ARM "$REASON" "$TASK"
   else

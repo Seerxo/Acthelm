@@ -368,7 +368,7 @@ def execute(db, task, spec, usable):
                     sleep=wait, before_enqueue=before_coder_enqueue, after_start=after_coder_start)
                 out = stage_c_runner.run(db, task, job, coder_call,
                                         stage_c_runner.launcher_checks("sez-company", sleep=wait), jobs_root(),
-                                        ttl=timedelta(hours=1), before_write=before_task_write)
+                                        ttl=timedelta(hours=1), before_write=before_task_write, run_id=run.id)
                 if out["outcome"] == "OWNER_CHANGED":
                     raise PublishedPRRefused(out["detail"])
             if (out["outcome"] == "READY_FOR_REVIEW" and reviewer is None
@@ -428,7 +428,8 @@ def execute(db, task, spec, usable):
                                 stage_c_runner.gh_pr_opener(REPOSITORY, "main", head_repository),
                                 before_publish=before_publish,
                                 find_pr=stage_c_runner.gh_pr_lookup(REPOSITORY, "main", head_repository),
-                                pr_absent=stage_c_runner.gh_pr_absent(REPOSITORY, "main", head_repository))
+                                pr_absent=stage_c_runner.gh_pr_absent(REPOSITORY, "main", head_repository),
+                                run_id=run.id)
     except PublishedPRRefused as refused:
         out = {"outcome": "PUBLISHED_PR_REFUSED", "reason": refused.reason}
     except Exception as error:
