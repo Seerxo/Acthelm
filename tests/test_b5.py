@@ -397,7 +397,7 @@ def test_renew(w, change):
     assert [t.context["remote_stage_c"]["id"] for t in w.sc_tasks()] == [new["id"]]
 
 
-def test_no_putback(w):
+def test_putback(w):
     """The old packet's founder release no longer authorizes anything once a new release superseded it."""
     w.release()
     old_remote = dict(w.prod_task().context["remote_stage_c"])
@@ -510,7 +510,7 @@ def test_lost_ack(w):
     assert w.calls[-1] == ("POST", f"{h.API_PREFIX}{old['id']}/cancel") and _open_sc(w) == []
 
 
-def test_cancel_old(w):
+def test_c_old(w):
     """R4a pre-review finding 1: Stage C activated the old import (its ack lost), the founder renewed, then cancelled
     before the renewed packet was delivered. The cancellation must withdraw the live old import by its own id, not
     only tombstone the new id; the task's cancellation is acknowledged only after both."""
@@ -988,7 +988,7 @@ def test_no_act(w):
     assert not [c for c in w.calls if c[1].endswith("/activate")]
 
 
-def test_deadline(monkeypatch):
+def test_dl(monkeypatch):
     """R4a finding 3: the 5 s timeout is per network operation; a reply that drips one chunk at a time kept the
     request open for as long as the peer liked. The whole request now has one deadline."""
     import time
@@ -1032,7 +1032,7 @@ def _activated_and_polled(w):
     return old, imp
 
 
-def test_renewable(w):
+def test_rn(w):
     """R4a finding 1: production activated the import, but the packet expired before the founder's first coding
     authorization on Stage C. Stage C refused the late authorization ("release again"), production refused to renew a
     recorded activation and Stage C refused to retire an activated import: only cancel remained. An import that was
@@ -1419,3 +1419,23 @@ def test_r3(w):
     w.mp.setattr(h, "http_transport", route)
     assert _cancel_prod(w).status_code == 200
     assert seen == [True, 409] and w.prod_task().status == enums.TaskStatus.CANCELLED
+
+
+def test_g2(w):
+    """R4a-2 pre-review 2: re-authorizing the same task replaced its consumed grant while the run that consumed it was
+    still STARTED. Refused until that run ends (or is lost: past the worker's stale cutoff); then allowed."""
+    old, imp = _activated_and_polled(w)
+    auth = lambda: _authorize(w, imp.key, handoff_id=old["id"], payload_sha256=old["payload_sha256"])  # noqa: E731
+    assert auth().status_code == 201 and _claim(w, imp.key) is None
+    assert auth().status_code == 422
+    with Session(w.sc) as s:   # a STARTED run past the worker's stale cutoff is lost, not going: recovery may proceed
+        for run in s.scalars(select(models.AgentRun)):
+            run.started_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        s.commit()
+    assert auth().status_code == 201 and _claim(w, imp.key) is None
+    assert auth().status_code == 422
+    with Session(w.sc) as s:
+        for run in s.scalars(select(models.AgentRun)):
+            run.status = enums.AgentRunStatus.SUCCEEDED
+        s.commit()
+    assert auth().status_code == 201
