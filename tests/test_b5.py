@@ -347,7 +347,7 @@ def _depend(w, status):
         s.commit()
 
 
-def test_open_deps_hold(w):
+def test_deps(w):
     """R4a pre-review finding 2: the handoff dropped task dependencies, so an imported task could run while its
     production prerequisites were unmet. Release (and renewal) refuses while any dependency is not DONE, and a
     dependency reopened after the release refuses delivery: nothing reaches Stage C."""
@@ -364,7 +364,7 @@ def test_open_deps_hold(w):
 
 
 @pytest.mark.parametrize("change", ["expired", "edited"])
-def test_founder_renews(w, change):
+def test_renew(w, change):
     """R3 finding 4: a release refused for RELEASE_EXPIRED / TASK_CHANGED was stuck for good. The founder's own new
     release (never sync) supersedes it with a new packet from the task as stored now; the old one is never sent."""
     old = w.release().json()
@@ -397,7 +397,7 @@ def test_founder_renews(w, change):
     assert [t.context["remote_stage_c"]["id"] for t in w.sc_tasks()] == [new["id"]]
 
 
-def test_superseded_stays(w):
+def test_putback(w):
     """The old packet's founder release no longer authorizes anything once a new release superseded it."""
     w.release()
     old_remote = dict(w.prod_task().context["remote_stage_c"])
@@ -439,7 +439,7 @@ def _refused_after_import(w, change):
 
 
 @pytest.mark.parametrize("change", ["expired", "edited"])
-def test_renew_after_import(w, change):
+def test_renew_imp(w, change):
     """R3 review finding 4: a packet refused after IMPORT but before ACTIVATION was stranded (renewal needed
     remote_task_key None). Only the founder's new release renews it; Stage C retires the old import when the new one
     arrives, so there is never a second open task and the old packet can never be activated."""
@@ -466,7 +466,7 @@ def test_renew_after_import(w, change):
                         .where(models.AuditLog.action == "handoff.supersede")) == 1
 
 
-def test_renew_refused_if_activated(w):
+def test_renew_act(w):
     """Once production recorded an activation, the old packet is Stage C's live work: never superseded."""
     old = w.release().json()
     w.sync()
@@ -481,7 +481,7 @@ def test_renew_refused_if_activated(w):
         assert s.scalar(select(models.AuditLog).where(models.AuditLog.action == "handoff.supersede")) is None
 
 
-def test_renew_lost_activation_ack(w):
+def test_lost_ack(w):
     """Stage C activated the old import but production never saw the ack. The renewal reaches Stage C, which refuses it
     (ACTIVE_IMPORT) rather than retire live work or open a second task; production then restores the old handoff
     record, so polling and cancellation address the live import again. Nothing is renewed automatically."""
@@ -510,7 +510,7 @@ def test_renew_lost_activation_ack(w):
     assert w.calls[-1] == ("POST", f"{h.API_PREFIX}{old['id']}/cancel") and _open_sc(w) == []
 
 
-def test_cancel_pre_renewal(w):
+def test_c_old(w):
     """R4a pre-review finding 1: Stage C activated the old import (its ack lost), the founder renewed, then cancelled
     before the renewed packet was delivered. The cancellation must withdraw the live old import by its own id, not
     only tombstone the new id; the task's cancellation is acknowledged only after both."""
@@ -532,7 +532,7 @@ def test_cancel_pre_renewal(w):
     assert w.sync()["requests"] == []
 
 
-def test_renew_twice_keeps_live_id(w):
+def test_renew2(w):
     """A renewal that itself expired before delivery is renewed again: the record that reached Stage C is carried
     forward, so the live import is the one restored."""
     old = w.release().json()
@@ -569,8 +569,8 @@ def test_renew_refused(w, who):
     assert len(_open_sc(w)) == 1
 
 
-@pytest.mark.parametrize("code", ["RELEASE_NOT_AUTHORIZED", "HTTP_409"])
-def test_refusal_no_renew(w, code):
+@pytest.mark.parametrize("code", ["RELEASE_NOT_AUTHORIZED", "HTTP_409"], ids=["auth", "409"])
+def test_no_renew(w, code):
     """Only an expired or changed release is renewable; any other refusal keeps its packet (a plain retry)."""
     old = w.release().json()
     with Session(w.prod) as s:
@@ -595,7 +595,7 @@ def test_cancel_first(w):
     assert w.sync()["requests"] == []
 
 
-def test_cancel_running(w):
+def test_cancel_run(w):
     hid = w.release().json()["id"]
     w.sync()
     w.sync()   # import, then activation
@@ -664,7 +664,7 @@ def test_eligible(w, change):
     assert "remote_stage_c" not in (w.prod_task().context or {}) and w.sync()["requests"] == []
 
 
-def test_approval_binding(w):
+def test_bind(w):
     """Stage C's own Desk shows an imported task's binding; only the founder may approve, naming it exactly."""
     hid = w.release().json()["id"]
     sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
@@ -789,7 +789,7 @@ def test_backoff(w):
     assert w.release().json()["delivery"] == "PENDING"                      # founder retry after a hard stop
 
 
-def test_review_fixes(w):
+def test_fixes(w):
     """Codex review of 081632a: other local writers cannot run a released task, failed cancellations cannot starve
     the rest, the backoff never overflows, and ordinary audit rows never copy the packet text."""
     from app import worker
@@ -896,7 +896,7 @@ def test_race(w, when):
     assert _claim(w, imp.key) is not None and _activated(w, hid) == 0
 
 
-def test_activate_auth(w):
+def test_act_auth(w):
     """Only the handoff service may activate; wrong digests and unknown ids are refused."""
     hid = w.release().json()["id"]
     sha = w.prod_task().context["remote_stage_c"]["payload_sha256"]
@@ -940,7 +940,7 @@ def _cancel_prod(w):
     return r
 
 
-def test_no_row_lock_across_activation(w):
+def test_no_lock(w):
     """R4a finding 3: production held the task row lock (an open transaction) during the activation HTTP call, so a
     slow Stage C reply blocked the founder's cancel. No request of any kind may run inside a DB transaction."""
     w.release()
@@ -955,7 +955,7 @@ def test_no_row_lock_across_activation(w):
     assert [locked for _, locked in seen] == [False] * 4 and [p for p, _ in seen[1:3]] == ["activate"] * 2
 
 
-def test_cancel_while_activation_in_flight(w):
+def test_cancel_act(w):
     """R4a finding 3: a founder cancel that commits while the (now unlocked) activation request is on the wire is
     never overwritten: production records no activation, and withdraws the import on Stage C in the same tick."""
     hid = w.release().json()["id"]
@@ -978,7 +978,7 @@ def test_cancel_while_activation_in_flight(w):
     assert _authorize(w, imp.key, handoff_id=hid, payload_sha256=sha).status_code == 422
 
 
-def test_no_activation_after_cancel(w):
+def test_no_act(w):
     """The cancel committed before the activation tick: production sees it under the row lock and never sends."""
     w.release()
     w.sync()
@@ -988,7 +988,7 @@ def test_no_activation_after_cancel(w):
     assert not [c for c in w.calls if c[1].endswith("/activate")]
 
 
-def test_transport_overall_deadline(monkeypatch):
+def test_dl(monkeypatch):
     """R4a finding 3: the 5 s timeout is per network operation; a reply that drips one chunk at a time kept the
     request open for as long as the peer liked. The whole request now has one deadline."""
     import time
@@ -1032,7 +1032,7 @@ def _activated_and_polled(w):
     return old, imp
 
 
-def test_unauthorized_renewable(w):
+def test_rn(w):
     """R4a finding 1: production activated the import, but the packet expired before the founder's first coding
     authorization on Stage C. Stage C refused the late authorization ("release again"), production refused to renew a
     recorded activation and Stage C refused to retire an activated import: only cancel remained. An import that was
@@ -1067,7 +1067,7 @@ def test_unauthorized_renewable(w):
 
 
 @pytest.mark.parametrize("live", ["authorized", "ran"])
-def test_live_never_renewed(w, live):
+def test_live_kept(w, live):
     """An import that was authorized (or ran) is live work: production does not renew it from its report, and even a
     renewal sent anyway is refused by Stage C (ACTIVE_IMPORT) and the live record restored; nothing is retired."""
     old, imp = _activated_and_polled(w)
@@ -1097,7 +1097,7 @@ def test_live_never_renewed(w, live):
     assert only.key == imp.key and len(w.sc_tasks()) == 1
 
 
-def test_no_duplicate_import(w):
+def test_no_dup(w):
     """State audit: Stage C finished the import (DONE) while production missed its activation ack. A renewal must not
     import a second task for the same production task: Stage C refuses it and production restores the finished
     import's record, whose report carries the verified merge."""
@@ -1127,7 +1127,7 @@ def _keys(obj):
             yield from _keys(v)
 
 
-def test_superseded_no_packet(w):
+def test_no_packet(w):
     """R4a finding 2: a renewal kept a copy of the old record, packet included, under remote_stage_c.superseded, and
     audit snapshots stripped only the top-level packet: the private task text reached the audit log. The superseded
     record keeps only the fields its restore and cancel paths read, and audit snapshots strip a packet at any depth."""
@@ -1142,7 +1142,7 @@ def test_superseded_no_packet(w):
     assert w.sync()["requests"][0]["outcome"] == "ACKNOWLEDGED_SUPERSEDED"   # the cancel path still has what it needs
 
 
-def test_audit_strips_packets():
+def test_strip():
     from app import audit
     task = models.Task(key="TASK-0009", title="t", success_criteria="s", context={"remote_stage_c": {
         "id": "x", "packet": {"task": "secret"}, "superseded": {"id": "y", "packet": {"task": "secret"},
@@ -1153,7 +1153,7 @@ def test_audit_strips_packets():
     assert task.context["remote_stage_c"]["packet"] == {"task": "secret"}   # the stored row is untouched
 
 
-def test_lost_replies_are_idempotent(w):
+def test_lost(w):
     """State audit: Stage C applies an import, an activation and a cancellation but each reply is lost (production
     sees UNREACHABLE). Each retry is answered from Stage C's stored state: one task, one activation, one tombstone."""
     hid = w.release().json()["id"]
@@ -1240,8 +1240,8 @@ def _in_window(w, reach):
 
 
 def test_f2(w):
-    """R4a-2 finding 2, founder rule: a committed cancel never authorizes remote work. The route withdraws the import
-    on Stage C before production records the cancel, so the in-flight activation is refused and no grant exists."""
+    """R4a-2 finding 2, founder rule: the cancel route records the cancel (pending) and withdraws the import on Stage C
+    in the same request, before the task is shown CANCELLED: the activation sent after it is refused, no grant exists."""
     hid, out, seen = _in_window(w, reach=True)
     [imp] = w.sc_tasks()
     assert seen == [("route", False), 422] and _activated(w, hid) == 0   # no transaction across the request
@@ -1372,6 +1372,73 @@ def test_c(w):
     assert w.sync(now=t0 + timedelta(hours=1))["requests"][0]["outcome"] == "ACKNOWLEDGED"
     assert w.prod_task().status == enums.TaskStatus.CANCELLED and _open_sc(w) == []
     assert w.sync(now=t0 + timedelta(hours=2))["requests"] == []
+
+
+def test_r1(w):
+    """R4a-2 pre-review 1: the poll renewed the confirmation lease without re-checking the release, and while agents
+    were paused. A paused production, a changed task or a reopened dependency stops renewals (fail closed)."""
+    old, _ = _activated_and_polled(w)
+    act, get = ("POST", f"{h.API_PREFIX}{old['id']}/activate"), ("GET", h.API_PREFIX + old["id"])
+    t = datetime.now(timezone.utc)
+
+    def tick(n, **kw):
+        w.calls.clear()
+        w.sync(now=t + timedelta(seconds=61 * n), **kw)
+        return w.calls
+    assert tick(1) == [act, get]                                # live: renewed, then polled
+    assert tick(2, paused=True) == [get]
+    _depend(w, enums.TaskStatus.BACKLOG)
+    assert tick(3) == [get]
+    _depend(w, enums.TaskStatus.DONE)
+    with Session(w.prod) as s:
+        s.scalar(select(models.Task).where(models.Task.key == "TASK-0001")).objective = "edited"
+        s.commit()
+    assert tick(4) == [get]
+
+
+def test_r3(w):
+    """R4a-2 pre-review 3: the cancel route withdrew on Stage C before it locked and validated the task, so a DONE
+    committed meanwhile left production DONE with Stage C cancelled. The cancel is now validated and recorded (pending)
+    under the lock first: while it is withdrawn on Stage C, a concurrent DONE is refused."""
+    _reach(w)
+    _, imp = _activated_and_polled(w)
+    _pipeline(w, imp.key)                         # a fresh verified merge report: DONE alone would be accepted
+    assert w.sync(now=datetime.now(timezone.utc) + timedelta(seconds=61))["requests"][0]["outcome"] == "OBSERVED"
+    seen = []
+    real = w.transport
+
+    def route(method, path, body):
+        if path.endswith("/cancel"):
+            with Session(w.prod) as s:
+                t = s.scalar(select(models.Task).where(models.Task.key == "TASK-0001"))
+                seen.append(bool(t.context["remote_stage_c"].get("cancel_requested_at")))
+            with w.on("prod"):
+                seen.append(w.client().post("/tasks/TASK-0001/status", headers=ASSERT, json={
+                    "status": "DONE", "actor": "founder", "evidence": "x"}).status_code)
+        return real(method, path, body)
+    w.mp.setattr(h, "http_transport", route)
+    assert _cancel_prod(w).status_code == 200
+    assert seen == [True, 409] and w.prod_task().status == enums.TaskStatus.CANCELLED
+
+
+def test_g2(w):
+    """R4a-2 pre-review 2: re-authorizing the same task replaced its consumed grant while the run that consumed it was
+    still STARTED. Refused until that run ends (or is lost: past the worker's stale cutoff); then allowed."""
+    old, imp = _activated_and_polled(w)
+    auth = lambda: _authorize(w, imp.key, handoff_id=old["id"], payload_sha256=old["payload_sha256"])  # noqa: E731
+    assert auth().status_code == 201 and _claim(w, imp.key) is None
+    assert auth().status_code == 422
+    with Session(w.sc) as s:   # a STARTED run past the worker's stale cutoff is lost, not going: recovery may proceed
+        for run in s.scalars(select(models.AgentRun)):
+            run.started_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        s.commit()
+    assert auth().status_code == 201 and _claim(w, imp.key) is None
+    assert auth().status_code == 422
+    with Session(w.sc) as s:
+        for run in s.scalars(select(models.AgentRun)):
+            run.status = enums.AgentRunStatus.SUCCEEDED
+        s.commit()
+    assert auth().status_code == 201
 
 
 def test_lease(w):
