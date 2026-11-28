@@ -102,7 +102,7 @@ def test_pg_no_reuse(engine):
 
 
 @pytest.mark.parametrize("first", ["cancel", "activate"])
-def test_pg_cancel_activate(engine, first):
+def test_pg_ca(engine, first):
     """Cancel and activation of one import, released at once from behind a held task lock: no deadlock, and the
     result is never a runnable import (a cancel always wins, before or after activation)."""
     hid, sha, key = _imported(engine, activate=False)
@@ -208,3 +208,26 @@ def test_pg_lk(engine):
     with Session(engine) as s:
         assert _task(s, key).revision == rev + 1
         assert s.get(models.ControlState, control.PILOT_AUTHORIZATION).value["task_key"] == "TASK-0900"
+
+
+def test_pg_r4(engine, monkeypatch):
+    """R4a-2 pre-review 4: the report read the task (its revision) and the handoff row in separate READ COMMITTED
+    statements, so a cancel committed in between gave a report that was never committed state: an open task, an old
+    seq, and an acknowledged cancellation. The report is one consistent snapshot."""
+    hid, sha, key = _imported(engine)
+    real, calls = h._row, []
+
+    def row(db, i, lock=False):
+        calls.append(i)
+        if len(calls) == 2:                      # after the task row was read: a cancel commits elsewhere
+            monkeypatch.setattr(h, "_row", real)
+            with Session(engine) as other:
+                h.cancel_import(other, hid, sha)
+        return real(db, i, lock)
+    monkeypatch.setattr(h, "_row", row)
+    with Session(engine) as s:
+        snap = h.snapshot(s, hid)
+    assert (snap["task"]["status"], snap["cancellation"]) == ("BACKLOG", "NONE")
+    with Session(engine) as s:
+        new = h.snapshot(s, hid)
+    assert (new["task"]["status"], new["cancellation"]) == ("CANCELLED", "ACKNOWLEDGED") and new["seq"] > snap["seq"]
